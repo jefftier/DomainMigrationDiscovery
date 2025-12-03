@@ -86,20 +86,24 @@ function Invoke-DiscoveryOnServer {
         [System.Management.Automation.PSCredential]$Credential
     )
 
-    Write-Host "[$ComputerName] Testing WinRM connectivity..." -ForegroundColor Yellow
+    Write-Host "[$ComputerName] Testing WinRM connectivity and authentication..." -ForegroundColor Yellow
     try {
-        # Test WinRM with the same credentials we'll use for Invoke-Command
+        # Test connectivity and authentication with a simple Invoke-Command
+        # This is more reliable than Test-WSMan when credentials are involved
         $testParams = @{
             ComputerName = $ComputerName
+            ScriptBlock  = { $env:COMPUTERNAME }
             ErrorAction  = 'Stop'
+            SessionOption = New-PSSessionOption -EnableNetworkAccess
         }
         if ($Credential) {
             $testParams['Credential'] = $Credential
         }
-        Test-WSMan @testParams | Out-Null
+        $testResult = Invoke-Command @testParams
+        Write-Host "[$ComputerName] Successfully connected (remote computer: $testResult)" -ForegroundColor Green
     }
     catch {
-        Write-Warning "[$ComputerName] WinRM not reachable: $($_.Exception.Message)"
+        Write-Warning "[$ComputerName] WinRM connection failed: $($_.Exception.Message)"
         return
     }
 
