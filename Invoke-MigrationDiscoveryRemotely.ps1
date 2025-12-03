@@ -35,10 +35,10 @@ if (-not (Test-Path -LiteralPath $ServerListPath)) {
 }
 
 # Read and de-duplicate server names (ignore blank/ commented lines)
-$servers = Get-Content -Path $ServerListPath |
+$servers = @(Get-Content -Path $ServerListPath |
     Where-Object { $_ -and $_.Trim() -ne "" -and -not $_.Trim().StartsWith("#") } |
     ForEach-Object { $_.Trim() } |
-    Sort-Object -Unique
+    Sort-Object -Unique)
 
 if ($servers.Count -eq 0) {
     throw "No servers found in list file: $ServerListPath"
