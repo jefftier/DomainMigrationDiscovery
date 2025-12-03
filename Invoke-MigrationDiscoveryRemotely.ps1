@@ -24,7 +24,8 @@ param(
     [string]$PlantId,
     
     [switch]$EmitStdOut,      # bubble up the summary object from each server
-    [switch]$UseParallel      # simple fan-out option
+    [switch]$UseParallel,     # simple fan-out option
+    [System.Management.Automation.PSCredential]$Credential  # Optional: if not provided, will prompt or use current user
 )
 
 Set-StrictMode -Version Latest
@@ -51,9 +52,17 @@ if (-not (Test-Path -LiteralPath $ScriptPath)) {
     throw "Discovery script not found: $ScriptPath"
 }
 
-# Optional: credentials if you're not already running as an account
-# that has admin rights on all the target servers.
-$cred = Get-Credential -Message "Enter the account that has local admin rights on all servers"
+# Get credentials if not provided and needed
+if (-not $Credential) {
+    $cred = Get-Credential -Message "Enter the account that has local admin rights on all servers (or press Cancel to use current user)"
+    if ($cred) {
+        $Credential = $cred
+    }
+    else {
+        Write-Host "No credentials provided. Will attempt to use current user context." -ForegroundColor Yellow
+        $Credential = $null
+    }
+}
 
 # Build common argument list for the discovery script
 $commonArgs = @(
@@ -79,7 +88,15 @@ function Invoke-DiscoveryOnServer {
 
     Write-Host "[$ComputerName] Testing WinRM connectivity..." -ForegroundColor Yellow
     try {
-        Test-WSMan -ComputerName $ComputerName -ErrorAction Stop | Out-Null
+        # Test WinRM with the same credentials we'll use for Invoke-Command
+        $testParams = @{
+            ComputerName = $ComputerName
+            ErrorAction  = 'Stop'
+        }
+        if ($Credential) {
+            $testParams['Credential'] = $Credential
+        }
+        Test-WSMan @testParams | Out-Null
     }
     catch {
         Write-Warning "[$ComputerName] WinRM not reachable: $($_.Exception.Message)"
@@ -89,13 +106,26 @@ function Invoke-DiscoveryOnServer {
     Write-Host "[$ComputerName] Starting discovery..." -ForegroundColor Cyan
 
     try {
+        # Create session options to enable network access (for double-hop scenarios)
+        $sessionOption = New-PSSessionOption -EnableNetworkAccess
+        
+        # Build parameters for Invoke-Command
+        $invokeParams = @{
+            ComputerName = $ComputerName
+            FilePath     = $ScriptPath
+            ArgumentList = $commonArgs
+            ErrorAction  = 'Stop'
+            SessionOption = $sessionOption
+        }
+        
+        # Add credentials only if provided
+        if ($Credential) {
+            $invokeParams['Credential'] = $Credential
+        }
+        
         # Invoke your existing script remotely.
         # -FilePath sends the local script content to the remote box and executes it there.
-        $summary = Invoke-Command -ComputerName $ComputerName `
-                                  -Credential   $Credential `
-                                  -FilePath     $ScriptPath `
-                                  -ArgumentList $commonArgs `
-                                  -ErrorAction  Stop
+        $summary = Invoke-Command @invokeParams
 
         if ($summary -and $EmitStdOut) {
             # $summary is the small summary object your script writes when -EmitStdOut is set
@@ -104,12 +134,19 @@ function Invoke-DiscoveryOnServer {
             $summary | ConvertTo-Json -Depth 4
         }
 
-        # Optional: pull the JSON file back from the remote’s OutputRoot
+        # Optional: pull the JSON file back from the remote's OutputRoot
         if ($CollectorShare) {
             Write-Host "[$ComputerName] Collecting JSON from remote OutputRoot..." -ForegroundColor Yellow
 
             # Create a session so we can copy files
-            $session = New-PSSession -ComputerName $ComputerName -Credential $Credential
+            $sessionParams = @{
+                ComputerName = $ComputerName
+                SessionOption = New-PSSessionOption -EnableNetworkAccess
+            }
+            if ($Credential) {
+                $sessionParams['Credential'] = $Credential
+            }
+            $session = New-PSSession @sessionParams
 
             try {
                 # The file name pattern in your script: COMPUTERNAME_MM-dd-yyyy.json
@@ -145,11 +182,11 @@ function Invoke-DiscoveryOnServer {
 if ($UseParallel) {
     # PowerShell 7+ ForEach-Object -Parallel
     $servers | ForEach-Object -Parallel {
-        Invoke-DiscoveryOnServer -ComputerName $_ -Credential $using:cred
+        Invoke-DiscoveryOnServer -ComputerName $_ -Credential $using:Credential
     } -ThrottleLimit 10
 }
 else {
     foreach ($server in $servers) {
-        Invoke-DiscoveryOnServer -ComputerName $server -Credential $cred
+        Invoke-DiscoveryOnServer -ComputerName $server -Credential $Credential
     }
 }
