@@ -29,6 +29,8 @@ This script performs a deep discovery of Windows workstations to identify all re
 - **Slim Output Mode**: Filter out Microsoft-built-in applications and services for cleaner output
 - **JSON Output**: Structured JSON output for easy parsing and integration
 - **Central Share Support**: Optionally copy results to a central network share
+- **Remote Execution**: Launcher script for executing discovery on multiple servers via PowerShell Remoting
+- **Parallel Processing**: Support for parallel execution across multiple servers (PowerShell 7+)
 - **Headless Operation**: Designed for automated execution without user interaction
 - **Multi-Profile Support**: Scans all user profiles on the system
 - **Error Handling**: Robust error handling with detailed logging
@@ -104,6 +106,97 @@ This script performs a deep discovery of Windows workstations to identify all re
     -SlimOnlyRunningServices
 ```
 
+## Remote Execution
+
+For executing discovery on multiple remote workstations, use the `Invoke-MigrationDiscoveryRemotely.ps1` launcher script. This script uses PowerShell Remoting (PSRemoting) to execute the discovery script on multiple servers in parallel or sequentially.
+
+### Remote Execution Requirements
+
+- **PowerShell Remoting**: WinRM must be enabled and configured on target servers
+- **Credentials**: An account with local administrator rights on all target servers
+- **Network Access**: The jump host must be able to reach target servers via WinRM (typically port 5985/5986)
+- **PowerShell Version**: 
+  - PowerShell 5.1+ for sequential execution
+  - PowerShell 7+ for parallel execution (`-UseParallel`)
+
+### Server List File
+
+Create a text file containing one server name per line. Blank lines and lines starting with `#` are ignored:
+
+```
+# Production Servers
+SERVER01
+SERVER02
+SERVER03
+
+# Development Servers
+DEV-SERVER01
+DEV-SERVER02
+```
+
+### Remote Execution Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `ServerListPath` | String | Yes | - | Path to text file containing server names (one per line) |
+| `ScriptPath` | String | No | `.\Get-WorkstationDiscovery.ps1` | Path to the discovery script |
+| `RemoteOutputRoot` | String | No | `C:\temp\MigrationDiscovery\out` | Local path on remote servers for JSON output |
+| `RemoteLogRoot` | String | No | `C:\temp\MigrationDiscovery\logs` | Local path on remote servers for log files |
+| `CollectorShare` | String | No | - | UNC path where collected JSON files will be copied (e.g., `\\fileserver\MigrationDiscovery\workstations`) |
+| `OldDomainFqdn` | String | Yes | - | FQDN of the old domain to detect |
+| `NewDomainFqdn` | String | Yes | - | FQDN of the new domain |
+| `OldDomainNetBIOS` | String | No | - | NetBIOS name of the old domain |
+| `NewDomainNetBIOS` | String | No | - | NetBIOS name of the new domain |
+| `PlantId` | String | No | - | Optional plant/facility identifier |
+| `EmitStdOut` | Switch | No | `$false` | Emit summary JSON to stdout for each server |
+| `UseParallel` | Switch | No | `$false` | Execute discovery in parallel (requires PowerShell 7+) |
+
+### Example: Sequential Remote Execution
+
+```powershell
+.\Invoke-MigrationDiscoveryRemotely.ps1 `
+    -ServerListPath ".\servers.txt" `
+    -OldDomainFqdn "olddomain.com" `
+    -NewDomainFqdn "newdomain.com" `
+    -PlantId "PLANT001" `
+    -CollectorShare "\\fileserver\MigrationDiscovery\workstations"
+```
+
+### Example: Parallel Remote Execution (PowerShell 7+)
+
+```powershell
+.\Invoke-MigrationDiscoveryRemotely.ps1 `
+    -ServerListPath ".\servers.txt" `
+    -OldDomainFqdn "olddomain.com" `
+    -NewDomainFqdn "newdomain.com" `
+    -PlantId "PLANT001" `
+    -CollectorShare "\\fileserver\MigrationDiscovery\workstations" `
+    -UseParallel `
+    -EmitStdOut
+```
+
+### How Remote Execution Works
+
+1. **Server List Processing**: The launcher reads the server list file, removes blank/commented lines, and de-duplicates server names
+2. **Connectivity Check**: For each server, WinRM connectivity is tested before attempting discovery
+3. **Remote Execution**: The discovery script is executed on each remote server using `Invoke-Command` with the provided credentials
+4. **File Collection** (optional): If `CollectorShare` is specified, JSON output files are copied from each remote server's `RemoteOutputRoot` to the collector share
+5. **Error Handling**: Failures on individual servers are logged but don't stop execution on other servers
+
+### Remote Execution Output
+
+- **On Remote Servers**: JSON and log files are written to the specified `RemoteOutputRoot` and `RemoteLogRoot` directories
+- **On Collector Share**: If `CollectorShare` is specified, JSON files are copied with the same naming pattern: `{COMPUTERNAME}_{MM-dd-yyyy}.json`
+- **Console Output**: Progress messages and errors are displayed in the console, with optional summary JSON output when `-EmitStdOut` is used
+
+### Notes on Remote Execution
+
+- The launcher script will prompt for credentials if not already running with appropriate permissions
+- Remote servers must have the discovery script accessible (either locally or via a network share)
+- The `-UseParallel` switch uses PowerShell 7+ `ForEach-Object -Parallel` with a throttle limit of 10 concurrent executions
+- If a server is unreachable or discovery fails, execution continues with the remaining servers
+- JSON files are copied using `Copy-Item -FromSession`, which requires an active PSSession
+
 ## Output Format
 
 The script generates a JSON file named `{COMPUTERNAME}_{MM-dd-yyyy}.json` in the specified output directory.
@@ -155,6 +248,14 @@ The script generates a JSON file named `{COMPUTERNAME}_{MM-dd-yyyy}.json` in the
   "SecurityAgents": {
     "CrowdStrike": {...},
     "Qualys": {...}
+  },
+  "QuestConfig": {
+    "RegPath": "HKLM:\\SOFTWARE\\WOW6432NODE\\Quest\\On Demand Migration For Active Directory\\ODMAD_AD",
+    "AgentKey": "...",
+    "DeviceName": "...",
+    "DomainName": "...",
+    "TenantId": "...",
+    "Hostname": "..."
   },
   "Detection": {
     "OldDomain": {

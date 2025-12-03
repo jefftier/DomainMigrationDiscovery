@@ -740,6 +740,35 @@ function Get-SecurityAgentsTenantInfo {
     }
 }
 
+function Get-QuestOdmadConfig {
+    [CmdletBinding()]
+    param($Log)
+    if ($Log) { $Log.Write('Detect: starting Quest ODMAD configuration check') }
+
+    $regPath = 'SOFTWARE\\WOW6432NODE\\Quest\\On Demand Migration For Active Directory\\ODMAD_AD'
+    
+    # Read each registry value safely
+    $agentKey = Get-RegistryValueMultiView -Hive LocalMachine -Path $regPath -Name 'AgentKey'
+    $deviceName = Get-RegistryValueMultiView -Hive LocalMachine -Path $regPath -Name 'DeviceName'
+    $domainName = Get-RegistryValueMultiView -Hive LocalMachine -Path $regPath -Name 'DomainName'
+    $tenantId = Get-RegistryValueMultiView -Hive LocalMachine -Path $regPath -Name 'TenantId'
+    $hostname = Get-RegistryValueMultiView -Hive LocalMachine -Path $regPath -Name 'Hostname'
+    
+    # If no values were found, return null
+    if (-not $agentKey -and -not $deviceName -and -not $domainName -and -not $tenantId -and -not $hostname) {
+        return $null
+    }
+    
+    [pscustomobject]@{
+        RegPath   = 'HKLM:\SOFTWARE\WOW6432NODE\Quest\On Demand Migration For Active Directory\ODMAD_AD'
+        AgentKey  = if ($agentKey) { $agentKey.String } else { $null }
+        DeviceName = if ($deviceName) { $deviceName.String } else { $null }
+        DomainName = if ($domainName) { $domainName.String } else { $null }
+        TenantId   = if ($tenantId) { $tenantId.String } else { $null }
+        Hostname   = if ($hostname) { $hostname.String } else { $null }
+    }
+}
+
 function Get-LocalGroupMembersSafe([string]$group){
   $members = @()
   try {
@@ -1018,6 +1047,7 @@ try {
   # Collect basic system information: computer system, OS, network adapters
   $system = Safe-Try { Get-CimInstance Win32_ComputerSystem } 'Win32_ComputerSystem'
   $securityAgents = Get-SecurityAgentsTenantInfo -Log $script:log
+  $questConfig = Get-QuestOdmadConfig -Log $script:log
   $os     = Safe-Try { Get-CimInstance Win32_OperatingSystem } 'Win32_OperatingSystem'
   $netIPv4  = Safe-Try { Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue } 'Get-NetIPAddress'
   $adapters = Safe-Try { Get-NetAdapter -ErrorAction SilentlyContinue } 'Get-NetAdapter'
@@ -3481,6 +3511,7 @@ function Get-SharedFoldersWithACL {
     EventLogDomainReferences = $eventLogDomainReferences
     ApplicationConfigFiles = $applicationConfigFiles
     SecurityAgents = $securityAgents
+    QuestConfig    = $questConfig
     Detection     = [pscustomobject]@{ OldDomain = $flags; Summary = $summary }
   }
 
