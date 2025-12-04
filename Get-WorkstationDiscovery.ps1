@@ -832,26 +832,34 @@ function Get-LocalGroupMembersSafe([string]$group){
 function Get-LocalAdministratorsDetailed{
   $items = @()
   try {
-    if (Get-Command Get-LocalGroupMember -ErrorAction SilentlyContinue){
-      $items = Get-LocalGroupMember -Group 'Administrators' -ErrorAction Stop | ForEach-Object {
-        $nm = $_.Name
-        $sid = $_.SID.Value
-        $isDomain = ($nm -like '*\\*') -and ($nm -notlike "$env:COMPUTERNAME\\*") -and ($nm -notlike 'BUILTIN\\*')
-        $isGroup  = ($_.ObjectClass -eq 'Group')
-        $domain,$account = $null,$null
-        if ($nm -like '*\\*'){ $parts = $nm -split '\\',2; $domain=$parts[0]; $account=$parts[1] }
-        [pscustomobject]@{
-          Name=$nm; SID=$sid; ObjectClass=$_.ObjectClass; PrincipalSource=$_.PrincipalSource;
-          IsGroup=$isGroup; IsDomain=$isDomain; IsBuiltIn=($nm -like 'BUILTIN\\*');
-          Domain=$domain; Account=$account; IsDomainGroupLikely=($isDomain -and $isGroup); Source='Get-LocalGroupMember'
+    # Full (PS 5.1+) path
+    if ($script:CompatibilityMode -eq 'Full') {
+      if (Get-Command Get-LocalGroupMember -ErrorAction SilentlyContinue){
+        $items = Get-LocalGroupMember -Group 'Administrators' -ErrorAction Stop | ForEach-Object {
+          $nm = $_.Name
+          $sid = $_.SID.Value
+          $isDomain = ($nm -like '*\\*') -and ($nm -notlike "$env:COMPUTERNAME\\*") -and ($nm -notlike 'BUILTIN\\*')
+          $isGroup  = ($_.ObjectClass -eq 'Group')
+          $domain,$account = $null,$null
+          if ($nm -like '*\\*'){ $parts = $nm -split '\\',2; $domain=$parts[0]; $account=$parts[1] }
+          [pscustomobject]@{
+            Name=$nm; SID=$sid; ObjectClass=$_.ObjectClass; PrincipalSource=$_.PrincipalSource;
+            IsGroup=$isGroup; IsDomain=$isDomain; IsBuiltIn=($nm -like 'BUILTIN\\*');
+            Domain=$domain; Account=$account; IsDomainGroupLikely=($isDomain -and $isGroup); Source='Get-LocalGroupMember'
+          }
         }
+        return $items
       }
-      return $items
     }
-  } catch {}
+  } catch {
+    # Log the error but continue to fallback
+    if ($script:log) { $script:log.Write("Get-LocalGroupMember failed, using ADSI fallback: $($_.Exception.Message)", 'WARN') }
+  }
+  
+  # Legacy path for PS 3.0–4.0 or fallback if Get-LocalGroupMember fails
   try {
     $grp = [ADSI]"WinNT://./Administrators,group"
-    $grp.psbase.Invoke('Members') | ForEach-Object {
+    $items = $grp.psbase.Invoke('Members') | ForEach-Object {
       $name   = $_.GetType().InvokeMember('Name','GetProperty',$null,$_,$null)
       $adspath= $_.GetType().InvokeMember('ADsPath','GetProperty',$null,$_,$null)
       $class  = $null
@@ -876,7 +884,9 @@ function Get-LocalAdministratorsDetailed{
         IsBuiltIn=($resolved -like 'BUILTIN\\*'); Domain=$domain; Account=$account; IsDomainGroupLikely=(($resolved -like '*\\*') -and ($class -like '*Group*')); Source='ADSI'
       }
     }
-  } catch {}
+  } catch {
+    if ($script:log) { $script:log.Write("ADSI fallback for LocalAdministrators failed: $($_.Exception.Message)", 'WARN') }
+  }
   return $items
 }
 
