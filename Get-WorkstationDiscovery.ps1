@@ -18,7 +18,7 @@
 .PARAMETER OldDomainFqdn
     Fully Qualified Domain Name (FQDN) of the old domain to detect references for.
     Must be a valid FQDN format (e.g., 'example.com' or 'subdomain.example.com').
-    Default: 'oldco.com'
+    Default: 'olddomain.com'
 
 .PARAMETER NewDomainFqdn
     Fully Qualified Domain Name (FQDN) of the new domain.
@@ -27,7 +27,7 @@
 .PARAMETER OldDomainNetBIOS
     NetBIOS name of the old domain (optional, but recommended for better detection).
     Must be 15 characters or less, alphanumeric with hyphens allowed.
-    Example: 'OldCo'
+    Example: 'OLDDOMAIN'
 
 .PARAMETER OutputRoot
     Local or UNC path where JSON output files will be written.
@@ -91,9 +91,9 @@
 
 .EXAMPLE
     .\Get-WorkstationDiscovery.ps1 `
-        -OldDomainFqdn "OldCo.com" `
-        -NewDomainFqdn "Newco.com" `
-        -OldDomainNetBIOS "OldCo" `
+        -OldDomainFqdn "olddomain.com" `
+        -NewDomainFqdn "newdomain.com" `
+        -OldDomainNetBIOS "OLDDOMAIN" `
         -CentralShare "\\fileserver\migration" `
         -OutputRoot "C:\temp\discovery\out" `
         -LogRoot "C:\temp\discovery\logs" `
@@ -173,7 +173,7 @@ param(
     }
     return $true
   })]
-  [string]$OldDomainFqdn = "OldCo.com",
+  [string]$OldDomainFqdn = "olddomain.com",
   
   [ValidateScript({
     if ([string]::IsNullOrWhiteSpace($_)) {
@@ -184,7 +184,7 @@ param(
     }
     return $true
   })]
-  [string]$NewDomainFqdn = "NewCo.com",
+  [string]$NewDomainFqdn = "newdomain.com",
   
   [ValidateScript({
     if ([string]::IsNullOrWhiteSpace($_)) { return $true }
@@ -251,9 +251,9 @@ $ScriptVersion = '1.7.0'
 #
 # Format: @{ 'CU_HEX_VALUE' = 'Friendly Name' }
 $CrowdStrikeTenantMap = @{
-    '<CU_HEX_VALUE_1>' = 'CS NewCo1'
-    '<CU_HEX_VALUE_2>' = 'CS Newco2'
-    'DEFAULT' = 'Oldco'  # Used when CU is found but not in the map above
+    '<CU_HEX_VALUE_1>' = 'Tenant 1'
+    '<CU_HEX_VALUE_2>' = 'Tenant 2'
+    'DEFAULT' = 'Default Tenant'  # Used when CU is found but not in the map above
     'UNKNOWN' = 'Unknown'  # Used when CU is not found
 }
 
@@ -267,8 +267,8 @@ $CrowdStrikeTenantMap = @{
 #
 # Format: @{ 'ACTIVATION_ID_GUID' = 'Friendly Name' }
 $QualysTenantMap = @{
-    '<QUALYS_ACTIVATION_ID>' = 'Qualys NewCo'
-    'DEFAULT' = 'OldCo'  # Used when ActivationID is found but not in the map above
+    '<QUALYS_ACTIVATION_ID>' = 'Qualys Tenant'
+    'DEFAULT' = 'Default Tenant'  # Used when ActivationID is found but not in the map above
     'UNKNOWN' = 'Unknown'  # Used when ActivationID is not found
 }
 
