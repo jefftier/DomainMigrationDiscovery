@@ -29,7 +29,34 @@ param(
     [System.Management.Automation.PSCredential]$Credential  # Optional: if not provided, will prompt or use current user
 )
 
-Set-StrictMode -Version Latest
+# PowerShell version compatibility bootstrap
+if (-not $PSVersionTable -or -not $PSVersionTable.PSVersion) {
+    Write-Error "Unable to determine PowerShell version. This script requires at least PowerShell 3.0."
+    exit 1
+}
+
+$script:PSMajorVersion = $PSVersionTable.PSVersion.Major
+
+if ($script:PSMajorVersion -lt 3) {
+    Write-Output "This server is not compatible with this discovery script. PowerShell 3.0 or higher is required."
+    exit 1
+}
+
+if ($script:PSMajorVersion -lt 5) {
+    $script:CompatibilityMode = 'Legacy3to4'
+}
+else {
+    $script:CompatibilityMode = 'Full'
+}
+
+# Full (PS 5.1+) path
+if ($script:CompatibilityMode -eq 'Full') {
+    Set-StrictMode -Version Latest
+}
+else {
+    # Legacy path for PS 3.0–4.0
+    Set-StrictMode -Off
+}
 $ErrorActionPreference = 'Continue'  # Changed to Continue so errors don't stop execution
 
 # Initialize error logging
@@ -384,20 +411,59 @@ Write-Host "`nStarting discovery on $($servers.Count) server(s)..." -ForegroundC
 # Create a scriptblock for Write-ErrorLog to pass to parallel execution
 $writeErrorLogScriptBlock = ${function:Write-ErrorLog}
 
-if ($UseParallel) {
-    # PowerShell 7+ ForEach-Object -Parallel
-    $servers | ForEach-Object -Parallel {
-        & $using:InvokeDiscoveryOnServerScriptBlock `
-            -ComputerName $_ `
-            -Credential $using:Credential `
-            -ScriptContent $using:scriptContent `
-            -ScriptParams $using:scriptParams `
-            -CollectorShare $using:CollectorShare `
-            -RemoteOutputRoot $using:RemoteOutputRoot `
-            -WriteErrorLogFunction $using:writeErrorLogScriptBlock
-    } -ThrottleLimit 10
+# Full (PS 5.1+) path
+if ($script:CompatibilityMode -eq 'Full' -and $UseParallel) {
+    # PowerShell 7+ ForEach-Object -Parallel (only available in PS 7+)
+    # Check if -Parallel parameter is available
+    $parallelAvailable = $false
+    try {
+        $null = Get-Command ForEach-Object -ParameterName Parallel -ErrorAction Stop
+        $parallelAvailable = $true
+    }
+    catch {
+        $parallelAvailable = $false
+    }
+    
+    if ($parallelAvailable) {
+        $servers | ForEach-Object -Parallel {
+            & $using:InvokeDiscoveryOnServerScriptBlock `
+                -ComputerName $_ `
+                -Credential $using:Credential `
+                -ScriptContent $using:scriptContent `
+                -ScriptParams $using:scriptParams `
+                -CollectorShare $using:CollectorShare `
+                -RemoteOutputRoot $using:RemoteOutputRoot `
+                -WriteErrorLogFunction $using:writeErrorLogScriptBlock
+        } -ThrottleLimit 10
+    }
+    else {
+        # Parallel not available, fall back to sequential
+        Write-Host "ForEach-Object -Parallel not available. Using sequential execution." -ForegroundColor Yellow
+        foreach ($server in $servers) {
+            try {
+                & $InvokeDiscoveryOnServerScriptBlock `
+                    -ComputerName $server `
+                    -Credential $Credential `
+                    -ScriptContent $scriptContent `
+                    -ScriptParams $scriptParams `
+                    -CollectorShare $CollectorShare `
+                    -RemoteOutputRoot $RemoteOutputRoot `
+                    -WriteErrorLogFunction $writeErrorLogScriptBlock
+            }
+            catch {
+                # Log any unexpected errors that escape the function
+                $errorMsg = "Unexpected error processing server: $($_.Exception.Message)"
+                Write-ErrorLog -ServerName $server -ErrorMessage $errorMsg -ErrorType "FATAL"
+                Write-Warning "[$server] $errorMsg"
+            }
+        }
+    }
 }
 else {
+    # Legacy path for PS 3.0–4.0 (sequential execution only)
+    if ($UseParallel) {
+        Write-Host "Parallel execution is not available in PowerShell versions below 5.1. Using sequential execution." -ForegroundColor Yellow
+    }
     foreach ($server in $servers) {
         try {
             & $InvokeDiscoveryOnServerScriptBlock `

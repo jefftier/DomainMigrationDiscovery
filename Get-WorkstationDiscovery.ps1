@@ -1,4 +1,23 @@
-#Requires -Version 5.1
+# PowerShell version compatibility bootstrap
+if (-not $PSVersionTable -or -not $PSVersionTable.PSVersion) {
+    Write-Error "Unable to determine PowerShell version. This script requires at least PowerShell 3.0."
+    exit 1
+}
+
+$script:PSMajorVersion = $PSVersionTable.PSVersion.Major
+
+if ($script:PSMajorVersion -lt 3) {
+    Write-Output "This server is not compatible with this discovery script. PowerShell 3.0 or higher is required."
+    exit 1
+}
+
+if ($script:PSMajorVersion -lt 5) {
+    $script:CompatibilityMode = 'Legacy3to4'
+}
+else {
+    $script:CompatibilityMode = 'Full'
+}
+
 <#
 .SYNOPSIS
     Discovers domain migration readiness by scanning workstations for old domain references.
@@ -113,7 +132,7 @@
     Slim output mode with Office apps kept and only running services included.
 
 .NOTES
-    - Requires PowerShell 5.1 or higher
+    - Requires PowerShell 3.0 or higher (full features require 5.1+)
     - Requires local Administrator rights for full functionality
     - Output JSON files may contain sensitive information (paths, account names)
     - Credential passwords are not extracted (they are encrypted in Windows Vault)
@@ -212,7 +231,14 @@ param(
 #region ============================================================================
 # SCRIPT INITIALIZATION
 # ============================================================================
-Set-StrictMode -Version Latest
+# Full (PS 5.1+) path
+if ($script:CompatibilityMode -eq 'Full') {
+    Set-StrictMode -Version Latest
+}
+else {
+    # Legacy path for PS 3.0–4.0
+    Set-StrictMode -Off
+}
 $ErrorActionPreference = 'Stop'
 #endregion
 
@@ -1045,10 +1071,18 @@ try {
   # System Information
   # --------------------------------------------------------------------------------
   # Collect basic system information: computer system, OS, network adapters
-  $system = Safe-Try { Get-CimInstance Win32_ComputerSystem } 'Win32_ComputerSystem'
+  # Full (PS 5.1+) path
+  if ($script:CompatibilityMode -eq 'Full') {
+    $system = Safe-Try { Get-CimInstance Win32_ComputerSystem } 'Win32_ComputerSystem'
+    $os     = Safe-Try { Get-CimInstance Win32_OperatingSystem } 'Win32_OperatingSystem'
+  }
+  else {
+    # Legacy path for PS 3.0–4.0
+    $system = Safe-Try { Get-WmiObject -Class Win32_ComputerSystem } 'Win32_ComputerSystem'
+    $os     = Safe-Try { Get-WmiObject -Class Win32_OperatingSystem } 'Win32_OperatingSystem'
+  }
   $securityAgents = Get-SecurityAgentsTenantInfo -Log $script:log
   $questConfig = Get-QuestOdmadConfig -Log $script:log
-  $os     = Safe-Try { Get-CimInstance Win32_OperatingSystem } 'Win32_OperatingSystem'
   $netIPv4  = Safe-Try { Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue } 'Get-NetIPAddress'
   $adapters = Safe-Try { Get-NetAdapter -ErrorAction SilentlyContinue } 'Get-NetAdapter'
   $ipStr = (@($netIPv4) | Where-Object { $_.IPAddress -and $_.IPAddress -ne '127.0.0.1' -and $_.IPAddress -notlike '169.254.*' } | Select-Object -ExpandProperty IPAddress -Unique) -join ', '
@@ -1062,7 +1096,14 @@ try {
   # Profiles are used later for per-user registry hive scanning.
   $profiles = @()
   $cutoffDate = (Get-Date).AddDays(-1 * [math]::Abs($ProfileDays))
-  $profileCim = Safe-Try { Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue } 'Win32_UserProfile'
+  # Full (PS 5.1+) path
+  if ($script:CompatibilityMode -eq 'Full') {
+    $profileCim = Safe-Try { Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue } 'Win32_UserProfile'
+  }
+  else {
+    # Legacy path for PS 3.0–4.0
+    $profileCim = Safe-Try { Get-WmiObject -Class Win32_UserProfile -ErrorAction SilentlyContinue } 'Win32_UserProfile'
+  }
   if ($profileCim){
     foreach($p in $profileCim){
       if ([string]::IsNullOrWhiteSpace($p.LocalPath)) { continue }
@@ -1262,7 +1303,14 @@ try {
   # --------------------------------------------------------------------------------
   # Collect Windows services and scheduled tasks information.
   # These are scanned for old domain references in service accounts and task actions.
-  $services = Safe-Try { Get-CimInstance Win32_Service | Select-Object Name,DisplayName,State,StartMode,StartName,PathName } 'Services'
+  # Full (PS 5.1+) path
+  if ($script:CompatibilityMode -eq 'Full') {
+    $services = Safe-Try { Get-CimInstance Win32_Service | Select-Object Name,DisplayName,State,StartMode,StartName,PathName } 'Services'
+  }
+  else {
+    # Legacy path for PS 3.0–4.0
+    $services = Safe-Try { Get-WmiObject -Class Win32_Service | Select-Object Name,DisplayName,State,StartMode,StartName,PathName } 'Services'
+  }
   if (-not $services) { $services = @() }
 
   $tasks = @()
@@ -1314,7 +1362,14 @@ try {
     if (Get-Command Get-Printer -ErrorAction SilentlyContinue){
       Get-Printer | Select-Object Name,DriverName,PortName,ShareName,ComputerName,Type,Location,Comment
     } else {
-      Get-CimInstance Win32_Printer | Select-Object Name,DriverName,PortName,ShareName,SystemName,ServerName,Network
+      # Full (PS 5.1+) path
+      if ($script:CompatibilityMode -eq 'Full') {
+        Get-CimInstance Win32_Printer | Select-Object Name,DriverName,PortName,ShareName,SystemName,ServerName,Network
+      }
+      else {
+        # Legacy path for PS 3.0–4.0
+        Get-WmiObject -Class Win32_Printer | Select-Object Name,DriverName,PortName,ShareName,SystemName,ServerName,Network
+      }
     }
   } 'Printers'
   if (-not $printers) { $printers = @() }
@@ -2640,7 +2695,19 @@ WHERE srv.is_linked = 1
           try {
             if (-not (Test-Path -LiteralPath $configFile.FullName)) { continue }
             
-            $content = Get-Content -Path $configFile.FullName -Raw -ErrorAction SilentlyContinue
+            # Full (PS 5.1+) path
+            if ($script:CompatibilityMode -eq 'Full') {
+                $content = Get-Content -Path $configFile.FullName -Raw -ErrorAction SilentlyContinue
+            }
+            else {
+                # Legacy path for PS 3.0–4.0 (Get-Content -Raw not available)
+                try {
+                    $content = [System.IO.File]::ReadAllText($configFile.FullName)
+                }
+                catch {
+                    $content = $null
+                }
+            }
             if ($content -and $DomainMatchers.Match($content)) {
               # Extract connection strings or relevant sections
               $matchedLines = @()
@@ -2838,16 +2905,34 @@ WHERE srv.is_linked = 1
           $hasCredentials = $false
           $credentialPatterns = @()
           
-          try {
-            # Try to read as text
-            $content = Get-Content -Path $configFile.FullName -Raw -ErrorAction Stop -Encoding UTF8
-          } catch {
-            # Try alternative encoding
+          # Full (PS 5.1+) path
+          if ($script:CompatibilityMode -eq 'Full') {
             try {
-              $content = Get-Content -Path $configFile.FullName -Raw -ErrorAction Stop -Encoding Default
+              # Try to read as text
+              $content = Get-Content -Path $configFile.FullName -Raw -ErrorAction Stop -Encoding UTF8
             } catch {
-              # Skip files we can't read
-              continue
+              # Try alternative encoding
+              try {
+                $content = Get-Content -Path $configFile.FullName -Raw -ErrorAction Stop -Encoding Default
+              } catch {
+                # Skip files we can't read
+                continue
+              }
+            }
+          }
+          else {
+            # Legacy path for PS 3.0–4.0 (Get-Content -Raw and -Encoding not available)
+            try {
+              # Try UTF8 first
+              $content = [System.IO.File]::ReadAllText($configFile.FullName, [System.Text.Encoding]::UTF8)
+            } catch {
+              try {
+                # Try default encoding
+                $content = [System.IO.File]::ReadAllText($configFile.FullName)
+              } catch {
+                # Skip files we can't read
+                continue
+              }
             }
           }
           
@@ -3078,9 +3163,28 @@ WHERE srv.is_linked = 1
         }
         
         # Query events within time window (query more events since we'll filter many out)
-        $events = Get-WinEvent -LogName $logName -FilterHashtable @{
-          StartTime = $startTime
-        } -ErrorAction SilentlyContinue -MaxEvents ($maxEventsPerLog * 5)
+        # Full (PS 5.1+) path
+        if ($script:CompatibilityMode -eq 'Full') {
+          $events = Get-WinEvent -LogName $logName -FilterHashtable @{
+            StartTime = $startTime
+          } -ErrorAction SilentlyContinue -MaxEvents ($maxEventsPerLog * 5)
+        }
+        else {
+          # Legacy path for PS 3.0–4.0 (FilterHashtable available but using FilterXPath for compatibility)
+          try {
+            $xpathFilter = "*[System[TimeCreated[@SystemTime >= '{0:yyyy-MM-ddTHH:mm:ss.fffZ}']]]" -f $startTime.ToUniversalTime()
+            $events = Get-WinEvent -LogName $logName -FilterXPath $xpathFilter -ErrorAction SilentlyContinue -MaxEvents ($maxEventsPerLog * 5)
+          }
+          catch {
+            # If FilterXPath fails, try without time filter (less efficient but works)
+            if ($Log) { $Log.Write("Event log query with time filter failed for '$logName', attempting without time filter: $($_.Exception.Message)", 'WARN') }
+            $events = Get-WinEvent -LogName $logName -ErrorAction SilentlyContinue -MaxEvents ($maxEventsPerLog * 5)
+            # Filter by time manually
+            if ($events) {
+              $events = $events | Where-Object { $_.TimeCreated -ge $startTime }
+            }
+          }
+        }
         
         if (-not $events) { continue }
         
@@ -3320,7 +3424,14 @@ function Get-SharedFoldersWithACL {
     $errors = @()
     
     try {
-        $shares = Get-CimInstance -ClassName Win32_Share -ErrorAction Stop | Where-Object { $_.Type -eq 0 }
+        # Full (PS 5.1+) path
+        if ($script:CompatibilityMode -eq 'Full') {
+            $shares = Get-CimInstance -ClassName Win32_Share -ErrorAction Stop | Where-Object { $_.Type -eq 0 }
+        }
+        else {
+            # Legacy path for PS 3.0–4.0
+            $shares = Get-WmiObject -Class Win32_Share -ErrorAction Stop | Where-Object { $_.Type -eq 0 }
+        }
     } catch {
         $errorMsg = "Failed to enumerate shares: $($_.Exception.Message)"
         if ($Log) { $Log.Write($errorMsg, 'WARN') }
@@ -3522,8 +3633,29 @@ function Get-SharedFoldersWithACL {
   $fname = ('{0}_{1}.json' -f $env:COMPUTERNAME, (Get-Date).ToString('MM-dd-yyyy'))
   $localPath = Join-Path $OutputRoot $fname
   try {
-    $json = $result | ConvertTo-Json -Depth 8
-    Set-Content -Path $localPath -Value $json -Encoding UTF8
+    # Full (PS 5.1+) path
+    if ($script:CompatibilityMode -eq 'Full') {
+      $json = $result | ConvertTo-Json -Depth 8
+    }
+    else {
+      # Legacy path for PS 3.0–4.0 (-Depth parameter available but may have limitations)
+      try {
+        $json = $result | ConvertTo-Json -Depth 8
+      }
+      catch {
+        # Fallback to default depth if -Depth fails
+        if ($Log) { $Log.Write("ConvertTo-Json -Depth failed, using default depth: $($_.Exception.Message)", 'WARN') }
+        $json = $result | ConvertTo-Json
+      }
+    }
+    # Full (PS 5.1+) path
+    if ($script:CompatibilityMode -eq 'Full') {
+      Set-Content -Path $localPath -Value $json -Encoding UTF8
+    }
+    else {
+      # Legacy path for PS 3.0–4.0 (Set-Content -Encoding not available)
+      [System.IO.File]::WriteAllText($localPath, $json, [System.Text.Encoding]::UTF8)
+    }
     $script:log.Write("Wrote JSON locally: $localPath")
   } catch {
     $script:log.Write("Failed to write local JSON: $($_.Exception.Message)", 'ERROR'); throw
