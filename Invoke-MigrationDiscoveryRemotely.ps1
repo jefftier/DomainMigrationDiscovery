@@ -262,8 +262,8 @@ $InvokeDiscoveryOnServerScriptBlock = {
                     $scriptDir = (Get-Location).Path
                 }
 
-                # Create local directory structure: {ScriptDir}\temp\MigrationDiscovery\out
-                $localOutputRoot = Join-Path $scriptDir "temp\MigrationDiscovery\out"
+                # Create local directory structure: {ScriptDir}\results\out
+                $localOutputRoot = Join-Path $scriptDir "results\out"
                 if (-not (Test-Path -Path $localOutputRoot)) {
                     New-Item -Path $localOutputRoot -ItemType Directory -Force | Out-Null
                 }
