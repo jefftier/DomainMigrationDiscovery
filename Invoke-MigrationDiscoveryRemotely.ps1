@@ -153,7 +153,8 @@ $scriptParams = @{
 }
 
 if ($OldDomainNetBIOS) { $scriptParams['OldDomainNetBIOS'] = $OldDomainNetBIOS }
-# Note: NewDomainNetBIOS is not a parameter in Get-WorkstationDiscovery.ps1, so we don't pass it
+# Note: NewDomainNetBIOS is not a parameter in Get-WorkstationDiscovery.ps1, so we explicitly do NOT pass it
+# This prevents PowerShell parameter binding errors on remote systems
 if ($PlantId)          { $scriptParams['PlantId'] = $PlantId }
 if ($EmitStdOut)       { $scriptParams['EmitStdOut'] = $true }
 
@@ -219,7 +220,9 @@ $InvokeDiscoveryOnServerScriptBlock = {
         # Invoke your existing script remotely using ScriptBlock for proper parameter handling
         $summary = Invoke-Command @invokeParams
 
-        if ($summary -and $EmitStdOut) {
+        # Note: $EmitStdOut is passed via $ScriptParams, so we check it from there for parallel execution compatibility
+        $shouldEmitStdOut = $ScriptParams.ContainsKey('EmitStdOut') -and $ScriptParams['EmitStdOut'] -eq $true
+        if ($summary -and $shouldEmitStdOut) {
             # $summary is the small summary object your script writes when -EmitStdOut is set
             # You can write it or collect it into an array for reporting.
             Write-Host "[$ComputerName] Summary:" -ForegroundColor Green
@@ -227,8 +230,9 @@ $InvokeDiscoveryOnServerScriptBlock = {
         }
 
         # Collect JSON file from remote server
-        # Use the actual computer name from the connection test to match the filename pattern
-        # The discovery script uses $env:COMPUTERNAME which may not be uppercase
+        # Use the exact computer name from the remote system to match the filename pattern
+        # The discovery script uses $env:COMPUTERNAME which we captured as $actualComputerName
+        # This ensures exact matching regardless of case, since we use the actual value from the remote system
         $today = Get-Date
         $pattern = "{0}_{1}.json" -f $actualComputerName, $today.ToString('MM-dd-yyyy')
         $remotePath = Join-Path $RemoteOutputRoot $pattern
@@ -425,6 +429,7 @@ if ($script:CompatibilityMode -eq 'Full' -and $UseParallel) {
     }
     
     if ($parallelAvailable) {
+        # ScriptParams already contains EmitStdOut if it was set, so it's available via $using:scriptParams
         $servers | ForEach-Object -Parallel {
             & $using:InvokeDiscoveryOnServerScriptBlock `
                 -ComputerName $_ `
