@@ -1,23 +1,3 @@
-# PowerShell version compatibility bootstrap
-if (-not $PSVersionTable -or -not $PSVersionTable.PSVersion) {
-    Write-Error "Unable to determine PowerShell version. This script requires at least PowerShell 3.0."
-    exit 1
-}
-
-$script:PSMajorVersion = $PSVersionTable.PSVersion.Major
-
-if ($script:PSMajorVersion -lt 3) {
-    Write-Output "This server is not compatible with this discovery script. PowerShell 3.0 or higher is required."
-    exit 1
-}
-
-if ($script:PSMajorVersion -lt 5) {
-    $script:CompatibilityMode = 'Legacy3to4'
-}
-else {
-    $script:CompatibilityMode = 'Full'
-}
-
 <#
 .SYNOPSIS
     Discovers domain migration readiness by scanning workstations for old domain references.
@@ -227,6 +207,27 @@ param(
   [switch]$KeepMsStoreApps = $false,
   [switch]$SlimOnlyRunningServices = $false
 )
+
+# PowerShell version compatibility bootstrap
+# Must be placed after param block to allow scriptblock parsing when executed remotely
+if (-not $PSVersionTable -or -not $PSVersionTable.PSVersion) {
+    Write-Error "Unable to determine PowerShell version. This script requires at least PowerShell 3.0."
+    exit 1
+}
+
+$script:PSMajorVersion = $PSVersionTable.PSVersion.Major
+
+if ($script:PSMajorVersion -lt 3) {
+    Write-Output "This server is not compatible with this discovery script. PowerShell 3.0 or higher is required."
+    exit 1
+}
+
+if ($script:PSMajorVersion -lt 5) {
+    $script:CompatibilityMode = 'Legacy3to4'
+}
+else {
+    $script:CompatibilityMode = 'Full'
+}
 
 #region ============================================================================
 # SCRIPT INITIALIZATION
