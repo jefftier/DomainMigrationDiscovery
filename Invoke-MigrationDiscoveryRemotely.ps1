@@ -9,7 +9,8 @@ param(
     [string]$RemoteLogRoot    = "C:\temp\MigrationDiscovery\logs",
 
     # Optional central share where **you** (the jump host) will collect results
-    [string]$CollectorShare   = "\\fileserver\MigrationDiscovery\workstations",
+    # If not specified, JSON files remain on the remote servers only
+    [string]$CollectorShare,
 
     # Domain config for your discovery script
     [Parameter(Mandatory = $true)]
@@ -141,9 +142,14 @@ function Invoke-DiscoveryOnServer {
             $summary | ConvertTo-Json -Depth 4
         }
 
-        # Optional: pull the JSON file back from the remote's OutputRoot
+        # Collect JSON file from remote server
+        $today = Get-Date
+        $pattern = "{0}_{1}.json" -f $ComputerName.ToUpper(), $today.ToString('MM-dd-yyyy')
+        $remotePath = Join-Path $RemoteOutputRoot $pattern
+
         if ($CollectorShare) {
-            Write-Host "[$ComputerName] Collecting JSON from remote OutputRoot..." -ForegroundColor Yellow
+            # Copy to specified collector share
+            Write-Host "[$ComputerName] Collecting JSON from remote OutputRoot ($RemoteOutputRoot)..." -ForegroundColor Yellow
 
             # Create a session so we can copy files
             $sessionParams = @{
@@ -155,11 +161,6 @@ function Invoke-DiscoveryOnServer {
             $session = New-PSSession @sessionParams
 
             try {
-                # The file name pattern in your script: COMPUTERNAME_MM-dd-yyyy.json
-                $today = Get-Date
-                $pattern = "{0}_{1}.json" -f $ComputerName.ToUpper(), $today.ToString('MM-dd-yyyy')
-                $remotePath = Join-Path $RemoteOutputRoot $pattern
-
                 if (-not (Test-Path -Path $CollectorShare)) {
                     New-Item -Path $CollectorShare -ItemType Directory -Force | Out-Null
                 }
@@ -177,7 +178,94 @@ function Invoke-DiscoveryOnServer {
                 if ($session) { Remove-PSSession $session }
             }
         }
+        else {
+            # Copy to local directory structure mirroring remote path
+            Write-Host "[$ComputerName] Collecting JSON from remote C$ admin share..." -ForegroundColor Yellow
 
+            try {
+                # Get the directory where this script is located
+                if ($MyInvocation.PSCommandPath) {
+                    $scriptDir = Split-Path -Parent $MyInvocation.PSCommandPath
+                }
+                elseif ($PSScriptRoot) {
+                    $scriptDir = $PSScriptRoot
+                }
+                else {
+                    $scriptDir = (Get-Location).Path
+                }
+
+                # Create local directory structure: {ScriptDir}\temp\MigrationDiscovery\out
+                $localOutputRoot = Join-Path $scriptDir "temp\MigrationDiscovery\out"
+                if (-not (Test-Path -Path $localOutputRoot)) {
+                    New-Item -Path $localOutputRoot -ItemType Directory -Force | Out-Null
+                }
+
+                # Build UNC path to remote admin share
+                # Extract drive letter and convert to UNC path (e.g., C:\temp\... -> \\ComputerName\c$\temp\...)
+                if ($RemoteOutputRoot -match '^([A-Z]):\\(.*)$') {
+                    $driveLetter = $matches[1].ToLower()
+                    $relativePath = $matches[2]
+                    $remoteUncPath = "\\$ComputerName\${driveLetter}$\$relativePath"
+                }
+                else {
+                    # Fallback: assume C: drive
+                    $remoteUncPath = $RemoteOutputRoot -replace '^C:', "\\$ComputerName\c$"
+                }
+                $remoteUncFile = Join-Path $remoteUncPath $pattern
+                $localDestPath = Join-Path $localOutputRoot $pattern
+
+                # Copy file using UNC path with credentials if provided
+                if ($Credential) {
+                    # Extract drive letter to determine which admin share to use
+                    if ($RemoteOutputRoot -match '^([A-Z]):\\(.*)$') {
+                        $driveLetter = $matches[1].ToLower()
+                        $relativePath = $matches[2]
+                    }
+                    else {
+                        # Fallback: assume C: drive
+                        $driveLetter = "c"
+                        $relativePath = $RemoteOutputRoot -replace '^C:\\', ''
+                    }
+                    
+                    # Use New-PSDrive to map the remote admin share with credentials
+                    $driveName = "TempDrive_$($ComputerName -replace '[^a-zA-Z0-9]', '')"
+                    try {
+                        $psDriveParams = @{
+                            Name = $driveName
+                            PSProvider = "FileSystem"
+                            Root = "\\$ComputerName\${driveLetter}$"
+                            Credential = $Credential
+                            Scope = "Script"
+                        }
+                        $null = New-PSDrive @psDriveParams -ErrorAction Stop
+                        
+                        try {
+                            # Map the remote path using the temporary drive
+                            $mappedRemotePath = "${driveName}:\$relativePath"
+                            $mappedRemoteFile = Join-Path $mappedRemotePath $pattern
+                            Copy-Item -Path $mappedRemoteFile -Destination $localDestPath -Force -ErrorAction Stop
+                        }
+                        finally {
+                            Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                    catch {
+                        throw "Failed to access remote ${driveLetter}$ share: $($_.Exception.Message)"
+                    }
+                }
+                else {
+                    # No credentials - try direct UNC copy (uses current user context)
+                    Copy-Item -Path $remoteUncFile -Destination $localDestPath -Force -ErrorAction Stop
+                }
+
+                Write-Host "[$ComputerName] Copied $remoteUncFile -> $localDestPath" -ForegroundColor Green
+            }
+            catch {
+                Write-Warning "[$ComputerName] Failed to collect JSON from C$ share: $($_.Exception.Message)"
+                Write-Host "[$ComputerName] JSON file is available on the remote server at: $remotePath" -ForegroundColor Cyan
+            }
+        }
+        
         Write-Host "[$ComputerName] Discovery completed." -ForegroundColor Green
     }
     catch {
