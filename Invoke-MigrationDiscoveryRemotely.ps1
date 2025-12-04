@@ -64,26 +64,31 @@ if (-not $Credential) {
     }
 }
 
-# Build common argument list for the discovery script
-$commonArgs = @(
-    '-OutputRoot', $RemoteOutputRoot,
-    '-LogRoot',    $RemoteLogRoot,
-    '-OldDomainFqdn', $OldDomainFqdn,
-    '-NewDomainFqdn', $NewDomainFqdn
-)
+# Read the script content to pass to remote execution
+$scriptContent = Get-Content -Path $ScriptPath -Raw
 
-if ($OldDomainNetBIOS) { $commonArgs += @('-OldDomainNetBIOS', $OldDomainNetBIOS) }
-if ($NewDomainNetBIOS) { $commonArgs += @('-NewDomainNetBIOS', $NewDomainNetBIOS) }
-if ($PlantId)          { $commonArgs += @('-PlantId', $PlantId) }
+# Build a hashtable of parameters for the discovery script
+$scriptParams = @{
+    OutputRoot    = $RemoteOutputRoot
+    LogRoot       = $RemoteLogRoot
+    OldDomainFqdn = $OldDomainFqdn
+    NewDomainFqdn = $NewDomainFqdn
+}
 
-# Your script defaults SlimOutputOnly = $true already, so we don't *need* to pass it.
-if ($EmitStdOut)       { $commonArgs += '-EmitStdOut' }
+if ($OldDomainNetBIOS) { $scriptParams['OldDomainNetBIOS'] = $OldDomainNetBIOS }
+if ($NewDomainNetBIOS) { $scriptParams['NewDomainNetBIOS'] = $NewDomainNetBIOS }
+if ($PlantId)          { $scriptParams['PlantId'] = $PlantId }
+if ($EmitStdOut)       { $scriptParams['EmitStdOut'] = $true }
 
 # Helper: run discovery on a single server
 function Invoke-DiscoveryOnServer {
     param(
         [string]$ComputerName,
-        [System.Management.Automation.PSCredential]$Credential
+        [System.Management.Automation.PSCredential]$Credential,
+        [string]$ScriptContent,
+        [hashtable]$ScriptParams,
+        [string]$CollectorShare,
+        [string]$RemoteOutputRoot
     )
 
     Write-Host "[$ComputerName] Testing WinRM connectivity and authentication..." -ForegroundColor Yellow
@@ -109,11 +114,15 @@ function Invoke-DiscoveryOnServer {
     Write-Host "[$ComputerName] Starting discovery..." -ForegroundColor Cyan
 
     try {
-        # Build parameters for Invoke-Command
+        # Build parameters for Invoke-Command using ScriptBlock with proper parameter passing
         $invokeParams = @{
             ComputerName = $ComputerName
-            FilePath     = $ScriptPath
-            ArgumentList = $commonArgs
+            ScriptBlock  = {
+                param($ScriptContent, $Params)
+                # Execute the script with the provided parameters using splatting
+                & ([scriptblock]::Create($ScriptContent)) @Params
+            }
+            ArgumentList = @($ScriptContent, $ScriptParams)
             ErrorAction  = 'Stop'
         }
         
@@ -122,8 +131,7 @@ function Invoke-DiscoveryOnServer {
             $invokeParams['Credential'] = $Credential
         }
         
-        # Invoke your existing script remotely.
-        # -FilePath sends the local script content to the remote box and executes it there.
+        # Invoke your existing script remotely using ScriptBlock for proper parameter handling
         $summary = Invoke-Command @invokeParams
 
         if ($summary -and $EmitStdOut) {
@@ -180,11 +188,21 @@ function Invoke-DiscoveryOnServer {
 if ($UseParallel) {
     # PowerShell 7+ ForEach-Object -Parallel
     $servers | ForEach-Object -Parallel {
-        Invoke-DiscoveryOnServer -ComputerName $_ -Credential $using:Credential
+        Invoke-DiscoveryOnServer -ComputerName $_ `
+                                 -Credential $using:Credential `
+                                 -ScriptContent $using:scriptContent `
+                                 -ScriptParams $using:scriptParams `
+                                 -CollectorShare $using:CollectorShare `
+                                 -RemoteOutputRoot $using:RemoteOutputRoot
     } -ThrottleLimit 10
 }
 else {
     foreach ($server in $servers) {
-        Invoke-DiscoveryOnServer -ComputerName $server -Credential $Credential
+        Invoke-DiscoveryOnServer -ComputerName $server `
+                                 -Credential $Credential `
+                                 -ScriptContent $scriptContent `
+                                 -ScriptParams $scriptParams `
+                                 -CollectorShare $CollectorShare `
+                                 -RemoteOutputRoot $RemoteOutputRoot
     }
 }
