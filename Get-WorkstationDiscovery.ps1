@@ -799,21 +799,30 @@ function Get-QuestOdmadConfig {
 function Get-LocalGroupMembersSafe([string]$group){
   $members = @()
   try {
-    if (Get-Command Get-LocalGroupMember -ErrorAction SilentlyContinue){
-      return Get-LocalGroupMember -Group $group -ErrorAction Stop | ForEach-Object {
-        [pscustomobject]@{
-          Group = $group
-          Name  = $_.Name
-          ObjectClass = $_.ObjectClass
-          PrincipalSource = $_.PrincipalSource
-          SID = $_.SID.Value
+    # Full (PS 5.1+) path
+    if ($script:CompatibilityMode -eq 'Full') {
+      if (Get-Command Get-LocalGroupMember -ErrorAction SilentlyContinue){
+        $members = Get-LocalGroupMember -Group $group -ErrorAction Stop | ForEach-Object {
+          [pscustomobject]@{
+            Group = $group
+            Name  = $_.Name
+            ObjectClass = $_.ObjectClass
+            PrincipalSource = $_.PrincipalSource
+            SID = $_.SID.Value
+          }
         }
+        return $members
       }
     }
-  } catch {}
+  } catch {
+    # Log the error but continue to fallback
+    if ($script:log) { $script:log.Write("Get-LocalGroupMember failed for group '$group', using ADSI fallback: $($_.Exception.Message)", 'WARN') }
+  }
+  
+  # Legacy path for PS 3.0–4.0 or fallback if Get-LocalGroupMember fails
   try {
     $grp = [ADSI]"WinNT://./$group,group"
-    $grp.psbase.Invoke('Members') | ForEach-Object {
+    $members = $grp.psbase.Invoke('Members') | ForEach-Object {
       $p = $_.GetType().InvokeMember('Name','GetProperty',$null,$_,$null)
       $class = $null
       try { $class = $_.GetType().InvokeMember('Class','GetProperty',$null,$_,$null) } catch {}
@@ -825,8 +834,10 @@ function Get-LocalGroupMembersSafe([string]$group){
         SID = $null
       }
     }
-  } catch {}
-  $members
+  } catch {
+    if ($script:log) { $script:log.Write("ADSI fallback for group '$group' failed: $($_.Exception.Message)", 'WARN') }
+  }
+  return $members
 }
 
 function Get-LocalAdministratorsDetailed{
