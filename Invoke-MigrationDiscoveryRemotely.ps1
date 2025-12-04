@@ -94,7 +94,6 @@ function Invoke-DiscoveryOnServer {
             ComputerName = $ComputerName
             ScriptBlock  = { $env:COMPUTERNAME }
             ErrorAction  = 'Stop'
-            SessionOption = New-PSSessionOption -EnableNetworkAccess
         }
         if ($Credential) {
             $testParams['Credential'] = $Credential
@@ -110,16 +109,12 @@ function Invoke-DiscoveryOnServer {
     Write-Host "[$ComputerName] Starting discovery..." -ForegroundColor Cyan
 
     try {
-        # Create session options to enable network access (for double-hop scenarios)
-        $sessionOption = New-PSSessionOption -EnableNetworkAccess
-        
         # Build parameters for Invoke-Command
         $invokeParams = @{
             ComputerName = $ComputerName
             FilePath     = $ScriptPath
             ArgumentList = $commonArgs
             ErrorAction  = 'Stop'
-            SessionOption = $sessionOption
         }
         
         # Add credentials only if provided
@@ -145,7 +140,6 @@ function Invoke-DiscoveryOnServer {
             # Create a session so we can copy files
             $sessionParams = @{
                 ComputerName = $ComputerName
-                SessionOption = New-PSSessionOption -EnableNetworkAccess
             }
             if ($Credential) {
                 $sessionParams['Credential'] = $Credential
