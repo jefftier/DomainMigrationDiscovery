@@ -593,10 +593,10 @@ function Get-RegistryValueMultiView {
 function New-OldDomainMatchers([string]$netbios,[string]$fqdn){
   $dn = ($fqdn -split '\.' | ForEach-Object { "DC=$_" }) -join ','
   $obj = [pscustomobject]@{
-    Netbios = if ($netbios) { [regex]::new("(?i)\b$([regex]::Escape($netbios))\b") } else { $null }
-    Fqdn    = if ($fqdn)   { [regex]::new("(?i)$([regex]::Escape($fqdn))") } else { $null }
-    Upn     = if ($fqdn)   { [regex]::new("(?i)@$([regex]::Escape($fqdn))$") } else { $null }
-    LdapDn  = if ($fqdn)   { [regex]::new("(?i)$([regex]::Escape($dn))") } else { $null }
+    Netbios = if ($netbios) { [regex]("(?i)\b$([regex]::Escape($netbios))\b") } else { $null }
+    Fqdn    = if ($fqdn)   { [regex]("(?i)$([regex]::Escape($fqdn))") } else { $null }
+    Upn     = if ($fqdn)   { [regex]("(?i)@$([regex]::Escape($fqdn))$") } else { $null }
+    LdapDn  = if ($fqdn)   { [regex]("(?i)$([regex]::Escape($dn))") } else { $null }
   }
   $null = $obj | Add-Member -MemberType ScriptMethod -Name Match -Value {
     param([string]$s)
