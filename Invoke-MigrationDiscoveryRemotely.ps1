@@ -30,10 +30,55 @@ param(
 )
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Continue'  # Changed to Continue so errors don't stop execution
+
+# Initialize error logging
+$script:ErrorLogPath = $null
+function Write-ErrorLog {
+    param(
+        [string]$ServerName,
+        [string]$ErrorMessage,
+        [string]$ErrorType = "ERROR"
+    )
+    
+    if (-not $script:ErrorLogPath) {
+        # Determine script directory
+        if ($MyInvocation.PSCommandPath) {
+            $scriptDir = Split-Path -Parent $MyInvocation.PSCommandPath
+        }
+        elseif ($PSScriptRoot) {
+            $scriptDir = $PSScriptRoot
+        }
+        else {
+            $scriptDir = (Get-Location).Path
+        }
+        
+        # Create results directory if it doesn't exist
+        $resultsDir = Join-Path $scriptDir "results"
+        if (-not (Test-Path -Path $resultsDir)) {
+            New-Item -Path $resultsDir -ItemType Directory -Force | Out-Null
+        }
+        
+        $script:ErrorLogPath = Join-Path $resultsDir "error.log"
+    }
+    
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = "[$timestamp] [$ServerName] [$ErrorType] $ErrorMessage"
+    
+    try {
+        Add-Content -Path $script:ErrorLogPath -Value $logEntry -ErrorAction SilentlyContinue
+    }
+    catch {
+        # If we can't write to the log file, at least try to write to console
+        Write-Warning "Failed to write to error log: $($_.Exception.Message)"
+        Write-Warning $logEntry
+    }
+}
 
 if (-not (Test-Path -LiteralPath $ServerListPath)) {
-    throw "Server list file not found: $ServerListPath"
+    $errorMsg = "Server list file not found: $ServerListPath"
+    Write-ErrorLog -ServerName "SCRIPT_INIT" -ErrorMessage $errorMsg -ErrorType "FATAL"
+    throw $errorMsg
 }
 
 # Read and de-duplicate server names (ignore blank/ commented lines)
@@ -43,14 +88,18 @@ $servers = @(Get-Content -Path $ServerListPath |
     Sort-Object -Unique)
 
 if ($servers.Count -eq 0) {
-    throw "No servers found in list file: $ServerListPath"
+    $errorMsg = "No servers found in list file: $ServerListPath"
+    Write-ErrorLog -ServerName "SCRIPT_INIT" -ErrorMessage $errorMsg -ErrorType "FATAL"
+    throw $errorMsg
 }
 
 Write-Host "Targets:" -ForegroundColor Cyan
 $servers | ForEach-Object { Write-Host "  $_" }
 
 if (-not (Test-Path -LiteralPath $ScriptPath)) {
-    throw "Discovery script not found: $ScriptPath"
+    $errorMsg = "Discovery script not found: $ScriptPath"
+    Write-ErrorLog -ServerName "SCRIPT_INIT" -ErrorMessage $errorMsg -ErrorType "FATAL"
+    throw $errorMsg
 }
 
 # Get credentials if not provided and needed
@@ -108,7 +157,9 @@ function Invoke-DiscoveryOnServer {
         Write-Host "[$ComputerName] Successfully connected (remote computer: $testResult)" -ForegroundColor Green
     }
     catch {
-        Write-Warning "[$ComputerName] WinRM connection failed: $($_.Exception.Message)"
+        $errorMsg = "WinRM connection failed: $($_.Exception.Message)"
+        Write-Warning "[$ComputerName] $errorMsg"
+        Write-ErrorLog -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
         return
     }
 
@@ -172,10 +223,19 @@ function Invoke-DiscoveryOnServer {
                 Write-Host "[$ComputerName] Copied $remotePath -> $destPath" -ForegroundColor Green
             }
             catch {
-                Write-Warning "[$ComputerName] Failed to collect JSON: $($_.Exception.Message)"
+                $errorMsg = "Failed to collect JSON from CollectorShare: $($_.Exception.Message)"
+                Write-Warning "[$ComputerName] $errorMsg"
+                Write-ErrorLog -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
             }
             finally {
-                if ($session) { Remove-PSSession $session }
+                if ($session) { 
+                    try {
+                        Remove-PSSession $session -ErrorAction SilentlyContinue
+                    }
+                    catch {
+                        Write-ErrorLog -ServerName $ComputerName -ErrorMessage "Failed to remove PSSession: $($_.Exception.Message)" -ErrorType "WARNING"
+                    }
+                }
             }
         }
         else {
@@ -233,7 +293,7 @@ function Invoke-DiscoveryOnServer {
                         $psDriveParams = @{
                             Name = $driveName
                             PSProvider = "FileSystem"
-                            Root = "\\$ComputerName\${driveLetter}$"
+                            Root = "\\$ComputerName\$driveLetter`$"
                             Credential = $Credential
                             Scope = "Script"
                         }
@@ -241,16 +301,24 @@ function Invoke-DiscoveryOnServer {
                         
                         try {
                             # Map the remote path using the temporary drive
-                            $mappedRemotePath = "${driveName}:\$relativePath"
+                            $mappedRemotePath = "${driveName}:$relativePath"
                             $mappedRemoteFile = Join-Path $mappedRemotePath $pattern
                             Copy-Item -Path $mappedRemoteFile -Destination $localDestPath -Force -ErrorAction Stop
                         }
                         finally {
-                            Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
+                            try {
+                                Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
+                            }
+                            catch {
+                                $errorMsg = "Failed to remove PSDrive $driveName`: $($_.Exception.Message)"
+                                Write-ErrorLog -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "WARNING"
+                            }
                         }
                     }
                     catch {
-                        throw "Failed to access remote ${driveLetter}$ share: $($_.Exception.Message)"
+                        $errorMsg = "Failed to access remote ${driveLetter}`$ share: $($_.Exception.Message)"
+                        Write-ErrorLog -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
+                        throw
                     }
                 }
                 else {
@@ -261,7 +329,9 @@ function Invoke-DiscoveryOnServer {
                 Write-Host "[$ComputerName] Copied $remoteUncFile -> $localDestPath" -ForegroundColor Green
             }
             catch {
-                Write-Warning "[$ComputerName] Failed to collect JSON from C$ share: $($_.Exception.Message)"
+                $errorMsg = "Failed to collect JSON from C$ share: $($_.Exception.Message)"
+                Write-Warning "[$ComputerName] $errorMsg"
+                Write-ErrorLog -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
                 Write-Host "[$ComputerName] JSON file is available on the remote server at: $remotePath" -ForegroundColor Cyan
             }
         }
@@ -269,9 +339,39 @@ function Invoke-DiscoveryOnServer {
         Write-Host "[$ComputerName] Discovery completed." -ForegroundColor Green
     }
     catch {
-        Write-Warning "[$ComputerName] Discovery FAILED: $($_.Exception.Message)"
+        $errorMsg = "Discovery FAILED: $($_.Exception.Message)"
+        Write-Warning "[$ComputerName] $errorMsg"
+        Write-ErrorLog -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "DISCOVERY_ERROR"
+        
+        # Log full exception details if available
+        if ($_.Exception.InnerException) {
+            Write-ErrorLog -ServerName $ComputerName -ErrorMessage "Inner Exception: $($_.Exception.InnerException.Message)" -ErrorType "DISCOVERY_ERROR"
+        }
+        if ($_.ScriptStackTrace) {
+            Write-ErrorLog -ServerName $ComputerName -ErrorMessage "Stack Trace: $($_.ScriptStackTrace)" -ErrorType "DISCOVERY_ERROR"
+        }
     }
 }
+
+# Initialize error log path early so it's available for summary
+if (-not $script:ErrorLogPath) {
+    if ($MyInvocation.PSCommandPath) {
+        $scriptDir = Split-Path -Parent $MyInvocation.PSCommandPath
+    }
+    elseif ($PSScriptRoot) {
+        $scriptDir = $PSScriptRoot
+    }
+    else {
+        $scriptDir = (Get-Location).Path
+    }
+    $resultsDir = Join-Path $scriptDir "results"
+    if (-not (Test-Path -Path $resultsDir)) {
+        New-Item -Path $resultsDir -ItemType Directory -Force | Out-Null
+    }
+    $script:ErrorLogPath = Join-Path $resultsDir "error.log"
+}
+
+Write-Host "`nStarting discovery on $($servers.Count) server(s)..." -ForegroundColor Cyan
 
 if ($UseParallel) {
     # PowerShell 7+ ForEach-Object -Parallel
@@ -286,11 +386,35 @@ if ($UseParallel) {
 }
 else {
     foreach ($server in $servers) {
-        Invoke-DiscoveryOnServer -ComputerName $server `
-                                 -Credential $Credential `
-                                 -ScriptContent $scriptContent `
-                                 -ScriptParams $scriptParams `
-                                 -CollectorShare $CollectorShare `
-                                 -RemoteOutputRoot $RemoteOutputRoot
+        try {
+            Invoke-DiscoveryOnServer -ComputerName $server `
+                                     -Credential $Credential `
+                                     -ScriptContent $scriptContent `
+                                     -ScriptParams $scriptParams `
+                                     -CollectorShare $CollectorShare `
+                                     -RemoteOutputRoot $RemoteOutputRoot
+        }
+        catch {
+            # Log any unexpected errors that escape the function
+            $errorMsg = "Unexpected error processing server: $($_.Exception.Message)"
+            Write-ErrorLog -ServerName $server -ErrorMessage $errorMsg -ErrorType "FATAL"
+            Write-Warning "[$server] $errorMsg"
+        }
     }
 }
+
+# Display summary
+Write-Host "`n" + ("="*70) -ForegroundColor Cyan
+Write-Host "Discovery execution completed." -ForegroundColor Green
+if (Test-Path -Path $script:ErrorLogPath) {
+    $errorCount = (Get-Content -Path $script:ErrorLogPath -ErrorAction SilentlyContinue | Measure-Object -Line).Lines
+    if ($errorCount -gt 0) {
+        Write-Host "Errors were encountered during execution. Check error log:" -ForegroundColor Yellow
+        Write-Host "  ${script:ErrorLogPath}" -ForegroundColor Yellow
+        Write-Host "  Total error entries: $errorCount" -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "No errors encountered. Error log: ${script:ErrorLogPath}" -ForegroundColor Green
+    }
+}
+Write-Host ("="*70) -ForegroundColor Cyan
