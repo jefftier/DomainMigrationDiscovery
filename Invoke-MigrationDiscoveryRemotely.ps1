@@ -126,19 +126,21 @@ $scriptParams = @{
 }
 
 if ($OldDomainNetBIOS) { $scriptParams['OldDomainNetBIOS'] = $OldDomainNetBIOS }
-if ($NewDomainNetBIOS) { $scriptParams['NewDomainNetBIOS'] = $NewDomainNetBIOS }
+# Note: NewDomainNetBIOS is not a parameter in Get-WorkstationDiscovery.ps1, so we don't pass it
 if ($PlantId)          { $scriptParams['PlantId'] = $PlantId }
 if ($EmitStdOut)       { $scriptParams['EmitStdOut'] = $true }
 
 # Helper: run discovery on a single server
-function Invoke-DiscoveryOnServer {
+# Converted to scriptblock for parallel execution compatibility
+$InvokeDiscoveryOnServerScriptBlock = {
     param(
         [string]$ComputerName,
         [System.Management.Automation.PSCredential]$Credential,
         [string]$ScriptContent,
         [hashtable]$ScriptParams,
         [string]$CollectorShare,
-        [string]$RemoteOutputRoot
+        [string]$RemoteOutputRoot,
+        [scriptblock]$WriteErrorLogFunction
     )
 
     Write-Host "[$ComputerName] Testing WinRM connectivity and authentication..." -ForegroundColor Yellow
@@ -155,11 +157,15 @@ function Invoke-DiscoveryOnServer {
         }
         $testResult = Invoke-Command @testParams
         Write-Host "[$ComputerName] Successfully connected (remote computer: $testResult)" -ForegroundColor Green
+        
+        # Store the actual computer name from the remote system for filename matching
+        # The discovery script uses $env:COMPUTERNAME which may not match the provided ComputerName case
+        $actualComputerName = $testResult
     }
     catch {
         $errorMsg = "WinRM connection failed: $($_.Exception.Message)"
         Write-Warning "[$ComputerName] $errorMsg"
-        Write-ErrorLog -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
+        & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
         return
     }
 
@@ -194,8 +200,10 @@ function Invoke-DiscoveryOnServer {
         }
 
         # Collect JSON file from remote server
+        # Use the actual computer name from the connection test to match the filename pattern
+        # The discovery script uses $env:COMPUTERNAME which may not be uppercase
         $today = Get-Date
-        $pattern = "{0}_{1}.json" -f $ComputerName.ToUpper(), $today.ToString('MM-dd-yyyy')
+        $pattern = "{0}_{1}.json" -f $actualComputerName, $today.ToString('MM-dd-yyyy')
         $remotePath = Join-Path $RemoteOutputRoot $pattern
 
         if ($CollectorShare) {
@@ -225,7 +233,7 @@ function Invoke-DiscoveryOnServer {
             catch {
                 $errorMsg = "Failed to collect JSON from CollectorShare: $($_.Exception.Message)"
                 Write-Warning "[$ComputerName] $errorMsg"
-                Write-ErrorLog -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
+                & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
             }
             finally {
                 if ($session) { 
@@ -233,7 +241,7 @@ function Invoke-DiscoveryOnServer {
                         Remove-PSSession $session -ErrorAction SilentlyContinue
                     }
                     catch {
-                        Write-ErrorLog -ServerName $ComputerName -ErrorMessage "Failed to remove PSSession: $($_.Exception.Message)" -ErrorType "WARNING"
+                        & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "Failed to remove PSSession: $($_.Exception.Message)" -ErrorType "WARNING"
                     }
                 }
             }
@@ -311,13 +319,13 @@ function Invoke-DiscoveryOnServer {
                             }
                             catch {
                                 $errorMsg = "Failed to remove PSDrive $driveName`: $($_.Exception.Message)"
-                                Write-ErrorLog -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "WARNING"
+                                & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "WARNING"
                             }
                         }
                     }
                     catch {
                         $errorMsg = "Failed to access remote ${driveLetter}`$ share: $($_.Exception.Message)"
-                        Write-ErrorLog -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
+                        & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
                         throw
                     }
                 }
@@ -331,7 +339,7 @@ function Invoke-DiscoveryOnServer {
             catch {
                 $errorMsg = "Failed to collect JSON from C$ share: $($_.Exception.Message)"
                 Write-Warning "[$ComputerName] $errorMsg"
-                Write-ErrorLog -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
+                & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
                 Write-Host "[$ComputerName] JSON file is available on the remote server at: $remotePath" -ForegroundColor Cyan
             }
         }
@@ -341,14 +349,14 @@ function Invoke-DiscoveryOnServer {
     catch {
         $errorMsg = "Discovery FAILED: $($_.Exception.Message)"
         Write-Warning "[$ComputerName] $errorMsg"
-        Write-ErrorLog -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "DISCOVERY_ERROR"
+        & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "DISCOVERY_ERROR"
         
         # Log full exception details if available
         if ($_.Exception.InnerException) {
-            Write-ErrorLog -ServerName $ComputerName -ErrorMessage "Inner Exception: $($_.Exception.InnerException.Message)" -ErrorType "DISCOVERY_ERROR"
+            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "Inner Exception: $($_.Exception.InnerException.Message)" -ErrorType "DISCOVERY_ERROR"
         }
         if ($_.ScriptStackTrace) {
-            Write-ErrorLog -ServerName $ComputerName -ErrorMessage "Stack Trace: $($_.ScriptStackTrace)" -ErrorType "DISCOVERY_ERROR"
+            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "Stack Trace: $($_.ScriptStackTrace)" -ErrorType "DISCOVERY_ERROR"
         }
     }
 }
@@ -373,26 +381,33 @@ if (-not $script:ErrorLogPath) {
 
 Write-Host "`nStarting discovery on $($servers.Count) server(s)..." -ForegroundColor Cyan
 
+# Create a scriptblock for Write-ErrorLog to pass to parallel execution
+$writeErrorLogScriptBlock = ${function:Write-ErrorLog}
+
 if ($UseParallel) {
     # PowerShell 7+ ForEach-Object -Parallel
     $servers | ForEach-Object -Parallel {
-        Invoke-DiscoveryOnServer -ComputerName $_ `
-                                 -Credential $using:Credential `
-                                 -ScriptContent $using:scriptContent `
-                                 -ScriptParams $using:scriptParams `
-                                 -CollectorShare $using:CollectorShare `
-                                 -RemoteOutputRoot $using:RemoteOutputRoot
+        & $using:InvokeDiscoveryOnServerScriptBlock `
+            -ComputerName $_ `
+            -Credential $using:Credential `
+            -ScriptContent $using:scriptContent `
+            -ScriptParams $using:scriptParams `
+            -CollectorShare $using:CollectorShare `
+            -RemoteOutputRoot $using:RemoteOutputRoot `
+            -WriteErrorLogFunction $using:writeErrorLogScriptBlock
     } -ThrottleLimit 10
 }
 else {
     foreach ($server in $servers) {
         try {
-            Invoke-DiscoveryOnServer -ComputerName $server `
-                                     -Credential $Credential `
-                                     -ScriptContent $scriptContent `
-                                     -ScriptParams $scriptParams `
-                                     -CollectorShare $CollectorShare `
-                                     -RemoteOutputRoot $RemoteOutputRoot
+            & $InvokeDiscoveryOnServerScriptBlock `
+                -ComputerName $server `
+                -Credential $Credential `
+                -ScriptContent $scriptContent `
+                -ScriptParams $scriptParams `
+                -CollectorShare $CollectorShare `
+                -RemoteOutputRoot $RemoteOutputRoot `
+                -WriteErrorLogFunction $writeErrorLogScriptBlock
         }
         catch {
             # Log any unexpected errors that escape the function
