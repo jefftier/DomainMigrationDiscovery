@@ -24,6 +24,8 @@ param(
 
     [string]$PlantId,
     
+    [string]$ConfigFile,      # Path to JSON configuration file for domain settings and tenant maps
+    
     [switch]$EmitStdOut,      # bubble up the summary object from each server
     [switch]$UseParallel,     # simple fan-out option
     [System.Management.Automation.PSCredential]$Credential  # Optional: if not provided, will prompt or use current user
@@ -158,6 +160,22 @@ if ($OldDomainNetBIOS) { $scriptParams['OldDomainNetBIOS'] = $OldDomainNetBIOS }
 if ($PlantId)          { $scriptParams['PlantId'] = $PlantId }
 if ($EmitStdOut)       { $scriptParams['EmitStdOut'] = $true }
 
+# Handle ConfigFile parameter
+# If ConfigFile is provided, we need to copy it to each remote server
+# The config file will be copied to C:\temp\MigrationDiscovery\config.json on each remote server
+$remoteConfigPath = $null
+if ($ConfigFile) {
+    if (-not (Test-Path -LiteralPath $ConfigFile)) {
+        Write-Warning "Configuration file not found: $ConfigFile. ConfigFile parameter will be ignored."
+    }
+    else {
+        # Set the remote path where the config file will be copied
+        $remoteConfigPath = "C:\temp\MigrationDiscovery\config.json"
+        $scriptParams['ConfigFile'] = $remoteConfigPath
+        Write-Host "ConfigFile will be copied to each remote server at: $remoteConfigPath" -ForegroundColor Cyan
+    }
+}
+
 # Helper: run discovery on a single server
 # Converted to scriptblock for parallel execution compatibility
 $InvokeDiscoveryOnServerScriptBlock = {
@@ -168,7 +186,9 @@ $InvokeDiscoveryOnServerScriptBlock = {
         [hashtable]$ScriptParams,
         [string]$CollectorShare,
         [string]$RemoteOutputRoot,
-        [scriptblock]$WriteErrorLogFunction
+        [scriptblock]$WriteErrorLogFunction,
+        [string]$ConfigFile,
+        [string]$RemoteConfigPath
     )
 
     Write-Host "[$ComputerName] Testing WinRM connectivity and authentication..." -ForegroundColor Yellow
@@ -195,6 +215,68 @@ $InvokeDiscoveryOnServerScriptBlock = {
         Write-Warning "[$ComputerName] $errorMsg"
         & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
         return
+    }
+
+    # Copy config file to remote server if provided
+    if ($ConfigFile -and $RemoteConfigPath) {
+        Write-Host "[$ComputerName] Copying configuration file to remote server..." -ForegroundColor Yellow
+        try {
+            # Create remote directory if it doesn't exist
+            $remoteConfigDir = Split-Path -Parent $RemoteConfigPath
+            $createDirParams = @{
+                ComputerName = $ComputerName
+                ScriptBlock  = {
+                    param($DirPath)
+                    if (-not (Test-Path -Path $DirPath)) {
+                        New-Item -Path $DirPath -ItemType Directory -Force | Out-Null
+                    }
+                }
+                ArgumentList = @($remoteConfigDir)
+                ErrorAction  = 'Stop'
+            }
+            if ($Credential) {
+                $createDirParams['Credential'] = $Credential
+            }
+            Invoke-Command @createDirParams | Out-Null
+            
+            # Copy the config file to remote server
+            $sessionParams = @{
+                ComputerName = $ComputerName
+            }
+            if ($Credential) {
+                $sessionParams['Credential'] = $Credential
+            }
+            $session = New-PSSession @sessionParams
+            
+            try {
+                Copy-Item -Path $ConfigFile -Destination $RemoteConfigPath -ToSession $session -Force -ErrorAction Stop
+                Write-Host "[$ComputerName] Configuration file copied successfully" -ForegroundColor Green
+            }
+            catch {
+                $errorMsg = "Failed to copy configuration file: $($_.Exception.Message)"
+                Write-Warning "[$ComputerName] $errorMsg"
+                & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONFIG_FILE_ERROR"
+                # Continue execution - the discovery script will run without config file
+                $ScriptParams.Remove('ConfigFile')
+            }
+            finally {
+                if ($session) {
+                    try {
+                        Remove-PSSession $session -ErrorAction SilentlyContinue
+                    }
+                    catch {
+                        & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "Failed to remove PSSession: $($_.Exception.Message)" -ErrorType "WARNING"
+                    }
+                }
+            }
+        }
+        catch {
+            $errorMsg = "Failed to prepare remote directory for config file: $($_.Exception.Message)"
+            Write-Warning "[$ComputerName] $errorMsg"
+            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONFIG_FILE_ERROR"
+            # Continue execution - the discovery script will run without config file
+            $ScriptParams.Remove('ConfigFile')
+        }
     }
 
     Write-Host "[$ComputerName] Starting discovery..." -ForegroundColor Cyan
@@ -438,7 +520,9 @@ if ($script:CompatibilityMode -eq 'Full' -and $UseParallel) {
                 -ScriptParams $using:scriptParams `
                 -CollectorShare $using:CollectorShare `
                 -RemoteOutputRoot $using:RemoteOutputRoot `
-                -WriteErrorLogFunction $using:writeErrorLogScriptBlock
+                -WriteErrorLogFunction $using:writeErrorLogScriptBlock `
+                -ConfigFile $using:ConfigFile `
+                -RemoteConfigPath $using:remoteConfigPath
         } -ThrottleLimit 10
     }
     else {
@@ -453,7 +537,9 @@ if ($script:CompatibilityMode -eq 'Full' -and $UseParallel) {
                     -ScriptParams $scriptParams `
                     -CollectorShare $CollectorShare `
                     -RemoteOutputRoot $RemoteOutputRoot `
-                    -WriteErrorLogFunction $writeErrorLogScriptBlock
+                    -WriteErrorLogFunction $writeErrorLogScriptBlock `
+                    -ConfigFile $ConfigFile `
+                    -RemoteConfigPath $remoteConfigPath
             }
             catch {
                 # Log any unexpected errors that escape the function
@@ -478,7 +564,9 @@ else {
                 -ScriptParams $scriptParams `
                 -CollectorShare $CollectorShare `
                 -RemoteOutputRoot $RemoteOutputRoot `
-                -WriteErrorLogFunction $writeErrorLogScriptBlock
+                -WriteErrorLogFunction $writeErrorLogScriptBlock `
+                -ConfigFile $ConfigFile `
+                -RemoteConfigPath $remoteConfigPath
         }
         catch {
             # Log any unexpected errors that escape the function

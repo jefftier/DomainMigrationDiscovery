@@ -221,7 +221,7 @@ param(
   [switch]$SlimOnlyRunningServices = $false,
   
   [Parameter(HelpMessage="Path to JSON configuration file containing domain settings and tenant maps. Command-line parameters take precedence over config file values.")]
-  [string]$ConfigFile
+  [string]$ConfigFile = $null
 )
 
 #region ============================================================================
