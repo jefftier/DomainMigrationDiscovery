@@ -6648,18 +6648,18 @@ function Get-SharedFoldersWithACL {
     1. Schema - Self-documenting schema information
     2. Metadata - Collection metadata (timestamps, domain info, script version)
     3. System - System hardware and OS information
-    4. Profiles - User profiles (null in SlimOutputOnly mode)
+    4. Profiles - User profiles
     5. SharedFolders - Shared folders with ACLs
     6. InstalledApps - Installed applications (filtered in SlimOutputOnly mode)
     7. Services - Windows services (filtered in SlimOutputOnly mode)
     8. ScheduledTasks - Scheduled tasks (filtered in SlimOutputOnly mode)
-    9. LocalGroupMembers - Local group memberships (null in SlimOutputOnly mode)
+    9. LocalGroupMembers - Local group memberships
     10. LocalAdministrators - Local Administrators group (always included)
-    11. LocalAccounts - Local user and group accounts (null in SlimOutputOnly mode)
-    12. MappedDrives - Mapped network drives (null in SlimOutputOnly mode)
+    11. LocalAccounts - Local user and group accounts
+    12. MappedDrives - Mapped network drives
     13. Printers - Installed printers (filtered in SlimOutputOnly mode)
-    14. OdbcDsn - ODBC data sources (null in SlimOutputOnly mode)
-    15. AutoAdminLogon - Auto-admin logon config (null in SlimOutputOnly mode)
+    14. OdbcDsn - ODBC data sources
+    15. AutoAdminLogon - Auto-admin logon config
     16. CredentialManager - Stored credentials
     17. Certificates - Certificates with domain references
     18. Endpoints - Certificate endpoints (IIS, RDP)
@@ -6773,7 +6773,7 @@ function Get-SharedFoldersWithACL {
         Properties = @('Hostname', 'Manufacturer', 'Model', 'OSVersion', 'IPAddress', 'MACAddress', 'LoggedInUser')
       }
       Profiles = [pscustomobject]@{
-        Description = 'User profiles on the system (null in SlimOutputOnly mode)'
+        Description = 'User profiles on the system'
         Type = 'Array'
         ItemType = 'Object'
         ItemProperties = @('SID', 'LocalPath', 'LastUseTime', 'ProfileSize', 'Status')
@@ -6806,7 +6806,7 @@ function Get-SharedFoldersWithACL {
         ItemProperties = @('Name', 'State', 'Principal', 'AccountIdentity', 'Actions', 'HasDomainReference', 'MatchedFields')
       }
       LocalGroupMembers = [pscustomobject]@{
-        Description = 'Local group memberships (null in SlimOutputOnly mode)'
+        Description = 'Local group memberships'
         Type = 'Array'
         ItemType = 'Object'
         ItemProperties = @('GroupName', 'Members', 'HasDomainReference')
@@ -6818,7 +6818,7 @@ function Get-SharedFoldersWithACL {
         ItemProperties = @('Name', 'Type', 'Sid', 'IsOldDomain', 'Source')
       }
       LocalAccounts = [pscustomobject]@{
-        Description = 'Local user and group accounts (null in SlimOutputOnly mode)'
+        Description = 'Local user and group accounts'
         Type = 'Object'
         Properties = @('Users', 'Groups')
         Nested = [pscustomobject]@{
@@ -6827,7 +6827,7 @@ function Get-SharedFoldersWithACL {
         }
       }
       MappedDrives = [pscustomobject]@{
-        Description = 'Mapped network drives (null in SlimOutputOnly mode)'
+        Description = 'Mapped network drives'
         Type = 'Array'
         ItemType = 'Object'
         ItemProperties = @('Drive', 'RemotePath', 'Provider', 'AccountIdentity', 'HasDomainReference')
@@ -6839,13 +6839,13 @@ function Get-SharedFoldersWithACL {
         ItemProperties = @('Name', 'ShareName', 'PortName', 'ComputerName', 'ServerName', 'HasDomainReference', 'MatchedField')
       }
       OdbcDsn = [pscustomobject]@{
-        Description = 'ODBC data sources (null in SlimOutputOnly mode)'
+        Description = 'ODBC data sources'
         Type = 'Array'
         ItemType = 'Object'
         ItemProperties = @('Name', 'Driver', 'Server', 'Database', 'HasDomainReference')
       }
       AutoAdminLogon = [pscustomobject]@{
-        Description = 'Auto-admin logon configuration (null in SlimOutputOnly mode)'
+        Description = 'Auto-admin logon configuration'
         Type = 'Array'
         ItemType = 'Object'
         ItemProperties = @('Domain', 'Username', 'HasDomainReference')
@@ -7004,7 +7004,7 @@ function Get-SharedFoldersWithACL {
     Schema = $jsonSchema
     Metadata = $metadata
     System   = $sysInfo
-    Profiles = if ($SlimOutputOnly) { $null } else { $profiles }
+    Profiles = $profiles
     SharedFolders = [pscustomobject]@{
       Shares = $sharedFolders
       Errors = $sharedFoldersErrors
@@ -7012,13 +7012,13 @@ function Get-SharedFoldersWithACL {
     InstalledApps  = $installedAppsData
     Services       = $servicesData
     ScheduledTasks = $scheduledTasksData
-    LocalGroupMembers    = if ($SlimOutputOnly) { $null } else { $localGroupMembers }
+    LocalGroupMembers    = $localGroupMembers
     LocalAdministrators  = $localAdministrators  # Always include, regardless of Slim mode
-    LocalAccounts        = if ($SlimOutputOnly) { $null } else { $localAccounts }
-    MappedDrives  = if ($SlimOutputOnly) { $null } else { $driveMaps }
+    LocalAccounts        = $localAccounts
+    MappedDrives  = $driveMaps
     Printers      = $printersData
-    OdbcDsn       = if ($SlimOutputOnly) { $null } else { $odbc }
-    AutoAdminLogon= if ($SlimOutputOnly) { $null } else { $auto }
+    OdbcDsn       = $odbc
+    AutoAdminLogon= $auto
     CredentialManager = $credentialManager
     Certificates = $certificates
     Endpoints = $certificateEndpoints
