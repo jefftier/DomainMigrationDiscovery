@@ -227,6 +227,26 @@ param(
 #region ============================================================================
 # SCRIPT INITIALIZATION
 # ============================================================================
+# PowerShell version compatibility check
+if (-not $PSVersionTable -or -not $PSVersionTable.PSVersion) {
+    Write-Error "Unable to determine PowerShell version. This script requires at least PowerShell 5.1."
+    exit 1
+}
+
+$script:PSMajorVersion = $PSVersionTable.PSVersion.Major
+
+if ($script:PSMajorVersion -lt 5) {
+    Write-Error "This script requires PowerShell 5.1 or higher. Current version: $($PSVersionTable.PSVersion)"
+    exit 1
+}
+
+# Set compatibility mode (for error handling and encoding)
+if ($script:PSMajorVersion -lt 5) {
+    $script:CompatibilityMode = 'Legacy3to4'
+} else {
+    $script:CompatibilityMode = 'Full'
+}
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 #endregion
@@ -3648,6 +3668,15 @@ function Get-SharedFoldersWithACL {
     $json = $null
     $jsonConversionError = $null
     try {
+      # Determine compatibility mode if not already set
+      if (-not $script:CompatibilityMode) {
+        if ($PSVersionTable.PSVersion.Major -ge 5) {
+          $script:CompatibilityMode = 'Full'
+        } else {
+          $script:CompatibilityMode = 'Legacy3to4'
+        }
+      }
+      
       if ($script:CompatibilityMode -eq 'Full') {
         $json = $result | ConvertTo-Json -Depth 10 -ErrorAction Stop
       } else {
@@ -3679,6 +3708,15 @@ function Get-SharedFoldersWithACL {
     
     # Write JSON to file with UTF-8 encoding (no BOM for Power BI compatibility)
     try {
+      # Determine compatibility mode if not already set
+      if (-not $script:CompatibilityMode) {
+        if ($PSVersionTable.PSVersion.Major -ge 5) {
+          $script:CompatibilityMode = 'Full'
+        } else {
+          $script:CompatibilityMode = 'Legacy3to4'
+        }
+      }
+      
       if ($script:CompatibilityMode -eq 'Full') {
         # Use UTF8NoBOM encoding for Power BI compatibility
         $utf8NoBom = New-Object System.Text.UTF8Encoding $false
@@ -3701,6 +3739,15 @@ function Get-SharedFoldersWithACL {
     $hostname = $env:COMPUTERNAME
     $domain = $null
     try {
+      # Determine compatibility mode if not already set
+      if (-not $script:CompatibilityMode) {
+        if ($PSVersionTable.PSVersion.Major -ge 5) {
+          $script:CompatibilityMode = 'Full'
+        } else {
+          $script:CompatibilityMode = 'Legacy3to4'
+        }
+      }
+      
       if ($script:CompatibilityMode -eq 'Full') {
         $systemInfo = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
       } else {
@@ -3792,6 +3839,15 @@ function Get-SharedFoldersWithACL {
     }
     
     try {
+      # Determine compatibility mode if not already set
+      if (-not $script:CompatibilityMode) {
+        if ($PSVersionTable.PSVersion.Major -ge 5) {
+          $script:CompatibilityMode = 'Full'
+        } else {
+          $script:CompatibilityMode = 'Legacy3to4'
+        }
+      }
+      
       if ($script:CompatibilityMode -eq 'Full') {
         $errorJson = $errorResult | ConvertTo-Json -Depth 10
         $utf8NoBom = New-Object System.Text.UTF8Encoding $false
@@ -3888,6 +3944,15 @@ catch {
     $hostname = $env:COMPUTERNAME
     $domain = $null
     try {
+      # Determine compatibility mode if not already set
+      if (-not $script:CompatibilityMode) {
+        if ($PSVersionTable.PSVersion.Major -ge 5) {
+          $script:CompatibilityMode = 'Full'
+        } else {
+          $script:CompatibilityMode = 'Legacy3to4'
+        }
+      }
+      
       if ($script:CompatibilityMode -eq 'Full') {
         $systemInfo = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
       } else {
@@ -4018,6 +4083,24 @@ catch {
     Ensure-Directory $OutputRoot
     $fname = ('{0}_{1}.json' -f $hostname, (Get-Date).ToString('MM-dd-yyyy'))
     $localPath = Join-Path $OutputRoot $fname
+    
+    # Determine compatibility mode if not already set
+    if (-not $script:CompatibilityMode) {
+      if ($PSVersionTable.PSVersion.Major -ge 5) {
+        $script:CompatibilityMode = 'Full'
+      } else {
+        $script:CompatibilityMode = 'Legacy3to4'
+      }
+    }
+    
+    # Determine compatibility mode if not already set
+    if (-not $script:CompatibilityMode) {
+      if ($PSVersionTable.PSVersion.Major -ge 5) {
+        $script:CompatibilityMode = 'Full'
+      } else {
+        $script:CompatibilityMode = 'Legacy3to4'
+      }
+    }
     
     if ($script:CompatibilityMode -eq 'Full') {
       $json = $errorResult | ConvertTo-Json -Depth 10
