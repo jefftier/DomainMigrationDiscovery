@@ -231,6 +231,10 @@ $InvokeDiscoveryOnServerScriptBlock = {
     )
 
     Write-Host "[$ComputerName] Testing WinRM connectivity and authentication..." -ForegroundColor Yellow
+    $connectionSuccessful = $false
+    $actualComputerName = $null
+    
+    # First attempt to connect
     try {
         # Test connectivity and authentication with a simple Invoke-Command
         # This is more reliable than Test-WSMan when credentials are involved
@@ -248,9 +252,141 @@ $InvokeDiscoveryOnServerScriptBlock = {
         # Store the actual computer name from the remote system for filename matching
         # The discovery script uses $env:COMPUTERNAME which may not match the provided ComputerName case
         $actualComputerName = $testResult
+        $connectionSuccessful = $true
     }
     catch {
-        $errorMsg = "WinRM connection failed: $($_.Exception.Message)"
+        $initialError = $_.Exception.Message
+        Write-Warning "[$ComputerName] Initial WinRM connection failed: $initialError"
+        
+        # Attempt to start WinRM service remotely and retry
+        Write-Host "[$ComputerName] Attempting to start WinRM service and retry connection..." -ForegroundColor Yellow
+        
+        # Determine compatibility mode if not already set
+        if (-not $script:CompatibilityMode) {
+            if ($PSVersionTable.PSVersion.Major -ge 5) {
+                $script:CompatibilityMode = 'Full'
+            } else {
+                $script:CompatibilityMode = 'Legacy3to4'
+            }
+        }
+        
+        # Try to start WinRM service remotely
+        $serviceStarted = $false
+        try {
+            if ($script:CompatibilityMode -eq 'Full') {
+                # PowerShell 5.1+ - Use CIM
+                $cimParams = @{
+                    ComputerName = $ComputerName
+                    ClassName    = 'Win32_Service'
+                    Filter       = "Name='WinRM'"
+                    ErrorAction  = 'Stop'
+                }
+                if ($Credential) {
+                    $cimParams['Credential'] = $Credential
+                }
+                
+                $service = Get-CimInstance @cimParams
+                if ($service) {
+                    if ($service.State -eq 'Running') {
+                        Write-Host "[$ComputerName] WinRM service is already running, retrying connection..." -ForegroundColor Yellow
+                        $serviceStarted = $true
+                    }
+                    else {
+                        # Start the service
+                        $startParams = @{
+                            InputObject = $service
+                            ErrorAction = 'Stop'
+                        }
+                        $result = Invoke-CimMethod @startParams -MethodName StartService
+                        
+                        if ($result.ReturnValue -eq 0) {
+                            Write-Host "[$ComputerName] WinRM service started successfully (ReturnValue: $($result.ReturnValue))" -ForegroundColor Green
+                            # Wait a moment for the service to fully start
+                            Start-Sleep -Seconds 3
+                            $serviceStarted = $true
+                        }
+                        else {
+                            Write-Warning "[$ComputerName] Failed to start WinRM service. ReturnValue: $($result.ReturnValue)"
+                        }
+                    }
+                }
+            }
+            else {
+                # PowerShell 3.0-4.0 - Use WMI
+                $wmiParams = @{
+                    ComputerName = $ComputerName
+                    Class        = 'Win32_Service'
+                    Filter       = "Name='WinRM'"
+                    ErrorAction  = 'Stop'
+                }
+                if ($Credential) {
+                    $wmiParams['Credential'] = $Credential
+                }
+                
+                $service = Get-WmiObject @wmiParams
+                if ($service) {
+                    if ($service.State -eq 'Running') {
+                        Write-Host "[$ComputerName] WinRM service is already running, retrying connection..." -ForegroundColor Yellow
+                        $serviceStarted = $true
+                    }
+                    else {
+                        # Start the service
+                        $result = $service.StartService()
+                        
+                        if ($result.ReturnValue -eq 0) {
+                            Write-Host "[$ComputerName] WinRM service started successfully (ReturnValue: $($result.ReturnValue))" -ForegroundColor Green
+                            # Wait a moment for the service to fully start
+                            Start-Sleep -Seconds 3
+                            $serviceStarted = $true
+                        }
+                        else {
+                            Write-Warning "[$ComputerName] Failed to start WinRM service. ReturnValue: $($result.ReturnValue)"
+                        }
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Warning "[$ComputerName] Failed to start WinRM service remotely: $($_.Exception.Message)"
+        }
+        
+        # Retry connection if service was started or was already running
+        if ($serviceStarted) {
+            Write-Host "[$ComputerName] Retrying WinRM connection..." -ForegroundColor Yellow
+            try {
+                $testParams = @{
+                    ComputerName = $ComputerName
+                    ScriptBlock  = { $env:COMPUTERNAME }
+                    ErrorAction  = 'Stop'
+                }
+                if ($Credential) {
+                    $testParams['Credential'] = $Credential
+                }
+                $testResult = Invoke-Command @testParams
+                Write-Host "[$ComputerName] Successfully connected after starting WinRM service (remote computer: $testResult)" -ForegroundColor Green
+                $actualComputerName = $testResult
+                $connectionSuccessful = $true
+            }
+            catch {
+                $retryError = $_.Exception.Message
+                $errorMsg = "WinRM connection failed after attempting to start service. Initial error: $initialError. Retry error: $retryError"
+                Write-Warning "[$ComputerName] $errorMsg"
+                & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
+                return
+            }
+        }
+        else {
+            # Service couldn't be started, log error and return
+            $errorMsg = "WinRM connection failed and could not start WinRM service remotely: $initialError"
+            Write-Warning "[$ComputerName] $errorMsg"
+            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
+            return
+        }
+    }
+    
+    # If connection failed for any reason, exit
+    if (-not $connectionSuccessful) {
+        $errorMsg = "WinRM connection failed: Unable to establish connection"
         Write-Warning "[$ComputerName] $errorMsg"
         & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
         return
