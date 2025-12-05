@@ -272,17 +272,31 @@ $InvokeDiscoveryOnServerScriptBlock = {
         
         # Try to start WinRM service remotely
         $serviceStarted = $false
+        $cimSession = $null
         try {
             if ($script:CompatibilityMode -eq 'Full') {
                 # PowerShell 5.1+ - Use CIM
+                # CIM requires a session for credentials, not a direct Credential parameter
+                if ($Credential) {
+                    # Create a CIM session with credentials
+                    $sessionParams = @{
+                        ComputerName = $ComputerName
+                        Credential   = $Credential
+                        ErrorAction = 'Stop'
+                    }
+                    $cimSession = New-CimSession @sessionParams
+                }
+                
+                # Get the service using session or direct connection
                 $cimParams = @{
-                    ComputerName = $ComputerName
                     ClassName    = 'Win32_Service'
                     Filter       = "Name='WinRM'"
                     ErrorAction  = 'Stop'
                 }
-                if ($Credential) {
-                    $cimParams['Credential'] = $Credential
+                if ($cimSession) {
+                    $cimParams['CimSession'] = $cimSession
+                } else {
+                    $cimParams['ComputerName'] = $ComputerName
                 }
                 
                 $service = Get-CimInstance @cimParams
@@ -348,6 +362,17 @@ $InvokeDiscoveryOnServerScriptBlock = {
         }
         catch {
             Write-Warning "[$ComputerName] Failed to start WinRM service remotely: $($_.Exception.Message)"
+        }
+        finally {
+            # Clean up CIM session if created
+            if ($cimSession) {
+                try {
+                    Remove-CimSession -CimSession $cimSession -ErrorAction SilentlyContinue
+                }
+                catch {
+                    # Ignore cleanup errors
+                }
+            }
         }
         
         # Retry connection if service was started or was already running
