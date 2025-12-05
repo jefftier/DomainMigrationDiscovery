@@ -10,9 +10,10 @@ This script performs a deep discovery of Windows workstations to identify all re
 
 ### Core Capabilities
 
-- **Comprehensive Discovery**: Scans 20+ areas of Windows configuration for domain references
+- **Comprehensive Discovery**: Scans 30+ areas of Windows configuration for domain references
 - **Slim Output Mode**: Filter out Microsoft-built-in applications and services for cleaner output
 - **JSON Output**: Structured JSON output for easy parsing and integration
+- **Self-Documenting Schema**: JSON output includes embedded schema documentation for Power BI and custom web applications
 - **Central Share Support**: Optionally copy results to a central network share
 - **Remote Execution**: Launcher script for executing discovery on multiple servers via PowerShell Remoting
 - **Parallel Processing**: Support for parallel execution across multiple servers (PowerShell 7+)
@@ -21,6 +22,11 @@ This script performs a deep discovery of Windows workstations to identify all re
 - **Error Handling**: Robust error handling with detailed logging
 - **Error Logging**: Automatic error logging to `results\error.log` for remote execution
 - **Automatic File Collection**: Automatically collects JSON files from remote servers when `CollectorShare` is not specified
+- **Self-Test Mode**: Lightweight validation mode for testing discovery functions
+- **App-Specific Discovery**: Config-driven deep scanning of application-specific registry keys and folders
+- **Database Connection Parsing**: Structured parsing of database connection strings with password protection
+- **Script & Automation Discovery**: Targeted discovery of script files referenced by services and tasks
+- **Server Summary**: Aggregated file server and print server references for reporting
 
 ### Discovery Areas
 
@@ -29,29 +35,36 @@ The script scans the following areas for old domain references:
 1. **Windows Services** - Service accounts and executable paths
 2. **Scheduled Tasks** - Task principals and action paths
 3. **Installed Applications** - Machine and user-level applications
-4. **Mapped Network Drives** - Per-user drive mappings
-5. **Printers** - Local and network printers
-6. **ODBC Data Sources** - Machine and user-level ODBC connections
-7. **Local Group Memberships** - Domain accounts in local groups
-8. **Local Administrators** - Domain accounts with admin rights
-9. **Shared Folders** - File shares with ACLs
-10. **Windows Credential Manager** - Stored credentials (per-user and current user)
-11. **Certificate Stores** - Machine and user certificate stores
-12. **Firewall Rules** - Windows Firewall rules with domain references
-13. **DNS Configuration** - DNS suffix search lists and per-adapter DNS
-14. **IIS Configuration** - Websites, application pools, and bindings (if IIS is installed)
-15. **SQL Server** - SQL logins, linked servers, and config files (if SQL Server is installed)
-16. **Event Logs** - Domain references in Windows event logs
-17. **Application Configuration Files** - Config files with domain references and embedded credentials
-18. **Security Agents** - CrowdStrike and Qualys agent tenant information
-19. **Quest ODMAD** - Quest On Demand Migration for Active Directory configuration
-20. **Auto Admin Logon** - Registry-based auto-logon configuration
-21. **User Profiles** - Profile information and activity (full mode only)
-22. **GPO Machine DN** - Group Policy Object machine distinguished name
+4. **User Profiles** - Profile information and activity
+5. **Mapped Network Drives** - Per-user drive mappings
+6. **Printers** - Local and network printers
+7. **ODBC Data Sources** - Machine and user-level ODBC connections
+8. **Local Group Memberships** - Domain accounts in local groups
+9. **Local Administrators** - Domain accounts with admin rights
+10. **Local Accounts** - Local users and groups with usage tracking
+11. **Shared Folders** - File shares with ACLs
+12. **Windows Credential Manager** - Stored credentials (per-user and current user)
+13. **Certificate Stores** - Machine and user certificate stores with SAN analysis
+14. **Certificate Endpoints** - IIS HTTPS bindings and RDP SSL configurations
+15. **Firewall Rules** - Windows Firewall rules with domain references
+16. **DNS Configuration** - DNS suffix search lists and per-adapter DNS
+17. **IIS Configuration** - Websites, application pools, and bindings (if IIS is installed)
+18. **SQL Server** - SQL logins, linked servers, jobs, and config files (if SQL Server is installed)
+19. **Event Logs** - Domain references in Windows event logs
+20. **Application Configuration Files** - Config files with domain references and embedded credentials
+21. **Hard-Coded References** - Aggressive scanning of registry, files, scheduled task XML for domain references
+22. **Script & Automation Files** - PowerShell, batch, VBScript files referenced by services/tasks
+23. **Database Connection Strings** - Parsed connection strings from ODBC, registry, and config files
+24. **App-Specific Discovery** - Config-driven deep scanning of application-specific locations
+25. **Server Summary** - Aggregated file server and print server references
+26. **Security Agents** - CrowdStrike and Qualys agent tenant information
+27. **Quest ODMAD** - Quest On Demand Migration for Active Directory configuration
+28. **Auto Admin Logon** - Registry-based auto-logon configuration
+29. **GPO Machine DN** - Group Policy Object machine distinguished name
 
 ## Requirements
 
-- **PowerShell Version**: 5.1 or higher
+- **PowerShell Version**: 5.1 or higher (full features), 3.0+ for basic functionality
 - **Windows OS**: Windows 7/Server 2008 R2 or later
 - **Permissions**: 
   - Local Administrator rights (for full discovery)
@@ -94,6 +107,8 @@ The script scans the following areas for old domain references:
 | `SlimOnlyRunningServices` | Switch | No | `$false` | Only include running services in slim mode |
 | `IncludeAppx` | Switch | No | `$false` | Include AppX packages in discovery |
 | `EmitStdOut` | Switch | No | `$false` | Emit summary JSON to stdout |
+| `SelfTest` | Switch | No | `$false` | Run lightweight self-test validation mode |
+| `AppDiscoveryConfigPath` | String | No | - | Path to JSON config file for app-specific discovery |
 
 ### Example: Full Discovery with Central Share
 
@@ -101,7 +116,7 @@ The script scans the following areas for old domain references:
 .\Get-WorkstationDiscovery.ps1 `
     -OldDomainFqdn "olddomain.com" `
     -NewDomainFqdn "newdomain.com" `
-    -OldDomainNetBIOS "" `
+    -OldDomainNetBIOS "OLDDOMAIN" `
     -CentralShare "\\fileserver\migration" `
     -OutputRoot "C:\temp\discovery\out" `
     -LogRoot "C:\temp\discovery\logs" `
@@ -118,6 +133,53 @@ The script scans the following areas for old domain references:
     -SlimOutputOnly `
     -KeepOffice `
     -SlimOnlyRunningServices
+```
+
+### Example: App-Specific Discovery
+
+Create a JSON configuration file (`app-discovery.json`):
+
+```json
+[
+  {
+    "Name": "App1",
+    "RegistryRoots": [
+      "HKLM:\\SOFTWARE\\Vendor\\App1",
+      "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\App1Service"
+    ],
+    "Folders": [
+      "C:\\ProgramData\\Vendor\\App1",
+      "C:\\App1\\Config"
+    ]
+  },
+  {
+    "Name": "BackupToolX",
+    "RegistryRoots": [
+      "HKLM:\\SOFTWARE\\Vendor\\BackupToolX"
+    ],
+    "Folders": [
+      "D:\\BackupToolX\\Configs"
+    ]
+  }
+]
+```
+
+Run discovery with app-specific scanning:
+
+```powershell
+.\Get-WorkstationDiscovery.ps1 `
+    -OldDomainFqdn "olddomain.com" `
+    -NewDomainFqdn "newdomain.com" `
+    -AppDiscoveryConfigPath ".\app-discovery.json"
+```
+
+### Example: Self-Test Mode
+
+```powershell
+.\Get-WorkstationDiscovery.ps1 `
+    -OldDomainFqdn "olddomain.com" `
+    -NewDomainFqdn "newdomain.com" `
+    -SelfTest
 ```
 
 ## Remote Execution
@@ -225,7 +287,12 @@ The script generates a JSON file named `{COMPUTERNAME}_{MM-dd-yyyy}.json` in the
 
 **Important**: The JSON structure is **identical** regardless of the `SlimOutputOnly` setting. When `SlimOutputOnly` is enabled, the script uses filtered data (excluding Microsoft-built-in applications and services), but the structure remains the same. This ensures consistent ingestion into reporting engines.
 
+The JSON output includes a self-documenting `Schema` section that describes all sections, property types, and data formats for easy integration with Power BI and custom web applications.
+
 ## Complete Data Elements Collected
+
+### Schema
+Self-documenting schema object describing all sections, property types, nested structures, and data format conventions. This enables automatic schema validation and Power BI ingestion.
 
 ### Metadata
 - `GpoMachineDN` - Group Policy Object machine distinguished name
@@ -249,13 +316,12 @@ The script generates a JSON file named `{COMPUTERNAME}_{MM-dd-yyyy}.json` in the
 - `MACAddress` - Primary MAC address (comma-separated if multiple)
 - `LoggedInUser` - Currently logged in user
 
-### User Profiles (null in SlimOutputOnly mode)
+### User Profiles
 Each profile object contains:
 - `SID` - Security Identifier
 - `LocalPath` - Profile directory path
 - `LastUseTime` - Last profile access timestamp
-- `ProfileSize` - Profile directory size in bytes
-- `Status` - Profile status (Loaded/Unloaded)
+- `Special` - Whether profile is a special system profile
 
 ### Shared Folders
 - `Shares` - Array of share objects with:
@@ -270,9 +336,7 @@ Each application object contains:
 - `DisplayName` - Application display name
 - `DisplayVersion` - Application version
 - `Publisher` - Application publisher
-- `InstallDate` - Installation date
 - `InstallLocation` - Installation directory
-- `UninstallString` - Uninstall command
 - `KeyPath` - Registry key path
 - `Scope` - Installation scope (Machine, User:SID, AppxAllUsers)
 
@@ -282,62 +346,81 @@ Each service object contains:
 - `DisplayName` - Service display name
 - `State` - Service state (Running, Stopped, etc.)
 - `StartMode` - Service start mode (Automatic, Manual, Disabled)
-- `StartName` - Service account (run-as account)
+- `Account` - Service account (run-as account)
 - `PathName` - Service executable path with arguments
+- `AccountIdentity` - Normalized account identity object (Raw, Name, Domain, Type, Sid, IsOldDomain)
+- `HasDomainReference` - Whether service contains old domain reference
+- `MatchedField` - Which field matched (Account, PathName)
 
 ### Scheduled Tasks (filtered in SlimOutputOnly mode)
 Each task object contains:
 - `Path` - Task path and name
-- `UserId` - Task principal (run-as account)
-- `LogonType` - Logon type (Interactive, Password, S4U, etc.)
-- `RunLevel` - Run level (Limited, Highest)
-- `Enabled` - Whether task is enabled
+- `State` - Task state (Ready, Running, Disabled, etc.)
+- `Principal` - Task principal (run-as account)
+- `AccountIdentity` - Normalized account identity object
 - `Actions` - Array of action objects:
   - `ActionType` - Action type (Exec, ComHandler, etc.)
   - `Execute` - Executable path
   - `Arguments` - Command-line arguments
   - `WorkingDir` - Working directory
-  - `ClassId` - COM class ID (for ComHandler actions)
-  - `Data` - Action data
-  - `Summary` - Action summary string
+- `HasDomainReference` - Whether task contains old domain reference
+- `MatchedFields` - Array of fields that matched (Principal, Actions)
 
-### Local Group Members (null in SlimOutputOnly mode)
+### Local Group Members
 Each member object contains:
-- `Group` - Group name
-- `Name` - Member name (account name)
-- `ObjectClass` - Object class (User, Group, etc.)
-- `PrincipalSource` - Principal source (ActiveDirectory, Local, etc.)
-- `SID` - Security Identifier
-- `IsGroup` - Whether member is a group
-- `IsDomain` - Whether member is a domain account
-- `IsBuiltIn` - Whether member is a built-in account
-- `Domain` - Domain name (if domain account)
-- `Account` - Account name without domain
-- `IsDomainGroupLikely` - Whether likely a domain group
-- `Source` - Source of member information
+- `GroupName` - Group name
+- `Members` - Array of member objects with:
+  - `Name` - Member name (account name)
+  - `SID` - Security Identifier
+  - `ObjectClass` - Object class (User, Group, etc.)
+  - `PrincipalSource` - Principal source (ActiveDirectory, Local, etc.)
+  - `AccountIdentity` - Normalized account identity object
+- `HasDomainReference` - Whether group contains old domain members
 
-### Local Administrators (null in SlimOutputOnly mode)
+### Local Administrators (always included)
 Each administrator object contains:
-- `Group` - Group name (typically "Administrators")
 - `Name` - Administrator account name
-- `ObjectClass` - Object class
-- `PrincipalSource` - Principal source
-- `SID` - Security Identifier
-- `IsGroup` - Whether member is a group
-- `IsDomain` - Whether member is a domain account
-- `IsBuiltIn` - Whether member is a built-in account
-- `Domain` - Domain name (if domain account)
-- `Account` - Account name without domain
-- `IsDomainGroupLikely` - Whether likely a domain group
+- `Type` - Account type (Domain, Local, BuiltIn)
+- `Sid` - Security Identifier
+- `IsOldDomain` - Whether account is from old domain
 - `Source` - Source of member information
 
-### Mapped Drives (null in SlimOutputOnly mode)
+### Local Accounts
+Object containing:
+- `Users` - Array of local user objects:
+  - `Name` - User name
+  - `SID` - Security Identifier
+  - `Description` - User description
+  - `Enabled` - Whether account is enabled
+  - `PasswordExpires` - Password expiration date
+  - `PasswordLastSet` - Password last set date
+  - `PasswordNeverExpires` - Whether password never expires
+  - `UserMayChangePassword` - Whether user can change password
+  - `AccountExpires` - Account expiration date
+  - `LastLogon` - Last logon timestamp
+  - `IsBuiltIn` - Whether account is built-in (Administrator, Guest)
+  - `AccountIdentity` - Normalized account identity object
+  - `Usage` - Usage tracking object:
+    - `Services` - Array of service names using this account
+    - `ScheduledTasks` - Array of task paths using this account
+    - `LocalGroups` - Array of local group names
+    - `IsLocalAdministrator` - Whether user is a local administrator
+- `Groups` - Array of local group objects:
+  - `Name` - Group name
+  - `SID` - Security Identifier
+  - `Description` - Group description
+  - `Members` - Array of member objects with AccountIdentity
+  - `IsAdministratorsGroup` - Whether this is the Administrators group
+
+### Mapped Drives
 Each drive mapping object contains:
 - `SID` - User SID who owns the mapping
 - `Drive` - Drive letter
 - `Remote` - Remote UNC path
 - `Provider` - Network provider name
 - `Persistent` - Whether mapping is persistent
+- `AccountIdentity` - Normalized account identity (if applicable)
+- `HasDomainReference` - Whether mapping references old domain
 
 ### Printers (filtered in SlimOutputOnly mode)
 Each printer object contains:
@@ -346,14 +429,11 @@ Each printer object contains:
 - `PortName` - Printer port name
 - `ShareName` - Printer share name (if shared)
 - `ComputerName` - Computer name (for network printers)
-- `SystemName` - System name (alternative field)
 - `ServerName` - Server name (for network printers)
-- `Type` - Printer type
-- `Location` - Printer location
-- `Comment` - Printer comment
-- `Network` - Whether printer is network printer
+- `HasDomainReference` - Whether printer references old domain
+- `MatchedField` - Which field matched (PortName, ShareName, ServerName, ComputerName)
 
-### ODBC Data Sources (null in SlimOutputOnly mode)
+### ODBC Data Sources
 Each ODBC DSN object contains:
 - `Name` - DSN name
 - `Driver` - ODBC driver name
@@ -361,20 +441,23 @@ Each ODBC DSN object contains:
 - `Database` - Database name
 - `Trusted` - Whether using trusted connection
 - `Scope` - DSN scope (Machine64, Machine32, User:SID)
+- `HasDomainReference` - Whether DSN references old domain
 
-### Auto Admin Logon (null in SlimOutputOnly mode)
+### Auto Admin Logon
 Object contains:
 - `Enabled` - Whether auto-logon is enabled
+- `ForceAutoLogon` - Whether force auto-logon is enabled
 - `DefaultUserName` - Default username
 - `DefaultDomainName` - Default domain name
-- `DefaultPassword` - Whether password is set (not the actual password)
-- `AutoAdminLogon` - Auto-logon flag value
+- `HasDomainReference` - Whether auto-logon references old domain
 
 ### Credential Manager
 Each credential object contains:
 - `Profile` - Profile identifier (SID or "CurrentUser")
 - `Target` - Credential target name
 - `UserName` - Stored username
+- `AccountIdentity` - Normalized account identity object
+- `Source` - Source of credential (CredentialManager, Registry)
 - `Type` - Credential type (Generic, DomainPassword, etc.)
 - `HasDomainReference` - Whether credential contains old domain reference
 
@@ -387,8 +470,23 @@ Each certificate object contains:
 - `NotBefore` - Certificate valid from date
 - `NotAfter` - Certificate valid to date
 - `SANs` - Subject Alternative Names array
+- `SANText` - SAN entries as comma-separated string
+- `KeyUsages` - Array of key usage OIDs
 - `HasDomainReference` - Whether certificate contains old domain reference
-- `MatchedField` - Which field matched (Subject, Issuer, SANs)
+- `MatchedFields` - Array of fields that matched (Subject, Issuer, SANs)
+
+### Certificate Endpoints
+Each endpoint object contains:
+- `Type` - Endpoint type (IIS, RDP)
+- `Name` - Endpoint name (site name or "RDP Listener")
+- `Protocol` - Protocol (https, tcp)
+- `HostHeader` - Host header value (for IIS)
+- `IPAddress` - IP address
+- `Port` - Port number
+- `CertificateThumbprint` - Certificate thumbprint
+- `CertificateTiedToOldDomain` - Whether certificate contains old domain reference
+- `HasDomainReference` - Whether endpoint itself references old domain
+- `MatchedFields` - Array of fields that matched
 
 ### Firewall Rules
 Each firewall rule object contains:
@@ -427,72 +525,118 @@ Object contains:
   - `MatchedFields` - Array of fields that matched (Name, Binding, ApplicationPath)
 - `AppPools` - Array of application pool objects:
   - `Name` - Application pool name
-  - `IdentityType` - Identity type (ApplicationPoolIdentity, NetworkService, Custom)
-  - `IdentityUser` - Identity user (if custom identity)
+  - `State` - Application pool state
+  - `Identity` - Identity type (ApplicationPoolIdentity, NetworkService, Custom)
+  - `AccountIdentity` - Normalized account identity (if custom identity)
   - `HasDomainReference` - Whether app pool contains old domain reference
-  - `MatchedFields` - Array of fields that matched (Name, IdentityUser)
+  - `MatchedField` - Which field matched (Name, IdentityUser)
 
 ### SQL Server Configuration (null if SQL Server not installed)
 Array of SQL instance objects, each containing:
 - `InstanceName` - SQL Server instance name
-- `InstancePath` - SQL Server installation path
+- `ServiceName` - Windows service name
+- `DetectionMethod` - How instance was detected (Service, Registry, WMI)
 - `DomainLogins` - Array of domain login objects:
   - `LoginName` - SQL login name
   - `LoginType` - Login type (WindowsUser, WindowsGroup, etc.)
+  - `AccountIdentity` - Normalized account identity object
 - `LinkedServersWithDomainReferences` - Array of linked server objects:
   - `LinkedServerName` - Linked server name
   - `Provider` - Linked server provider
   - `DataSource` - Data source
-  - `Catalog` - Catalog/database
-  - `HasDomainReference` - Whether linked server contains old domain reference
+  - `RemoteLogin` - Remote login name
+  - `AccountIdentity` - Normalized account identity for remote login
   - `MatchedFields` - Array of fields that matched
 - `ConfigFilesWithDomainReferences` - Array of config file objects:
   - `FilePath` - Configuration file path
-  - `HasDomainReference` - Whether file contains old domain reference
+  - `FileName` - File name
+  - `MatchedLines` - Array of matched line snippets
+  - `TotalMatches` - Total number of matches
 
 ### Event Log Domain References
 Array of event log entry objects, each containing:
 - `LogName` - Event log name (Application, System, Security, etc.)
-- `Id` - Event ID
-- `TimeCreated` - Event timestamp
+- `EventId` - Event ID
+- `TimeGenerated` - Event timestamp
 - `Level` - Event level (Information, Warning, Error, etc.)
 - `Message` - Event message (truncated if very long)
-- `HasDomainReference` - Whether event contains old domain reference
+- `MatchedField` - Which field matched (Message, UserName, etc.)
 
 ### Application Configuration Files
 Object contains:
 - `FilesWithDomainReferences` - Array of config file objects:
   - `FilePath` - Configuration file path
-  - `HasDomainReference` - Whether file contains old domain reference
+  - `FileExtension` - File extension
+  - `MatchedField` - Which field matched
+  - `Snippet` - Snippet of matched content
 - `FilesWithCredentials` - Array of config file objects:
   - `FilePath` - Configuration file path
-  - `HasCredentials` - Whether file contains embedded credentials (connection strings, etc.)
+  - `HasCredentials` - Whether file contains embedded credentials
+  - `CredentialPatterns` - Array of credential patterns found
+
+### Hard-Coded Domain References
+Object containing:
+- `OldDomain` - Array of reference objects:
+  - `LocationType` - Location type (Registry, File, ScheduledTask, Printer, ServiceConfig, Other)
+  - `Location` - Full location path (registry path, file path, etc.)
+  - `EvidenceType` - Evidence type (FQDN, NetBIOS, LDAP, UNC)
+  - `Value` - Snippet of value where match was found
+- `ScriptAutomation` - Array of script file objects:
+  - `Path` - Script file path
+  - `Type` - Reference type (ScriptFile)
+  - `ScriptType` - Script type (PowerShell, Batch, VBScript, etc.)
+  - `EvidenceType` - Evidence type (FQDN, NetBIOS, UNC, LDAP)
+  - `Snippet` - Snippet of matched content
+  - `LineNumber` - Line number where match was found (if available)
+  - Limited to 50 files in Slim mode
+
+### App-Specific Discovery (null if AppDiscoveryConfigPath not provided)
+Array of app objects, each containing:
+- `Name` - Application name from config
+- `Hits` - Array of domain reference objects:
+  - `LocationType` - Location type (Registry, File)
+  - `Location` - Full location path
+  - `EvidenceType` - Evidence type (FQDN, NetBIOS, UNC, LDAP)
+  - `ValueOrSnippet` - Value or snippet of matched content
+  - Limited to 50 hits per app in Slim mode, 1000 in Full mode
+
+### Database Connections
+Array of connection objects, each containing:
+- `LocationType` - Location type (ODBC, Registry, File)
+- `Location` - Descriptive location (e.g., "ODBC DSN: MyDSN (Machine64)" or registry/file path)
+- `Parsed` - Parsed connection string object:
+  - `Raw` - Full connection string (omitted in Slim mode)
+  - `DataSource` - Database server name
+  - `InitialCatalog` - Database name
+  - `IntegratedSecurity` - Whether using Windows authentication (true/false/null)
+  - `UserId` - Username if present
+  - `HasPassword` - Boolean flag (password never stored)
+  - `IsOldDomainServer` - Whether DataSource matches old domain
+
+### Server Summary
+Object containing:
+- `FileServers` - Array of file server objects:
+  - `Name` - Server name (normalized)
+  - `IsOldDomain` - Whether server is from old domain
+  - `SourceTypes` - Array of source types (Share, UNCReference, MappedDrive)
+  - `Paths` - Array of UNC paths (limited to first 10 in Slim mode)
+- `PrintServers` - Array of print server objects:
+  - `Name` - Server name (normalized)
+  - `IsOldDomain` - Whether server is from old domain
+  - `Printers` - Array of printer names
 
 ### Security Agents
-Object contains:
-- `CrowdStrike` - CrowdStrike agent information:
-  - `RegPath` - Registry path
-  - `ValueName` - Registry value name
-  - `Kind` - Registry value kind (Binary, String, etc.)
-  - `Raw` - Raw registry value (hex string for binary)
-  - `String` - String representation of value
-  - `Tenant` - Mapped tenant name
-- `Qualys` - Qualys agent information:
-  - `RegPath` - Registry path
-  - `ValueName` - Registry value name
-  - `Kind` - Registry value kind
-  - `Raw` - Raw registry value
-  - `String` - String representation of value
-  - `Tenant` - Mapped tenant name
+Array of security agent objects, each containing:
+- `AgentName` - Agent name (CrowdStrike, Qualys)
+- `TenantId` - Tenant ID
+- `TenantName` - Tenant name
+- `HasDomainReference` - Whether tenant information references old domain
 
 ### Quest ODMAD Configuration
-Object contains:
-- `RegPath` - Registry path
-- `AgentKey` - Agent key value
-- `DeviceName` - Device name
-- `DomainName` - Domain name
-- `TenantId` - Tenant ID
-- `Hostname` - Hostname
+Array of Quest configuration objects, each containing:
+- `ConfigPath` - Registry path
+- `Settings` - Configuration settings object
+- `HasDomainReference` - Whether configuration references old domain
 
 ### Detection Results
 Object contains:
@@ -514,6 +658,12 @@ Object contains:
   - `SqlServerOldDomain` - Array of SQL Server references (format: "Instance: Details")
   - `EventLogDomainReferences` - Array of event log entries (format: "LogName: Event ID at Timestamp")
   - `ApplicationConfigFilesOldDomain` - Array of config file paths
+  - `HardCodedReferencesOldDomain` - Array of hard-coded references (format: "LocationType: Location")
+  - `ScriptAutomationOldDomain` - Array of script files (format: "Path (EvidenceType)")
+  - `DatabaseConnectionsOldDomain` - Array of database connections (format: "Location: DataSource")
+  - `AppSpecificOldDomain` - Array of app-specific references (format: "App: Location")
+  - `FileServersOldDomain` - Array of file server names
+  - `PrintServersOldDomain` - Array of print server names
 - `Summary` - Summary object:
   - `HasOldDomainRefs` - Boolean indicating if any old domain references were found
   - `Counts` - Object with counts for each category:
@@ -535,13 +685,23 @@ Object contains:
     - `SqlServer` - Count of SQL Server references to old domain
     - `EventLogs` - Count of event log entries referencing old domain
     - `ApplicationConfigFiles` - Count of application config files with old domain references
+    - `HardCodedReferences` - Count of hard-coded references
+    - `ScriptAutomation` - Count of script files with old domain references
+    - `DatabaseConnections` - Count of database connections to old domain servers
+    - `AppSpecific` - Count of app-specific references
+    - `FileServers` - Count of file servers from old domain
+    - `PrintServers` - Count of print servers from old domain
 
 ### Slim Mode Behavior
 
 When `SlimOutputOnly` is enabled:
-- **InstalledApps**, **Services**, **ScheduledTasks**, and **Printers** contain filtered data (Microsoft-built-in items excluded)
-- **Profiles**, **LocalGroupMembers**, **LocalAdministrators**, **MappedDrives**, **OdbcDsn**, and **AutoAdminLogon** are set to `null`
-- All other properties remain populated
+- **InstalledApps**, **Services**, **ScheduledTasks**, and **Printers** contain filtered data (Microsoft-built-in items excluded unless explicitly kept)
+- **DatabaseConnections** omits `Raw` connection string (keeps parsed fields only)
+- **AppSpecific** limits to 50 hits per app (vs 1000 in Full mode) and truncates snippets to 100 chars (vs 200)
+- **ScriptAutomation** limits to 50 script files (stops scanning after 50 matches) and truncates snippets to 100 chars
+- **ServerSummary** limits file server paths to first 10 per server (vs all in Full mode)
+- **DatabaseConnections** scanning limits to 50 config files per location (vs 200 in Full mode)
+- **All other sections** remain fully populated (Profiles, LocalGroupMembers, LocalAccounts, MappedDrives, OdbcDsn, AutoAdminLogon are now included in Slim mode)
 - The JSON structure is identical to full mode
 
 ## Detection Logic
@@ -551,25 +711,49 @@ The script detects old domain references using regex pattern matching in the fol
 - **FQDN**: Direct FQDN match (e.g., `olddomain.com`)
 - **UPN Format**: Email-style format (e.g., `@olddomain.com$`)
 - **LDAP DN Format**: Distinguished name format (e.g., `DC=olddomain,DC=com`)
+- **LDAP URL Format**: LDAP URLs (e.g., `LDAP://server.olddomain.com`)
+- **UNC Path Format**: UNC paths (e.g., `\\server.olddomain.com\share` or `\\olddomain\share`)
 
 The script scans for old domain references in:
 
-- **Service Accounts**: Service start names containing old domain
+- **Service Accounts**: Service start names containing old domain (normalized via `Resolve-AccountIdentity`)
 - **Service Paths**: Executable paths referencing old domain
-- **Task Principals**: Scheduled task run-as accounts
+- **Task Principals**: Scheduled task run-as accounts (normalized via `Resolve-AccountIdentity`)
 - **Task Actions**: Executable paths in task actions
 - **Drive Maps**: Mapped drive UNC paths
 - **Printers**: Printer UNC paths and server names
 - **ODBC**: Connection strings and server names
-- **Local Groups**: Domain accounts in local groups
-- **Credentials**: Windows Credential Manager entries
+- **Local Groups**: Domain accounts in local groups (normalized via `Resolve-AccountIdentity`)
+- **Local Accounts**: Local users and groups with usage tracking
+- **Credentials**: Windows Credential Manager entries (normalized via `Resolve-AccountIdentity`)
 - **Certificates**: Certificate subjects, issuers, and SANs
+- **Certificate Endpoints**: IIS HTTPS bindings and RDP SSL configurations
 - **Firewall Rules**: Domain account references in firewall rules
 - **DNS**: DNS suffix search lists and per-adapter DNS suffixes
-- **IIS**: Application pool identities, site bindings, and application paths
-- **SQL Server**: SQL logins, linked servers, and configuration files
+- **IIS**: Application pool identities, site bindings, and application paths (normalized via `Resolve-AccountIdentity`)
+- **SQL Server**: SQL logins, linked servers, and configuration files (normalized via `Resolve-AccountIdentity`)
 - **Application Config Files**: Configuration files containing domain references or embedded credentials (connection strings, etc.)
 - **Event Logs**: Event log messages containing domain references
+- **Hard-Coded References**: Registry values, config files, scheduled task XML
+- **Script Files**: PowerShell, batch, VBScript files referenced by services/tasks
+- **Database Connection Strings**: Parsed connection strings from ODBC, registry, and config files
+- **App-Specific Locations**: Config-driven scanning of application-specific registry keys and folders
+
+### Account Identity Normalization
+
+The script uses a centralized `Resolve-AccountIdentity` function that normalizes account formats:
+- **DOMAIN\User** (NetBIOS format)
+- **User@domain.com** (UPN format)
+- **Bare User** (local or domain depending on context)
+- **SIDs** (resolved to account names)
+
+All normalized accounts include:
+- `Raw` - Original account string
+- `Name` - Account name only
+- `Domain` - Domain or computer name
+- `Type` - Account type (Domain, Local, BuiltIn, Unknown)
+- `Sid` - Security Identifier (if resolved)
+- `IsOldDomain` - Whether account is from old domain
 
 ## Logging
 
@@ -584,6 +768,9 @@ Logs include:
 - Profile processing status
 - Registry access attempts
 - Network share access attempts
+- App-specific discovery progress
+- Database connection discovery progress
+- Script automation discovery progress
 
 ## Central Share
 
@@ -594,12 +781,48 @@ If `CentralShare` is provided, the script will:
 
 If validation fails, the script will log a warning but continue with local output only.
 
+## Self-Test Mode
+
+When `-SelfTest` is specified, the script runs lightweight validation tests instead of full discovery:
+- Tests local administrator discovery
+- Tests service account parsing
+- Tests registry scanning patterns
+- Tests file scanning patterns
+- Outputs concise JSON/table showing pass/fail per area
+- Exits early after validation
+
+This mode is useful for quickly validating script behavior across multiple machines before running full discovery.
+
+## App-Specific Discovery
+
+When `-AppDiscoveryConfigPath` is provided, the script performs deep scanning of application-specific locations:
+
+1. **Registry Scanning**: Recursively scans specified registry keys (max depth 10) for domain references
+2. **Folder Scanning**: Scans specified folders for config files (`.config`, `.ini`, `.xml`, `.json`, `.conf`, `.properties`, `.txt`) with depth limit of 3
+3. **Results**: Returns structured results per app with location, evidence type, and snippets
+
+The config file format is a JSON array:
+```json
+[
+  {
+    "Name": "App1",
+    "RegistryRoots": ["HKLM:\\SOFTWARE\\Vendor\\App1"],
+    "Folders": ["C:\\ProgramData\\Vendor\\App1"]
+  }
+]
+```
+
+Apps with no hits are still included with empty `Hits` arrays so Power BI can show "scanned but clean".
+
 ## Performance Considerations
 
 - **Profile Processing**: User profiles are processed efficiently with batched hive operations
 - **Large Systems**: On systems with many profiles or services, execution may take several minutes
 - **Network Shares**: Accessing network shares may add latency if shares are slow or unavailable
 - **Parallel Execution**: Remote execution supports parallel processing (PowerShell 7+) with throttle limit of 10 concurrent executions
+- **App-Specific Discovery**: Deep registry and folder scanning may add time; use targeted configs
+- **Script Discovery**: Limited to files referenced by services/tasks and well-known directories to avoid full disk scans
+- **File Size Limits**: Config files larger than 5MB are skipped to avoid memory issues
 
 ## Error Handling
 
@@ -610,18 +833,22 @@ The script includes comprehensive error handling:
 - All errors are written to the log file
 - Remote execution errors are logged to `results\error.log` with timestamps and server names
 - Execution continues even if individual servers fail
+- App-specific discovery failures are logged but don't stop overall execution
+- Database connection parsing errors are logged but don't stop discovery
 
 ## Security Notes
 
 - The script requires local administrator rights for full functionality
-- Output JSON files may contain sensitive information (paths, account names)
+- Output JSON files may contain sensitive information (paths, account names, connection strings)
 - Ensure output directories have appropriate access controls
 - Credential passwords are not extracted (they are encrypted in Windows Vault)
+- Database connection passwords are never stored; only `HasPassword` boolean flag is recorded
 - The script does not modify any system configuration, only reads and reports
+- Script files are read for content scanning but not executed
 
 ## Version
 
-Current version: **1.7.0**
+Current version: **2.0.0**
 
 ## Contributing
 
