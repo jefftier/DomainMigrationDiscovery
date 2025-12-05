@@ -13,10 +13,9 @@ param(
     [string]$CollectorShare,
 
     # Domain config for your discovery script
-    [Parameter(Mandatory = $true)]
+    # These can be provided as parameters or loaded from ConfigFile
     [string]$OldDomainFqdn,
 
-    [Parameter(Mandatory = $true)]
     [string]$NewDomainFqdn,
 
     [string]$OldDomainNetBIOS,
@@ -60,6 +59,46 @@ else {
     Set-StrictMode -Off
 }
 $ErrorActionPreference = 'Continue'  # Changed to Continue so errors don't stop execution
+
+# Load configuration file early to get domain settings if not provided as parameters
+if ($ConfigFile -and (Test-Path -LiteralPath $ConfigFile)) {
+    try {
+        $configContent = Get-Content -Path $ConfigFile -Raw -ErrorAction Stop
+        $config = $configContent | ConvertFrom-Json -ErrorAction Stop
+        
+        # Load domain settings from config file if not provided as parameters
+        if ([string]::IsNullOrWhiteSpace($OldDomainFqdn) -and $config.PSObject.Properties['OldDomainFqdn']) {
+            $OldDomainFqdn = $config.OldDomainFqdn
+            Write-Host "Loaded OldDomainFqdn from config file: $OldDomainFqdn" -ForegroundColor Cyan
+        }
+        
+        if ([string]::IsNullOrWhiteSpace($NewDomainFqdn) -and $config.PSObject.Properties['NewDomainFqdn']) {
+            $NewDomainFqdn = $config.NewDomainFqdn
+            Write-Host "Loaded NewDomainFqdn from config file: $NewDomainFqdn" -ForegroundColor Cyan
+        }
+        
+        if ([string]::IsNullOrWhiteSpace($OldDomainNetBIOS) -and $config.PSObject.Properties['OldDomainNetBIOS']) {
+            $OldDomainNetBIOS = $config.OldDomainNetBIOS
+            Write-Host "Loaded OldDomainNetBIOS from config file: $OldDomainNetBIOS" -ForegroundColor Cyan
+        }
+    }
+    catch {
+        Write-Warning "Failed to load configuration file '$ConfigFile': $($_.Exception.Message)"
+    }
+}
+
+# Validate that required domain parameters are available (either from command line or config file)
+if ([string]::IsNullOrWhiteSpace($OldDomainFqdn)) {
+    $errorMsg = "OldDomainFqdn is required. Please provide it as a parameter (-OldDomainFqdn) or in the configuration file (ConfigFile parameter)."
+    Write-Error $errorMsg
+    throw $errorMsg
+}
+
+if ([string]::IsNullOrWhiteSpace($NewDomainFqdn)) {
+    $errorMsg = "NewDomainFqdn is required. Please provide it as a parameter (-NewDomainFqdn) or in the configuration file (ConfigFile parameter)."
+    Write-Error $errorMsg
+    throw $errorMsg
+}
 
 # Initialize error logging
 $script:ErrorLogPath = $null
