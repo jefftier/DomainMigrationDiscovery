@@ -1,0 +1,17 @@
+{
+  "OldDomainFqdn": "oldco.com",
+  "NewDomainFqdn": "newco.com",
+  "OldDomainNetBIOS": "OLDCO",
+  "CrowdStrikeTenantMap": {
+    "CU_HEX_VALUE_1": "CS NewCo1",
+    "CU_HEX_VALUE_2": "CS Newco2",
+    "DEFAULT": "Oldco",
+    "UNKNOWN": "Unknown"
+  },
+  "QualysTenantMap": {
+    "ACTIVATION_ID_GUID": "Qualys NewCo",
+    "DEFAULT": "OldCo",
+    "UNKNOWN": "Unknown"
+  }
+}
+

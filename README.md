@@ -27,6 +27,7 @@ This script performs a deep discovery of Windows workstations to identify all re
 - **Database Connection Parsing**: Structured parsing of database connection strings with password protection
 - **Script & Automation Discovery**: Targeted discovery of script files referenced by services and tasks
 - **Server Summary**: Aggregated file server and print server references for reporting
+- **Configuration File Support**: Load domain settings and tenant maps from JSON configuration file
 
 ### Discovery Areas
 
@@ -109,6 +110,7 @@ The script scans the following areas for old domain references:
 | `EmitStdOut` | Switch | No | `$false` | Emit summary JSON to stdout |
 | `SelfTest` | Switch | No | `$false` | Run lightweight self-test validation mode |
 | `AppDiscoveryConfigPath` | String | No | - | Path to JSON config file for app-specific discovery |
+| `ConfigFile` | String | No | - | Path to JSON configuration file for domain settings and tenant maps |
 
 ### Example: Full Discovery with Central Share
 
@@ -181,6 +183,77 @@ Run discovery with app-specific scanning:
     -NewDomainFqdn "newdomain.com" `
     -SelfTest
 ```
+
+### Example: Using Configuration File
+
+The script supports loading domain settings and tenant maps from a JSON configuration file. This is useful for:
+- Centralizing configuration across multiple workstations
+- Managing CrowdStrike and Qualys tenant mappings
+- Simplifying command-line usage
+
+**Important**: Command-line parameters take precedence over configuration file values. If a parameter is explicitly provided on the command line, the config file value for that parameter is ignored.
+
+Create a JSON configuration file (`migration-config.json`):
+
+```json
+{
+  "OldDomainFqdn": "oldco.com",
+  "NewDomainFqdn": "newco.com",
+  "OldDomainNetBIOS": "OLDCO",
+  "CrowdStrikeTenantMap": {
+    "CU_HEX_VALUE_1": "CS NewCo1",
+    "CU_HEX_VALUE_2": "CS Newco2",
+    "DEFAULT": "Oldco",
+    "UNKNOWN": "Unknown"
+  },
+  "QualysTenantMap": {
+    "ACTIVATION_ID_GUID": "Qualys NewCo",
+    "DEFAULT": "OldCo",
+    "UNKNOWN": "Unknown"
+  }
+}
+```
+
+**Configuration File Properties**:
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `OldDomainFqdn` | String | No | Old domain FQDN (only used if not provided as parameter) |
+| `NewDomainFqdn` | String | No | New domain FQDN (only used if not provided as parameter) |
+| `OldDomainNetBIOS` | String | No | Old domain NetBIOS name (only used if not provided as parameter) |
+| `CrowdStrikeTenantMap` | Object | No | Hashtable mapping CU hex values to tenant names |
+| `QualysTenantMap` | Object | No | Hashtable mapping ActivationID GUIDs to tenant names |
+
+**Tenant Map Keys**:
+- Custom keys: Your specific CU hex values or ActivationID GUIDs
+- `DEFAULT`: Used when a value is found but not in the custom mappings
+- `UNKNOWN`: Used when no value is found
+
+**Usage Examples**:
+
+Load all settings from configuration file:
+```powershell
+.\Get-WorkstationDiscovery.ps1 -ConfigFile ".\migration-config.json"
+```
+
+Override specific parameter (config file values used for others):
+```powershell
+.\Get-WorkstationDiscovery.ps1 `
+    -ConfigFile ".\migration-config.json" `
+    -OldDomainFqdn "override.com"
+```
+
+Use command-line parameters (config file ignored if all params provided):
+```powershell
+.\Get-WorkstationDiscovery.ps1 `
+    -OldDomainFqdn "oldco.com" `
+    -NewDomainFqdn "newco.com"
+```
+
+**Finding Tenant Values**:
+
+- **CrowdStrike CU Values**: Check registry `HKLM\SYSTEM\CurrentControlSet\Services\CSAgent\Sim` value `CU`, or check CrowdStrike Falcon console
+- **Qualys ActivationID**: Check registry `HKLM\SOFTWARE\Qualys` value `ActivationID`, or check Qualys Cloud Platform
 
 ## Remote Execution
 

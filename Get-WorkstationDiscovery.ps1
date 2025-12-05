@@ -1,3 +1,4 @@
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     Discovers domain migration readiness by scanning workstations for old domain references.
@@ -17,7 +18,7 @@
 .PARAMETER OldDomainFqdn
     Fully Qualified Domain Name (FQDN) of the old domain to detect references for.
     Must be a valid FQDN format (e.g., 'example.com' or 'subdomain.example.com').
-    Default: 'olddomain.com'
+    Default: 'oldco.com'
 
 .PARAMETER NewDomainFqdn
     Fully Qualified Domain Name (FQDN) of the new domain.
@@ -26,7 +27,7 @@
 .PARAMETER OldDomainNetBIOS
     NetBIOS name of the old domain (optional, but recommended for better detection).
     Must be 15 characters or less, alphanumeric with hyphens allowed.
-    Example: 'OLDDOMAIN'
+    Example: 'OldCo'
 
 .PARAMETER OutputRoot
     Local or UNC path where JSON output files will be written.
@@ -90,9 +91,9 @@
 
 .EXAMPLE
     .\Get-WorkstationDiscovery.ps1 `
-        -OldDomainFqdn "olddomain.com" `
-        -NewDomainFqdn "newdomain.com" `
-        -OldDomainNetBIOS "OLDDOMAIN" `
+        -OldDomainFqdn "OldCo.com" `
+        -NewDomainFqdn "Newco.com" `
+        -OldDomainNetBIOS "OldCo" `
         -CentralShare "\\fileserver\migration" `
         -OutputRoot "C:\temp\discovery\out" `
         -LogRoot "C:\temp\discovery\logs" `
@@ -111,8 +112,20 @@
     
     Slim output mode with Office apps kept and only running services included.
 
+.EXAMPLE
+    .\Get-WorkstationDiscovery.ps1 -ConfigFile ".\migration-config.json"
+    
+    Load all settings from configuration file.
+
+.EXAMPLE
+    .\Get-WorkstationDiscovery.ps1 `
+        -ConfigFile ".\migration-config.json" `
+        -OldDomainFqdn "override.com"
+    
+    Load settings from config file, but override OldDomainFqdn with command-line value.
+
 .NOTES
-    - Requires PowerShell 3.0 or higher (full features require 5.1+)
+    - Requires PowerShell 5.1 or higher
     - Requires local Administrator rights for full functionality
     - Output JSON files may contain sensitive information (paths, account names)
     - Credential passwords are not extracted (they are encrypted in Windows Vault)
@@ -172,7 +185,7 @@ param(
     }
     return $true
   })]
-  [string]$OldDomainFqdn = "olddomain.com",
+  [string]$OldDomainFqdn = "OldCo.com",
   
   [ValidateScript({
     if ([string]::IsNullOrWhiteSpace($_)) {
@@ -183,7 +196,7 @@ param(
     }
     return $true
   })]
-  [string]$NewDomainFqdn = "newdomain.com",
+  [string]$NewDomainFqdn = "NewCo.com",
   
   [ValidateScript({
     if ([string]::IsNullOrWhiteSpace($_)) { return $true }
@@ -206,43 +219,124 @@ param(
   [switch]$KeepEdgeOneDrive = $false,
   [switch]$KeepMsStoreApps = $false,
   [switch]$SlimOnlyRunningServices = $false,
-  [switch]$SelfTest = $false,
-  [string]$AppDiscoveryConfigPath
+  
+  [Parameter(HelpMessage="Path to JSON configuration file containing domain settings and tenant maps. Command-line parameters take precedence over config file values.")]
+  [string]$ConfigFile
 )
-
-# PowerShell version compatibility bootstrap
-# Must be placed after param block to allow scriptblock parsing when executed remotely
-if (-not $PSVersionTable -or -not $PSVersionTable.PSVersion) {
-    Write-Error "Unable to determine PowerShell version. This script requires at least PowerShell 3.0."
-    exit 1
-}
-
-$script:PSMajorVersion = $PSVersionTable.PSVersion.Major
-
-if ($script:PSMajorVersion -lt 3) {
-    Write-Output "This server is not compatible with this discovery script. PowerShell 3.0 or higher is required."
-    exit 1
-}
-
-if ($script:PSMajorVersion -lt 5) {
-    $script:CompatibilityMode = 'Legacy3to4'
-}
-else {
-    $script:CompatibilityMode = 'Full'
-}
 
 #region ============================================================================
 # SCRIPT INITIALIZATION
 # ============================================================================
-# Full (PS 5.1+) path
-if ($script:CompatibilityMode -eq 'Full') {
-    Set-StrictMode -Version Latest
-}
-else {
-    # Legacy path for PS 3.0–4.0
-    Set-StrictMode -Off
-}
+Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+#endregion
+
+#region ============================================================================
+# CONFIGURATION FILE LOADING
+# ============================================================================
+<#
+.SYNOPSIS
+    Loads configuration from a JSON file.
+
+.DESCRIPTION
+    Loads domain settings and tenant maps from a JSON configuration file.
+    Only applies values that were not provided as command-line parameters.
+    
+.PARAMETER ConfigFilePath
+    Path to the JSON configuration file.
+    
+.PARAMETER OldDomainFqdn
+    Current OldDomainFqdn parameter value (reference).
+    
+.PARAMETER NewDomainFqdn
+    Current NewDomainFqdn parameter value (reference).
+    
+.PARAMETER OldDomainNetBIOS
+    Current OldDomainNetBIOS parameter value (reference).
+    
+.OUTPUTS
+    Hashtable with loaded configuration values and updated tenant maps.
+#>
+function Import-ConfigurationFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ConfigFilePath,
+        
+        [string]$OldDomainFqdn,
+        [string]$NewDomainFqdn,
+        [string]$OldDomainNetBIOS
+    )
+    
+    if (-not (Test-Path -LiteralPath $ConfigFilePath)) {
+        Write-Warning "Configuration file not found: $ConfigFilePath"
+        return @{
+            OldDomainFqdn = $OldDomainFqdn
+            NewDomainFqdn = $NewDomainFqdn
+            OldDomainNetBIOS = $OldDomainNetBIOS
+            CrowdStrikeTenantMap = $null
+            QualysTenantMap = $null
+        }
+    }
+    
+    try {
+        $configContent = Get-Content -Path $ConfigFilePath -Raw -ErrorAction Stop
+        $config = $configContent | ConvertFrom-Json -ErrorAction Stop
+        
+        # Extract values from config file
+        # The caller will decide whether to use these based on $PSBoundParameters
+        $result = @{
+            OldDomainFqdn = $OldDomainFqdn
+            NewDomainFqdn = $NewDomainFqdn
+            OldDomainNetBIOS = $OldDomainNetBIOS
+            CrowdStrikeTenantMap = $null
+            QualysTenantMap = $null
+        }
+        
+        # Get domain settings from config file
+        if ($config.PSObject.Properties['OldDomainFqdn']) {
+            $result.OldDomainFqdn = $config.OldDomainFqdn
+        }
+        
+        if ($config.PSObject.Properties['NewDomainFqdn']) {
+            $result.NewDomainFqdn = $config.NewDomainFqdn
+        }
+        
+        if ($config.PSObject.Properties['OldDomainNetBIOS']) {
+            $result.OldDomainNetBIOS = $config.OldDomainNetBIOS
+        }
+        
+        # Load CrowdStrike tenant map from config
+        if ($config.PSObject.Properties['CrowdStrikeTenantMap']) {
+            $csMap = @{}
+            $config.CrowdStrikeTenantMap.PSObject.Properties | ForEach-Object {
+                $csMap[$_.Name] = $_.Value
+            }
+            $result.CrowdStrikeTenantMap = $csMap
+        }
+        
+        # Load Qualys tenant map from config
+        if ($config.PSObject.Properties['QualysTenantMap']) {
+            $qMap = @{}
+            $config.QualysTenantMap.PSObject.Properties | ForEach-Object {
+                $qMap[$_.Name] = $_.Value
+            }
+            $result.QualysTenantMap = $qMap
+        }
+        
+        return $result
+    }
+    catch {
+        Write-Warning "Failed to load configuration file '$ConfigFilePath': $($_.Exception.Message)"
+        return @{
+            OldDomainFqdn = $OldDomainFqdn
+            NewDomainFqdn = $NewDomainFqdn
+            OldDomainNetBIOS = $OldDomainNetBIOS
+            CrowdStrikeTenantMap = $null
+            QualysTenantMap = $null
+        }
+    }
+}
 #endregion
 
 #region ============================================================================
@@ -279,10 +373,11 @@ $ScriptVersion = '1.7.0'
 #   - Check CrowdStrike Falcon console
 #
 # Format: @{ 'CU_HEX_VALUE' = 'Friendly Name' }
+# These defaults can be overridden by -ConfigFile parameter
 $CrowdStrikeTenantMap = @{
-    '<CU_HEX_VALUE_1>' = 'Tenant 1'
-    '<CU_HEX_VALUE_2>' = 'Tenant 2'
-    'DEFAULT' = 'Default Tenant'  # Used when CU is found but not in the map above
+    '<CU_HEX_VALUE_1>' = 'CS NewCo1'
+    '<CU_HEX_VALUE_2>' = 'CS Newco2'
+    'DEFAULT' = 'Oldco'  # Used when CU is found but not in the map above
     'UNKNOWN' = 'Unknown'  # Used when CU is not found
 }
 
@@ -295,10 +390,37 @@ $CrowdStrikeTenantMap = @{
 #   - Check Qualys Cloud Platform
 #
 # Format: @{ 'ACTIVATION_ID_GUID' = 'Friendly Name' }
+# These defaults can be overridden by -ConfigFile parameter
 $QualysTenantMap = @{
-    '<QUALYS_ACTIVATION_ID>' = 'Qualys Tenant'
-    'DEFAULT' = 'Default Tenant'  # Used when ActivationID is found but not in the map above
+    '<QUALYS_ACTIVATION_ID>' = 'Qualys NewCo'
+    'DEFAULT' = 'OldCo'  # Used when ActivationID is found but not in the map above
     'UNKNOWN' = 'Unknown'  # Used when ActivationID is not found
+}
+
+# Load configuration from file if provided
+# Command-line parameters take precedence over config file values
+if ($ConfigFile) {
+    $loadedConfig = Import-ConfigurationFile -ConfigFilePath $ConfigFile -OldDomainFqdn $OldDomainFqdn -NewDomainFqdn $NewDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS
+    
+    # Apply domain settings from config file (only if not explicitly provided as parameters)
+    # Use $PSBoundParameters to check if parameter was explicitly provided on command line
+    if ($loadedConfig.OldDomainFqdn -and -not $PSBoundParameters.ContainsKey('OldDomainFqdn')) {
+        $OldDomainFqdn = $loadedConfig.OldDomainFqdn
+    }
+    if ($loadedConfig.NewDomainFqdn -and -not $PSBoundParameters.ContainsKey('NewDomainFqdn')) {
+        $NewDomainFqdn = $loadedConfig.NewDomainFqdn
+    }
+    if ($loadedConfig.OldDomainNetBIOS -and -not $PSBoundParameters.ContainsKey('OldDomainNetBIOS')) {
+        $OldDomainNetBIOS = $loadedConfig.OldDomainNetBIOS
+    }
+    
+    # Apply tenant maps from config file if provided (these can't be passed as parameters)
+    if ($loadedConfig.CrowdStrikeTenantMap) {
+        $CrowdStrikeTenantMap = $loadedConfig.CrowdStrikeTenantMap
+    }
+    if ($loadedConfig.QualysTenantMap) {
+        $QualysTenantMap = $loadedConfig.QualysTenantMap
+    }
 }
 
 # ============================================================================
@@ -622,49 +744,16 @@ function Get-RegistryValueMultiView {
 function New-OldDomainMatchers([string]$netbios,[string]$fqdn){
   $dn = ($fqdn -split '\.' | ForEach-Object { "DC=$_" }) -join ','
   $obj = [pscustomobject]@{
-    Netbios = if ($netbios) { [regex]("(?i)\b$([regex]::Escape($netbios))\b") } else { $null }
-    Fqdn    = if ($fqdn)   { [regex]("(?i)$([regex]::Escape($fqdn))") } else { $null }
-    Upn     = if ($fqdn)   { [regex]("(?i)@$([regex]::Escape($fqdn))$") } else { $null }
-    LdapDn  = if ($fqdn)   { [regex]("(?i)$([regex]::Escape($dn))") } else { $null }
-    # LDAP URL pattern: LDAP://server.olddomain.com or LDAP://olddomain.com
-    LdapUrl = if ($fqdn)   { [regex]("(?i)LDAP://[^/]*$([regex]::Escape($fqdn))") } else { $null }
-    # UNC path pattern: \\server.olddomain.com or \\olddomain\share
-    UncPath = if ($netbios -or $fqdn) { 
-      $patterns = @()
-      if ($netbios) { $patterns += [regex]("(?i)\\\\{1,2}[^\\\\]+\\\\.*\\b$([regex]::Escape($netbios))\\b") }
-      if ($fqdn) { $patterns += [regex]("(?i)\\\\{1,2}[^\\\\]+\\\\.*$([regex]::Escape($fqdn))") }
-      $patterns
-    } else { @() }
+    Netbios = if ($netbios) { [regex]::new("(?i)\b$([regex]::Escape($netbios))\b") } else { $null }
+    Fqdn    = if ($fqdn)   { [regex]::new("(?i)$([regex]::Escape($fqdn))") } else { $null }
+    Upn     = if ($fqdn)   { [regex]::new("(?i)@$([regex]::Escape($fqdn))$") } else { $null }
+    LdapDn  = if ($fqdn)   { [regex]::new("(?i)$([regex]::Escape($dn))") } else { $null }
   }
   $null = $obj | Add-Member -MemberType ScriptMethod -Name Match -Value {
     param([string]$s)
     if ([string]::IsNullOrWhiteSpace($s)) { return $false }
-    # Check standard patterns
-    foreach($r in @($this.Netbios,$this.Fqdn,$this.Upn,$this.LdapDn,$this.LdapUrl)){ 
-      if ($r -and $r.IsMatch($s)) { return $true } 
-    }
-    # Check UNC patterns (array)
-    if ($this.UncPath -and $this.UncPath.Count -gt 0) {
-      foreach($r in $this.UncPath) {
-        if ($r -and $r.IsMatch($s)) { return $true }
-      }
-    }
+    foreach($r in @($this.Netbios,$this.Fqdn,$this.Upn,$this.LdapDn)){ if ($r -and $r.IsMatch($s)) { return $true } }
     return $false
-  }
-  # Add method to determine evidence type
-  $null = $obj | Add-Member -MemberType ScriptMethod -Name GetEvidenceType -Value {
-    param([string]$s)
-    if ([string]::IsNullOrWhiteSpace($s)) { return $null }
-    if ($this.LdapUrl -and $this.LdapUrl.IsMatch($s)) { return 'LDAP' }
-    if ($this.UncPath -and $this.UncPath.Count -gt 0) {
-      foreach($r in $this.UncPath) {
-        if ($r -and $r.IsMatch($s)) { return 'UNC' }
-      }
-    }
-    if ($this.Netbios -and $this.Netbios.IsMatch($s)) { return 'NetBIOS' }
-    if ($this.Fqdn -and $this.Fqdn.IsMatch($s)) { return 'FQDN' }
-    if ($this.LdapDn -and $this.LdapDn.IsMatch($s)) { return 'LDAP' }
-    return $null
   }
   return $obj
 }
@@ -727,217 +816,6 @@ function Test-IsBuiltinServiceAccount([string]$startName){ $startName = ([string
     Boolean indicating if the task is a Microsoft system task.
 #>
 function Test-IsMicrosoftTaskPath([string]$taskPath){ return $taskPath -match '(?i)^\\+Microsoft\\' }
-
-<#
-.SYNOPSIS
-    Resolves and normalizes account identity strings into a structured format.
-
-.DESCRIPTION
-    Parses account identity strings in various formats (DOMAIN\User, User@domain.com, 
-    bare User, SID) and returns a normalized object with account details. Attempts to 
-    resolve SIDs to account names and determine if accounts are domain, local, or unknown.
-
-.PARAMETER Raw
-    The raw account identity string to parse (e.g., "DOMAIN\User", "User@domain.com", "User", "S-1-5-21-...")
-
-.PARAMETER DomainMatchers
-    Domain matcher object from New-OldDomainMatchers for detecting old domain references.
-
-.PARAMETER OldDomainFqdn
-    FQDN of the old domain for IsOldDomain detection.
-
-.PARAMETER OldDomainNetBIOS
-    NetBIOS name of the old domain for IsOldDomain detection.
-
-.PARAMETER ComputerName
-    Computer name for identifying local accounts (defaults to $env:COMPUTERNAME).
-
-.OUTPUTS
-    PSCustomObject with:
-    - Raw: Original input string
-    - Name: Account name only (without domain)
-    - Domain: Domain or computer name (null if local/built-in)
-    - Type: 'Domain', 'Local', 'BuiltIn', or 'Unknown'
-    - Sid: Resolved SID if available, null otherwise
-    - IsOldDomain: Boolean indicating if account references old domain
-#>
-function Resolve-AccountIdentity {
-  [CmdletBinding()]
-  param(
-    [Parameter(Mandatory=$false)]
-    [string]$Raw,
-    
-    [Parameter(Mandatory=$false)]
-    $DomainMatchers,
-    
-    [Parameter(Mandatory=$false)]
-    [string]$OldDomainFqdn,
-    
-    [Parameter(Mandatory=$false)]
-    [string]$OldDomainNetBIOS,
-    
-    [Parameter(Mandatory=$false)]
-    [string]$ComputerName = $env:COMPUTERNAME
-  )
-  
-  # Handle null/empty input
-  if ([string]::IsNullOrWhiteSpace($Raw)) {
-    return [pscustomobject]@{
-      Raw = $Raw
-      Name = $null
-      Domain = $null
-      Type = 'Unknown'
-      Sid = $null
-      IsOldDomain = $false
-    }
-  }
-  
-  $rawTrimmed = $Raw.Trim()
-  $name = $null
-  $domain = $null
-  $type = 'Unknown'
-  $sid = $null
-  $isOldDomain = $false
-  
-  # Check if it's a SID
-  if ($rawTrimmed -match '^S-1-[0-5](-\d+)+$') {
-    $sid = $rawTrimmed
-    try {
-      $sidObj = New-Object System.Security.Principal.SecurityIdentifier($sid)
-      $ntAccount = $sidObj.Translate([System.Security.Principal.NTAccount])
-      $resolved = $ntAccount.Value
-      
-      if ($resolved -like '*\*') {
-        $parts = $resolved -split '\\', 2
-        $domain = $parts[0]
-        $name = $parts[1]
-      } else {
-        $name = $resolved
-      }
-      
-      # Determine type from resolved account
-      if ($domain -eq $ComputerName -or $domain -eq '.') {
-        $type = 'Local'
-      } elseif ($domain -eq 'BUILTIN' -or $domain -eq 'NT AUTHORITY') {
-        $type = 'BuiltIn'
-      } elseif ($domain) {
-        $type = 'Domain'
-      } else {
-        $type = 'Local'
-      }
-    } catch {
-      # SID resolution failed, keep as Unknown
-      $name = $rawTrimmed
-    }
-  }
-  # Check for DOMAIN\User format
-  elseif ($rawTrimmed -like '*\*') {
-    $parts = $rawTrimmed -split '\\', 2
-    $domain = $parts[0]
-    $name = $parts[1]
-    
-    # Determine type
-    if ($domain -eq $ComputerName -or $domain -eq '.' -or $domain -eq '') {
-      $type = 'Local'
-    } elseif ($domain -eq 'BUILTIN' -or $domain -eq 'NT AUTHORITY') {
-      $type = 'BuiltIn'
-    } else {
-      $type = 'Domain'
-    }
-    
-    # Try to resolve SID
-    try {
-      $ntAccount = New-Object System.Security.Principal.NTAccount($rawTrimmed)
-      $sidObj = $ntAccount.Translate([System.Security.Principal.SecurityIdentifier])
-      $sid = $sidObj.Value
-    } catch {
-      # Resolution failed, continue without SID
-    }
-  }
-  # Check for User@domain.com format (UPN)
-  elseif ($rawTrimmed -match '^(.+)@(.+)$') {
-    $name = $Matches[1]
-    $domainFqdn = $Matches[2]
-    
-    # Try to determine if it's a domain account
-    # For UPN format, we assume it's a domain account unless it matches local computer
-    if ($domainFqdn -eq $ComputerName -or $domainFqdn -eq '.') {
-      $type = 'Local'
-      $domain = $ComputerName
-    } else {
-      $type = 'Domain'
-      $domain = $domainFqdn
-    }
-    
-    # Try to resolve SID (may need to convert UPN to DOMAIN\User format first)
-    try {
-      # Try direct UPN resolution
-      $ntAccount = New-Object System.Security.Principal.NTAccount($rawTrimmed)
-      $sidObj = $ntAccount.Translate([System.Security.Principal.SecurityIdentifier])
-      $sid = $sidObj.Value
-    } catch {
-      # Try DOMAIN\User format if we can determine domain NetBIOS
-      # This is a best-effort attempt
-    }
-  }
-  # Bare username (no domain specified)
-  else {
-    $name = $rawTrimmed
-    
-    # For bare usernames, try to resolve to determine if local or domain
-    try {
-      # Try as local account first
-      $localAccount = "$ComputerName\$name"
-      $ntAccount = New-Object System.Security.Principal.NTAccount($localAccount)
-      $sidObj = $ntAccount.Translate([System.Security.Principal.SecurityIdentifier])
-      $sid = $sidObj.Value
-      $type = 'Local'
-      $domain = $ComputerName
-    } catch {
-      # Not a local account, try as domain account
-      try {
-        # Try with current domain (if available)
-        $currentDomain = (Get-WmiObject Win32_ComputerSystem).Domain
-        if ($currentDomain) {
-          $domainAccount = "$currentDomain\$name"
-          $ntAccount = New-Object System.Security.Principal.NTAccount($domainAccount)
-          $sidObj = $ntAccount.Translate([System.Security.Principal.SecurityIdentifier])
-          $sid = $sidObj.Value
-          $type = 'Domain'
-          $domain = $currentDomain
-        } else {
-          # Cannot determine, mark as Unknown
-          $type = 'Unknown'
-        }
-      } catch {
-        # Resolution failed, mark as Unknown
-        $type = 'Unknown'
-      }
-    }
-  }
-  
-  # Check if account references old domain
-  if ($DomainMatchers) {
-    $isOldDomain = $DomainMatchers.Match($rawTrimmed)
-  } elseif ($OldDomainFqdn -or $OldDomainNetBIOS) {
-    # Fallback check if DomainMatchers not provided
-    if ($OldDomainNetBIOS -and $domain -eq $OldDomainNetBIOS) {
-      $isOldDomain = $true
-    }
-    if ($OldDomainFqdn -and ($domain -eq $OldDomainFqdn -or $rawTrimmed -like "*@$OldDomainFqdn")) {
-      $isOldDomain = $true
-    }
-  }
-  
-  return [pscustomobject]@{
-    Raw = $Raw
-    Name = $name
-    Domain = $domain
-    Type = $type
-    Sid = $sid
-    IsOldDomain = $isOldDomain
-  }
-}
 #endregion
 
 #region ============================================================================
@@ -1013,62 +891,24 @@ function Get-SecurityAgentsTenantInfo {
     }
 }
 
-function Get-QuestOdmadConfig {
-    [CmdletBinding()]
-    param($Log)
-    if ($Log) { $Log.Write('Detect: starting Quest ODMAD configuration check') }
-
-    $regPath = 'SOFTWARE\\WOW6432NODE\\Quest\\On Demand Migration For Active Directory\\ODMAD_AD'
-    
-    # Read each registry value safely
-    $agentKey = Get-RegistryValueMultiView -Hive LocalMachine -Path $regPath -Name 'AgentKey'
-    $deviceName = Get-RegistryValueMultiView -Hive LocalMachine -Path $regPath -Name 'DeviceName'
-    $domainName = Get-RegistryValueMultiView -Hive LocalMachine -Path $regPath -Name 'DomainName'
-    $tenantId = Get-RegistryValueMultiView -Hive LocalMachine -Path $regPath -Name 'TenantId'
-    $hostname = Get-RegistryValueMultiView -Hive LocalMachine -Path $regPath -Name 'Hostname'
-    
-    # If no values were found, return null
-    if (-not $agentKey -and -not $deviceName -and -not $domainName -and -not $tenantId -and -not $hostname) {
-        return $null
-    }
-    
-    [pscustomobject]@{
-        RegPath   = 'HKLM:\SOFTWARE\WOW6432NODE\Quest\On Demand Migration For Active Directory\ODMAD_AD'
-        AgentKey  = if ($agentKey) { $agentKey.String } else { $null }
-        DeviceName = if ($deviceName) { $deviceName.String } else { $null }
-        DomainName = if ($domainName) { $domainName.String } else { $null }
-        TenantId   = if ($tenantId) { $tenantId.String } else { $null }
-        Hostname   = if ($hostname) { $hostname.String } else { $null }
-    }
-}
-
 function Get-LocalGroupMembersSafe([string]$group){
   $members = @()
   try {
-    # Full (PS 5.1+) path
-    if ($script:CompatibilityMode -eq 'Full') {
-      if (Get-Command Get-LocalGroupMember -ErrorAction SilentlyContinue){
-        $members = Get-LocalGroupMember -Group $group -ErrorAction Stop | ForEach-Object {
-          [pscustomobject]@{
-            Group = $group
-            Name  = $_.Name
-            ObjectClass = $_.ObjectClass
-            PrincipalSource = $_.PrincipalSource
-            SID = $_.SID.Value
-          }
+    if (Get-Command Get-LocalGroupMember -ErrorAction SilentlyContinue){
+      return Get-LocalGroupMember -Group $group -ErrorAction Stop | ForEach-Object {
+        [pscustomobject]@{
+          Group = $group
+          Name  = $_.Name
+          ObjectClass = $_.ObjectClass
+          PrincipalSource = $_.PrincipalSource
+          SID = $_.SID.Value
         }
-        return $members
       }
     }
-  } catch {
-    # Log the error but continue to fallback
-    if ($script:log) { $script:log.Write("Get-LocalGroupMember failed for group '$group', using ADSI fallback: $($_.Exception.Message)", 'WARN') }
-  }
-  
-  # Legacy path for PS 3.0–4.0 or fallback if Get-LocalGroupMember fails
+  } catch {}
   try {
     $grp = [ADSI]"WinNT://./$group,group"
-    $members = $grp.psbase.Invoke('Members') | ForEach-Object {
+    $grp.psbase.Invoke('Members') | ForEach-Object {
       $p = $_.GetType().InvokeMember('Name','GetProperty',$null,$_,$null)
       $class = $null
       try { $class = $_.GetType().InvokeMember('Class','GetProperty',$null,$_,$null) } catch {}
@@ -1080,42 +920,33 @@ function Get-LocalGroupMembersSafe([string]$group){
         SID = $null
       }
     }
-  } catch {
-    if ($script:log) { $script:log.Write("ADSI fallback for group '$group' failed: $($_.Exception.Message)", 'WARN') }
-  }
-  return $members
+  } catch {}
+  $members
 }
 
 function Get-LocalAdministratorsDetailed{
   $items = @()
   try {
-    # Full (PS 5.1+) path
-    if ($script:CompatibilityMode -eq 'Full') {
-      if (Get-Command Get-LocalGroupMember -ErrorAction SilentlyContinue){
-        $items = Get-LocalGroupMember -Group 'Administrators' -ErrorAction Stop | ForEach-Object {
-          $nm = $_.Name
-          $sid = $_.SID.Value
-          $accountIdentity = Resolve-AccountIdentity -Raw $nm -DomainMatchers $script:matchers -OldDomainFqdn $script:OldDomainFqdn -OldDomainNetBIOS $script:OldDomainNetBIOS -ComputerName $env:COMPUTERNAME
-          $isGroup  = ($_.ObjectClass -eq 'Group')
-          [pscustomobject]@{
-            Name=$nm; SID=$sid; ObjectClass=$_.ObjectClass; PrincipalSource=$_.PrincipalSource;
-            IsGroup=$isGroup; IsDomain=($accountIdentity.Type -eq 'Domain'); IsBuiltIn=($accountIdentity.Type -eq 'BuiltIn');
-            Domain=$accountIdentity.Domain; Account=$accountIdentity.Name; IsDomainGroupLikely=($accountIdentity.Type -eq 'Domain' -and $isGroup); 
-            AccountIdentity=$accountIdentity; Source='Get-LocalGroupMember'
-          }
+    if (Get-Command Get-LocalGroupMember -ErrorAction SilentlyContinue){
+      $items = Get-LocalGroupMember -Group 'Administrators' -ErrorAction Stop | ForEach-Object {
+        $nm = $_.Name
+        $sid = $_.SID.Value
+        $isDomain = ($nm -like '*\\*') -and ($nm -notlike "$env:COMPUTERNAME\\*") -and ($nm -notlike 'BUILTIN\\*')
+        $isGroup  = ($_.ObjectClass -eq 'Group')
+        $domain,$account = $null,$null
+        if ($nm -like '*\\*'){ $parts = $nm -split '\\',2; $domain=$parts[0]; $account=$parts[1] }
+        [pscustomobject]@{
+          Name=$nm; SID=$sid; ObjectClass=$_.ObjectClass; PrincipalSource=$_.PrincipalSource;
+          IsGroup=$isGroup; IsDomain=$isDomain; IsBuiltIn=($nm -like 'BUILTIN\\*');
+          Domain=$domain; Account=$account; IsDomainGroupLikely=($isDomain -and $isGroup); Source='Get-LocalGroupMember'
         }
-        return $items
       }
+      return $items
     }
-  } catch {
-    # Log the error but continue to fallback
-    if ($script:log) { $script:log.Write("Get-LocalGroupMember failed, using ADSI fallback: $($_.Exception.Message)", 'WARN') }
-  }
-  
-  # Legacy path for PS 3.0–4.0 or fallback if Get-LocalGroupMember fails
+  } catch {}
   try {
     $grp = [ADSI]"WinNT://./Administrators,group"
-    $items = $grp.psbase.Invoke('Members') | ForEach-Object {
+    $grp.psbase.Invoke('Members') | ForEach-Object {
       $name   = $_.GetType().InvokeMember('Name','GetProperty',$null,$_,$null)
       $adspath= $_.GetType().InvokeMember('ADsPath','GetProperty',$null,$_,$null)
       $class  = $null
@@ -1127,39 +958,21 @@ function Get-LocalAdministratorsDetailed{
           $resolved = $trim -replace '/','\'
         }
       } catch {}
-      
-      # Try to resolve SID directly from ADSI object
       $sidVal = $null
       try {
-        $ntAccount = New-Object System.Security.Principal.NTAccount($resolved)
-        $sidObj = $ntAccount.Translate([System.Security.Principal.SecurityIdentifier])
-        $sidVal = $sidObj.Value
-      } catch {
-        # SID resolution failed, will try via Resolve-AccountIdentity
-      }
-      
-      $accountIdentity = Resolve-AccountIdentity -Raw $resolved -DomainMatchers $script:matchers -OldDomainFqdn $script:OldDomainFqdn -OldDomainNetBIOS $script:OldDomainNetBIOS -ComputerName $env:COMPUTERNAME
-      
-      # Use SID from account identity if available, otherwise use directly resolved SID
-      if (-not $sidVal -and $accountIdentity.Sid) {
-        $sidVal = $accountIdentity.Sid
-      }
-      
+        $nt = New-Object System.Security.Principal.NTAccount($resolved)
+        $sidVal = $nt.Translate([System.Security.Principal.SecurityIdentifier]).Value
+      } catch {}
+      $domain,$account = $null,$null
+      if ($resolved -like '*\\*'){ $parts = $resolved -split '\\',2; $domain=$parts[0]; $account=$parts[1] }
       [pscustomobject]@{
         Name=$resolved; SID=$sidVal; ObjectClass=$class; PrincipalSource='WinNT';
-        IsGroup=($class -like '*Group*'); IsDomain=($accountIdentity.Type -eq 'Domain');
-        IsBuiltIn=($accountIdentity.Type -eq 'BuiltIn'); Domain=$accountIdentity.Domain; Account=$accountIdentity.Name; 
-        IsDomainGroupLikely=($accountIdentity.Type -eq 'Domain' -and ($class -like '*Group*')); AccountIdentity=$accountIdentity; Source='ADSI'
+        IsGroup=($class -like '*Group*'); IsDomain=($resolved -like '*\\*') -and ($resolved -notlike "$env:COMPUTERNAME\\*") -and ($resolved -notlike 'BUILTIN\\*');
+        IsBuiltIn=($resolved -like 'BUILTIN\\*'); Domain=$domain; Account=$account; IsDomainGroupLikely=(($resolved -like '*\\*') -and ($class -like '*Group*')); Source='ADSI'
       }
+
     }
-  } catch {
-    if ($script:log) { $script:log.Write("ADSI fallback for LocalAdministrators failed: $($_.Exception.Message)", 'WARN') }
-  }
-  
-  if ($items.Count -eq 0 -and $script:log) {
-    $script:log.Write("Warning: Get-LocalAdministratorsDetailed returned no items. Administrators group may be empty or inaccessible.", 'WARN')
-  }
-  
+  } catch {}
   return $items
 }
 
@@ -1217,268 +1030,6 @@ function Get-ExecutableFromCommand([string]$cmd){
 #endregion
 
 #region ============================================================================
-# SELF-TEST FUNCTIONS
-# ============================================================================
-<#
-.SYNOPSIS
-    Self-test mode validates key discovery functions without running full discovery.
-
-.DESCRIPTION
-    When -SelfTest is enabled, the script runs lightweight tests to verify:
-    - Local administrator discovery
-    - Service account parsing (Resolve-AccountIdentity)
-    - File and registry scanning patterns
-    
-    Test markers are created temporarily and cleaned up after testing.
-#>
-
-function Invoke-SelfTest {
-  [CmdletBinding()]
-  param(
-    [Parameter(Mandatory)]
-    $DomainMatchers,
-    [Parameter(Mandatory)]
-    [string]$OldDomainFqdn,
-    [Parameter(Mandatory)]
-    [string]$OldDomainNetBIOS,
-    [Parameter(Mandatory=$false)]
-    $Log
-  )
-  
-  $testResults = @()
-  $testMarkerGuid = [System.Guid]::NewGuid().ToString('N')
-  $testRegistryPath = "HKLM:\SOFTWARE\DomainMigrationDiscoveryTest"
-  $testRegistryValue = "TestMarker_$testMarkerGuid"
-  $testFilePath = Join-Path $env:TEMP "DomainMigrationDiscoveryTest_$testMarkerGuid.txt"
-  $testFileContent = "DOMAIN_MIGRATION_TEST_MARKER_$testMarkerGuid"
-  
-  # Helper to add test result
-  $addResult = {
-    param($TestName, $Passed, $Message, $Details = $null)
-    $testResults += [pscustomobject]@{
-      TestName = $TestName
-      Passed = $Passed
-      Message = $Message
-      Details = $Details
-    }
-  }
-  
-  # --------------------------------------------------------------------------------
-  # Test 1: Local Administrator Discovery
-  # --------------------------------------------------------------------------------
-  try {
-    if ($Log) { $Log.Write("SelfTest: Testing local administrator discovery", 'INFO') }
-    
-    # Get-LocalAdministratorsDetailed uses script-scoped variables, which are set before calling Invoke-SelfTest
-    $localAdmins = Get-LocalAdministratorsDetailed
-    
-    if ($null -eq $localAdmins) {
-      & $addResult -TestName 'LocalAdministratorDiscovery' -Passed $false -Message 'Get-LocalAdministratorsDetailed returned null'
-    } elseif ($localAdmins -is [array] -and $localAdmins.Count -gt 0) {
-      $adminCount = $localAdmins.Count
-      $domainAdminCount = ($localAdmins | Where-Object { 
-        $_.AccountIdentity -and $_.AccountIdentity.IsOldDomain -eq $true 
-      }).Count
-      & $addResult -TestName 'LocalAdministratorDiscovery' -Passed $true -Message "Found $adminCount local administrator(s), $domainAdminCount from old domain" -Details @{
-        TotalAdmins = $adminCount
-        OldDomainAdmins = $domainAdminCount
-        SampleAdmins = ($localAdmins | Select-Object -First 3 Name, @{Name='Type';Expression={if($_.AccountIdentity){$_.AccountIdentity.Type}else{'Unknown'}}}, @{Name='IsOldDomain';Expression={if($_.AccountIdentity){$_.AccountIdentity.IsOldDomain}else{$false}}})
-      }
-    } else {
-      & $addResult -TestName 'LocalAdministratorDiscovery' -Passed $false -Message 'Unexpected return type from Get-LocalAdministratorsDetailed or empty array'
-    }
-  } catch {
-    & $addResult -TestName 'LocalAdministratorDiscovery' -Passed $false -Message "Exception: $($_.Exception.Message)" -Details @{ Exception = $_.Exception.ToString() }
-  }
-  
-  # --------------------------------------------------------------------------------
-  # Test 2: Service Account Parsing (Resolve-AccountIdentity)
-  # --------------------------------------------------------------------------------
-  try {
-    if ($Log) { $Log.Write("SelfTest: Testing service account parsing", 'INFO') }
-    
-    $testAccounts = @(
-      "$env:COMPUTERNAME\Administrator",
-      "NT AUTHORITY\SYSTEM",
-      "BUILTIN\Administrators",
-      "S-1-5-18",
-      "DOMAIN\ServiceAccount",
-      "service@domain.com",
-      "LocalUser"
-    )
-    
-    $parsingResults = @()
-    foreach ($testAccount in $testAccounts) {
-      try {
-        $resolved = Resolve-AccountIdentity -Raw $testAccount -DomainMatchers $DomainMatchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -ComputerName $env:COMPUTERNAME
-        
-        if ($resolved -and $resolved.PSObject.Properties['Name'] -and $resolved.PSObject.Properties['Type']) {
-          $parsingResults += [pscustomobject]@{
-            Input = $testAccount
-            ResolvedName = $resolved.Name
-            ResolvedType = $resolved.Type
-            ResolvedDomain = $resolved.Domain
-            HasSid = (-not [string]::IsNullOrWhiteSpace($resolved.Sid))
-          }
-        } else {
-          $parsingResults += [pscustomobject]@{
-            Input = $testAccount
-            Error = 'Invalid return structure'
-          }
-        }
-      } catch {
-        $parsingResults += [pscustomobject]@{
-          Input = $testAccount
-          Error = $_.Exception.Message
-        }
-      }
-    }
-    
-    $successCount = ($parsingResults | Where-Object { -not $_.Error }).Count
-    $totalCount = $parsingResults.Count
-    
-    if ($successCount -eq $totalCount) {
-      & $addResult -TestName 'ServiceAccountParsing' -Passed $true -Message "Successfully parsed $successCount/$totalCount test accounts" -Details $parsingResults
-    } else {
-      & $addResult -TestName 'ServiceAccountParsing' -Passed $false -Message "Failed to parse $($totalCount - $successCount)/$totalCount test accounts" -Details $parsingResults
-    }
-  } catch {
-    & $addResult -TestName 'ServiceAccountParsing' -Passed $false -Message "Exception: $($_.Exception.Message)" -Details @{ Exception = $_.Exception.ToString() }
-  }
-  
-  # --------------------------------------------------------------------------------
-  # Test 3: Registry Scanning Pattern
-  # --------------------------------------------------------------------------------
-  try {
-    if ($Log) { $Log.Write("SelfTest: Testing registry scanning pattern", 'INFO') }
-    
-    # Create test registry value with old domain reference
-    $testValue = "Test value containing $OldDomainFqdn for discovery testing"
-    
-    try {
-      # Create registry key if it doesn't exist
-      if (-not (Test-Path -LiteralPath $testRegistryPath)) {
-        New-Item -Path $testRegistryPath -Force | Out-Null
-      }
-      
-      # Set test value
-      Set-ItemProperty -Path $testRegistryPath -Name $testRegistryValue -Value $testValue -Force | Out-Null
-      
-      # Test if domain matchers can find the reference in registry
-      # Simulate the scanning pattern used by Get-HardCodedDomainReferences
-      $found = $false
-      $foundValue = $null
-      
-      try {
-        $regValue = Get-ItemProperty -Path $testRegistryPath -Name $testRegistryValue -ErrorAction SilentlyContinue
-        if ($regValue -and $regValue.PSObject.Properties[$testRegistryValue]) {
-          $regValueData = $regValue.$testRegistryValue
-          if ($regValueData -and $DomainMatchers.Match([string]$regValueData)) {
-            $found = $true
-            $foundValue = $regValueData
-          }
-        }
-      } catch {
-        # Registry read failed
-      }
-      
-      if ($found) {
-        & $addResult -TestName 'RegistryScanning' -Passed $true -Message "Successfully found test registry marker" -Details @{
-          Location = "$testRegistryPath\$testRegistryValue"
-          EvidenceType = 'FQDN'
-          Value = if ($foundValue.Length -gt 100) { $foundValue.Substring(0, 100) + '...' } else { $foundValue }
-        }
-      } else {
-        & $addResult -TestName 'RegistryScanning' -Passed $false -Message "Failed to find test registry marker at $testRegistryPath\$testRegistryValue" -Details @{
-          ExpectedPath = "$testRegistryPath\$testRegistryValue"
-          TestValue = $testValue
-        }
-      }
-    } finally {
-      # Cleanup: Remove test registry value
-      try {
-        if (Test-Path -LiteralPath $testRegistryPath) {
-          Remove-ItemProperty -Path $testRegistryPath -Name $testRegistryValue -ErrorAction SilentlyContinue
-          # Remove key if empty
-          $remainingProps = Get-ItemProperty -Path $testRegistryPath -ErrorAction SilentlyContinue
-          if ($remainingProps -and $remainingProps.PSObject.Properties.Count -eq 0) {
-            Remove-Item -Path $testRegistryPath -ErrorAction SilentlyContinue
-          }
-        }
-      } catch {
-        if ($Log) { $Log.Write("SelfTest: Warning - Could not clean up test registry key: $($_.Exception.Message)", 'WARN') }
-      }
-    }
-  } catch {
-    & $addResult -TestName 'RegistryScanning' -Passed $false -Message "Exception: $($_.Exception.Message)" -Details @{ Exception = $_.Exception.ToString() }
-  }
-  
-  # --------------------------------------------------------------------------------
-  # Test 4: File Scanning Pattern
-  # --------------------------------------------------------------------------------
-  try {
-    if ($Log) { $Log.Write("SelfTest: Testing file scanning pattern", 'INFO') }
-    
-    # Create test file with old domain reference
-    $testFileContentWithDomain = "$testFileContent`nTest reference to $OldDomainFqdn for discovery testing"
-    
-    try {
-      # Create test file
-      Set-Content -Path $testFilePath -Value $testFileContentWithDomain -Force
-      
-      # Test if domain matchers can find the reference in file
-      # Simulate the scanning pattern used by Get-HardCodedDomainReferences
-      $found = $false
-      $foundSnippet = $null
-      
-      try {
-        if (Test-Path -LiteralPath $testFilePath) {
-          $fileContent = Get-Content -Path $testFilePath -Raw -ErrorAction SilentlyContinue
-          if ($fileContent -and $DomainMatchers.Match($fileContent)) {
-            $found = $true
-            # Extract a snippet around the match
-            $matchIndex = $fileContent.IndexOf($OldDomainFqdn)
-            if ($matchIndex -ge 0) {
-              $start = [Math]::Max(0, $matchIndex - 20)
-              $length = [Math]::Min(60, $fileContent.Length - $start)
-              $foundSnippet = $fileContent.Substring($start, $length)
-            }
-          }
-        }
-      } catch {
-        # File read failed
-      }
-      
-      if ($found) {
-        & $addResult -TestName 'FileScanning' -Passed $true -Message "Successfully found test file marker" -Details @{
-          FilePath = $testFilePath
-          EvidenceType = 'FQDN'
-          ValueSnippet = if ($foundSnippet) { $foundSnippet } else { 'Match found' }
-        }
-      } else {
-        & $addResult -TestName 'FileScanning' -Passed $false -Message "Failed to find test file marker at $testFilePath" -Details @{
-          ExpectedPath = $testFilePath
-          TestContent = $testFileContentWithDomain
-        }
-      }
-    } finally {
-      # Cleanup: Remove test file
-      try {
-        if (Test-Path -LiteralPath $testFilePath) {
-          Remove-Item -Path $testFilePath -Force -ErrorAction SilentlyContinue
-        }
-      } catch {
-        if ($Log) { $Log.Write("SelfTest: Warning - Could not clean up test file: $($_.Exception.Message)", 'WARN') }
-      }
-    }
-  } catch {
-    & $addResult -TestName 'FileScanning' -Passed $false -Message "Exception: $($_.Exception.Message)" -Details @{ Exception = $_.Exception.ToString() }
-  }
-  
-  return $testResults
-}
-
-#region ============================================================================
 # MAIN EXECUTION - Initialization
 # ============================================================================
 
@@ -1490,77 +1041,11 @@ $log = $script:log
 $script:log.Write("Starting discovery on $env:COMPUTERNAME (ProfileDays=$ProfileDays, PlantId=$PlantId)")
 
 # --------------------------------------------------------------------------------
-# Self-Test Mode Check
-# --------------------------------------------------------------------------------
-if ($SelfTest) {
-  $script:log.Write("Self-test mode enabled - running validation tests", 'INFO')
-  
-  # Setup domain matchers for testing (required by Get-LocalAdministratorsDetailed)
-  if ([string]::IsNullOrWhiteSpace($OldDomainNetBIOS)) { 
-    try { 
-      $OldDomainNetBIOS = ($OldDomainFqdn -split '\.')[0].ToUpperInvariant() 
-    } catch { 
-      $OldDomainNetBIOS = '' 
-    } 
-  }
-  $matchers = New-OldDomainMatchers -netbios $OldDomainNetBIOS -fqdn $OldDomainFqdn
-  $script:matchers = $matchers
-  $script:OldDomainFqdn = $OldDomainFqdn
-  $script:OldDomainNetBIOS = $OldDomainNetBIOS
-  $script:CompatibilityMode = if ($script:PSMajorVersion -lt 5) { 'Legacy3to4' } else { 'Full' }
-  
-  # Run self-tests
-  $testResults = Invoke-SelfTest -DomainMatchers $matchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -Log $script:log
-  
-  # Build summary
-  $totalTests = $testResults.Count
-  $passedTests = ($testResults | Where-Object { $_.Passed -eq $true }).Count
-  $failedTests = $totalTests - $passedTests
-  
-  $summary = [pscustomobject]@{
-    ComputerName = $env:COMPUTERNAME
-    TestDate = (Get-Date).ToString('o')
-    TotalTests = $totalTests
-    Passed = $passedTests
-    Failed = $failedTests
-    AllPassed = ($failedTests -eq 0)
-    Results = $testResults
-  }
-  
-  # Output results
-  $outputJson = $summary | ConvertTo-Json -Depth 10
-  Write-Host "`n=== Self-Test Results ===" -ForegroundColor Cyan
-  Write-Host "Total Tests: $totalTests | Passed: $passedTests | Failed: $failedTests" -ForegroundColor $(if ($failedTests -eq 0) { 'Green' } else { 'Yellow' })
-  Write-Host ""
-  
-  # Display test results table
-  $testResults | Format-Table -Property TestName, @{Label='Status'; Expression={if ($_.Passed) { 'PASS' } else { 'FAIL' }}}, Message -AutoSize
-  
-  # Write JSON to file
-  Ensure-Directory $OutputRoot
-  $fname = ('{0}_SelfTest_{1}.json' -f $env:COMPUTERNAME, (Get-Date).ToString('MM-dd-yyyy_HHmmss'))
-  $localPath = Join-Path $OutputRoot $fname
-  $outputJson | Out-File -FilePath $localPath -Encoding UTF8 -Force
-  $script:log.Write("Self-test results written to: $localPath")
-  
-  # Also output to stdout if requested
-  if ($EmitStdOut) {
-    Write-Output $outputJson
-  }
-  
-  Write-Host "`nDetailed results saved to: $localPath" -ForegroundColor Green
-  exit $(if ($failedTests -eq 0) { 0 } else { 1 })
-}
-
-# --------------------------------------------------------------------------------
 # Domain Matcher Setup
 # --------------------------------------------------------------------------------
 # Create regex patterns for detecting old domain references
-if ([string]::IsNullOrWhiteSpace($OldDomainNetBIOS)) { try { $OldDomainNetBIOS = ($OldDomainFqdn -split '\.')[0].ToUpperInvariant() } catch { $OldDomainNetBIOS = '' } }
+if ([string]::IsNullOrWhiteSpace($OldDomainNetBIOS)) { try { $OldDomainNetBIOS = ($OldDomainFqdn -split '.')[0].ToUpperInvariant() } catch { $OldDomainNetBIOS = '' } }
 $matchers = New-OldDomainMatchers -netbios $OldDomainNetBIOS -fqdn $OldDomainFqdn
-$script:matchers = $matchers
-$script:OldDomainFqdn = $OldDomainFqdn
-$script:OldDomainNetBIOS = $OldDomainNetBIOS
 $script:log.Write("Domain tokens -> OldFQDN=$OldDomainFqdn, OldNetBIOS=$OldDomainNetBIOS, NewFQDN=$NewDomainFqdn")
 
 # --------------------------------------------------------------------------------
@@ -1683,18 +1168,9 @@ try {
   # System Information
   # --------------------------------------------------------------------------------
   # Collect basic system information: computer system, OS, network adapters
-  # Full (PS 5.1+) path
-  if ($script:CompatibilityMode -eq 'Full') {
-    $system = Safe-Try { Get-CimInstance Win32_ComputerSystem } 'Win32_ComputerSystem'
-    $os     = Safe-Try { Get-CimInstance Win32_OperatingSystem } 'Win32_OperatingSystem'
-  }
-  else {
-    # Legacy path for PS 3.0–4.0
-    $system = Safe-Try { Get-WmiObject -Class Win32_ComputerSystem } 'Win32_ComputerSystem'
-    $os     = Safe-Try { Get-WmiObject -Class Win32_OperatingSystem } 'Win32_OperatingSystem'
-  }
+  $system = Safe-Try { Get-CimInstance Win32_ComputerSystem } 'Win32_ComputerSystem'
   $securityAgents = Get-SecurityAgentsTenantInfo -Log $script:log
-  $questConfig = Get-QuestOdmadConfig -Log $script:log
+  $os     = Safe-Try { Get-CimInstance Win32_OperatingSystem } 'Win32_OperatingSystem'
   $netIPv4  = Safe-Try { Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue } 'Get-NetIPAddress'
   $adapters = Safe-Try { Get-NetAdapter -ErrorAction SilentlyContinue } 'Get-NetAdapter'
   $ipStr = (@($netIPv4) | Where-Object { $_.IPAddress -and $_.IPAddress -ne '127.0.0.1' -and $_.IPAddress -notlike '169.254.*' } | Select-Object -ExpandProperty IPAddress -Unique) -join ', '
@@ -1708,14 +1184,7 @@ try {
   # Profiles are used later for per-user registry hive scanning.
   $profiles = @()
   $cutoffDate = (Get-Date).AddDays(-1 * [math]::Abs($ProfileDays))
-  # Full (PS 5.1+) path
-  if ($script:CompatibilityMode -eq 'Full') {
-    $profileCim = Safe-Try { Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue } 'Win32_UserProfile'
-  }
-  else {
-    # Legacy path for PS 3.0–4.0
-    $profileCim = Safe-Try { Get-WmiObject -Class Win32_UserProfile -ErrorAction SilentlyContinue } 'Win32_UserProfile'
-  }
+  $profileCim = Safe-Try { Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue } 'Win32_UserProfile'
   if ($profileCim){
     foreach($p in $profileCim){
       if ([string]::IsNullOrWhiteSpace($p.LocalPath)) { continue }
@@ -1829,7 +1298,7 @@ try {
 
       # Credential Manager discovery
       $credentialManager += Safe-Try {
-        Get-CredentialManagerDomainReferences -ProfileSID $sid -DomainMatchers $matchers -Log $script:log -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS
+        Get-CredentialManagerDomainReferences -ProfileSID $sid -DomainMatchers $matchers -Log $script:log
       } "CredentialManager for $sid"
     }
     finally {
@@ -1844,7 +1313,7 @@ try {
   # --------------------------------------------------------------------------------
   # Check current user's credentials (cmdkey only works for current user context)
   $credentialManager += Safe-Try {
-    Get-CredentialManagerDomainReferences -DomainMatchers $matchers -Log $script:log -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS
+    Get-CredentialManagerDomainReferences -DomainMatchers $matchers -Log $script:log
   } 'CredentialManager current user'
 
   # Filter out null values from credentialManager array (Safe-Try returns null on error)
@@ -1855,17 +1324,8 @@ try {
   # --------------------------------------------------------------------------------
   # Scan certificate stores for old domain references in subject names, issuers, etc.
   $certificates = Safe-Try {
-    Get-CertificatesWithDomainReferences -DomainMatchers $matchers -Log $script:log -OldDomainFqdn $OldDomainFqdn
+    Get-CertificatesWithDomainReferences -DomainMatchers $matchers -Log $script:log
   } 'Certificates'
-
-  # --------------------------------------------------------------------------------
-  # Certificate Endpoints (IIS, RDP, etc.)
-  # --------------------------------------------------------------------------------
-  # Cross-reference certificates with endpoints (IIS bindings, RDP listeners)
-  $certificateEndpoints = Safe-Try {
-    Get-CertificateEndpoints -Certificates $certificates -DomainMatchers $matchers -Log $script:log -OldDomainFqdn $OldDomainFqdn
-  } 'CertificateEndpoints'
-  if (-not $certificateEndpoints) { $certificateEndpoints = @() }
 
   # --------------------------------------------------------------------------------
   # Firewall Rules
@@ -1880,7 +1340,7 @@ try {
   # --------------------------------------------------------------------------------
   # Scan IIS sites and application pools for old domain references in bindings, identities, etc.
   $iisConfiguration = Safe-Try {
-    Get-IISDomainReferences -DomainMatchers $matchers -Log $script:log -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS
+    Get-IISDomainReferences -DomainMatchers $matchers -Log $script:log
   } 'IIS'
 
   # --------------------------------------------------------------------------------
@@ -1888,7 +1348,7 @@ try {
   # --------------------------------------------------------------------------------
   # Scan SQL Server instances for old domain references in logins, linked servers, etc.
   $sqlServerConfiguration = Safe-Try {
-    Get-SqlDomainReferences -DomainMatchers $matchers -Log $script:log -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS
+    Get-SqlDomainReferences -DomainMatchers $matchers -Log $script:log
   } 'SQL Server'
 
   # --------------------------------------------------------------------------------
@@ -1910,52 +1370,6 @@ try {
   } 'ApplicationConfigFiles'
 
   # --------------------------------------------------------------------------------
-  # Script & Automation File References
-  # --------------------------------------------------------------------------------
-  # Discover script files referenced by services and scheduled tasks, scan for domain references
-  $scriptAutomationReferences = Safe-Try {
-    Get-ScriptAutomationReferences -Services $services -ScheduledTasks $tasks -DomainMatchers $matchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -SlimOutputOnly $SlimOutputOnly -Log $script:log
-  } 'ScriptAutomationReferences'
-  if (-not $scriptAutomationReferences) { $scriptAutomationReferences = @() }
-
-  # --------------------------------------------------------------------------------
-  # Hard-Coded Domain References (Aggressive Discovery)
-  # --------------------------------------------------------------------------------
-  # Comprehensive scan for hard-coded domain references in registry, files, tasks, etc.
-  $hardCodedReferences = Safe-Try {
-    Get-HardCodedDomainReferences -DomainMatchers $matchers -Log $script:log -SlimMode $SlimOutputOnly -DriveMaps $driveMaps
-  } 'HardCodedDomainReferences'
-  if (-not $hardCodedReferences) { $hardCodedReferences = @() }
-  
-  # Merge script automation references into hard-coded references
-  if ($scriptAutomationReferences -and $scriptAutomationReferences.Count -gt 0) {
-    $hardCodedReferences = @($hardCodedReferences) + @($scriptAutomationReferences)
-  }
-
-  # --------------------------------------------------------------------------------
-  # Database Connection Strings Discovery
-  # --------------------------------------------------------------------------------
-  # Discover and parse database connection strings from ODBC, registry, and config files
-  $databaseConnections = Safe-Try {
-    Get-DatabaseConnections -OdbcEntries $odbc -DomainMatchers $matchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -SlimOutputOnly $SlimOutputOnly -Log $script:log
-  } 'DatabaseConnections'
-  if (-not $databaseConnections) { $databaseConnections = @() }
-
-  # --------------------------------------------------------------------------------
-  # App-Specific Discovery (Config-Driven)
-  # --------------------------------------------------------------------------------
-  # Scan registry keys and folders specified in JSON config file for app-specific domain references
-  $appSpecificResults = $null
-  if (-not [string]::IsNullOrWhiteSpace($AppDiscoveryConfigPath)) {
-    $appSpecificResults = Safe-Try {
-      Get-AppSpecificDiscovery -ConfigPath $AppDiscoveryConfigPath -DomainMatchers $matchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -SlimOutputOnly $SlimOutputOnly -Log $script:log
-    } 'AppSpecificDiscovery'
-    if (-not $appSpecificResults) { $appSpecificResults = @() }
-  } else {
-    if ($script:log) { $script:log.Write('AppDiscoveryConfigPath not provided, skipping app-specific discovery', 'INFO') }
-  }
-
-  # --------------------------------------------------------------------------------
   # AppX Packages (Optional)
   # --------------------------------------------------------------------------------
   # Include Windows Store apps if IncludeAppx parameter is enabled
@@ -1970,35 +1384,11 @@ try {
   # --------------------------------------------------------------------------------
   # Collect Windows services and scheduled tasks information.
   # These are scanned for old domain references in service accounts and task actions.
-  # Full (PS 5.1+) path
-  $servicesRaw = @()
-  if ($script:CompatibilityMode -eq 'Full') {
-    $servicesRaw = Safe-Try { Get-CimInstance Win32_Service | Select-Object Name,DisplayName,State,StartMode,StartName,PathName } 'Services'
-  }
-  else {
-    # Legacy path for PS 3.0–4.0
-    $servicesRaw = Safe-Try { Get-WmiObject -Class Win32_Service | Select-Object Name,DisplayName,State,StartMode,StartName,PathName } 'Services'
-  }
-  if (-not $servicesRaw) { $servicesRaw = @() }
-  
-  # Resolve account identities for services
-  $services = @()
-  foreach($svc in $servicesRaw) {
-    if ($null -eq $svc) { continue }
-    $accountIdentity = Resolve-AccountIdentity -Raw $svc.StartName -DomainMatchers $matchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -ComputerName $env:COMPUTERNAME
-    $services += [pscustomobject]@{
-      Name = $svc.Name
-      DisplayName = $svc.DisplayName
-      State = $svc.State
-      StartMode = $svc.StartMode
-      StartName = $svc.StartName
-      PathName = $svc.PathName
-      AccountIdentity = $accountIdentity
-    }
-  }
+  $services = Safe-Try { Get-CimInstance Win32_Service | Select-Object Name,DisplayName,State,StartMode,StartName,PathName } 'Services'
+  if (-not $services) { $services = @() }
 
-  $tasksRaw = @()
-  $tasksRaw = Safe-Try {
+  $tasks = @()
+  $tasks = Safe-Try {
     Get-ScheduledTask | ForEach-Object {
       $t = $_
       $actions = @()
@@ -2022,28 +1412,12 @@ try {
       [pscustomobject]@{ Path = $t.TaskPath + $t.TaskName; UserId=$t.Principal.UserId; LogonType=[string]$t.Principal.LogonType; RunLevel=[string]$t.Principal.RunLevel; Enabled=$t.Settings.Enabled; Actions=$actions }
     }
   } 'ScheduledTasks'
-  if (-not $tasksRaw -or $tasksRaw.Count -eq 0){
-    $tasksRaw = Safe-Try {
+  if (-not $tasks -or $tasks.Count -eq 0){
+    $tasks = Safe-Try {
       $csv = schtasks.exe /Query /FO CSV /V | ConvertFrom-Csv
       $csv | ForEach-Object { [pscustomobject]@{ Path = $_.'TaskName'; UserId = $_.'Run As User'; LogonType = $_.'Logon Mode'; RunLevel = $_.'Run Level'; Enabled = $_.'Scheduled Task State' -eq 'Enabled'; Actions = @([pscustomobject]@{ ActionType='Exec'; Execute=$_."Task To Run"; Arguments=$null; WorkingDir=$null; Summary=$null; ClassId=$null; Data=$null }) } }
     } 'ScheduledTasksFallback'
-    if (-not $tasksRaw) { $tasksRaw = @() }
-  }
-  
-  # Resolve account identities for scheduled tasks
-  $tasks = @()
-  foreach($t in $tasksRaw) {
-    if ($null -eq $t) { continue }
-    $accountIdentity = Resolve-AccountIdentity -Raw $t.UserId -DomainMatchers $matchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -ComputerName $env:COMPUTERNAME
-    $tasks += [pscustomobject]@{
-      Path = $t.Path
-      UserId = $t.UserId
-      LogonType = $t.LogonType
-      RunLevel = $t.RunLevel
-      Enabled = $t.Enabled
-      Actions = $t.Actions
-      AccountIdentity = $accountIdentity
-    }
+    if (-not $tasks) { $tasks = @() }
   }
 
   # --------------------------------------------------------------------------------
@@ -2052,255 +1426,7 @@ try {
   # Collect local group memberships, with special focus on Administrators group.
   $localGroupsToCheck = @('Administrators','Remote Desktop Users','Power Users')
   $localGroupMembers = foreach($g in $localGroupsToCheck){ Get-LocalGroupMembersSafe $g }
-  
-  # Collect local administrators with enhanced error handling and logging
-  $localAdministratorsRaw = @()
-  try {
-    $localAdministratorsRaw = Get-LocalAdministratorsDetailed
-    if ($null -eq $localAdministratorsRaw) { $localAdministratorsRaw = @() }
-    if ($localAdministratorsRaw.Count -eq 0) {
-      if ($script:log) { $script:log.Write("Warning: No local administrators found. This may indicate a discovery issue.", 'WARN') }
-    } else {
-      if ($script:log) { $script:log.Write("Found $($localAdministratorsRaw.Count) local administrator(s)", 'INFO') }
-    }
-  } catch {
-    if ($script:log) { $script:log.Write("Error discovering local administrators: $($_.Exception.Message). Continuing with empty list.", 'WARN') }
-    $localAdministratorsRaw = @()
-  }
-  
-  # Transform to requested format: Name, Type, Sid, IsOldDomain, Source
-  $localAdministrators = @()
-  foreach ($admin in $localAdministratorsRaw) {
-    if ($null -eq $admin) { continue }
-    
-    $accountIdentity = $admin.AccountIdentity
-    if ($null -eq $accountIdentity -and $admin.Name) {
-      # Fallback: resolve identity if not already resolved
-      $accountIdentity = Resolve-AccountIdentity -Raw $admin.Name -DomainMatchers $matchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -ComputerName $env:COMPUTERNAME
-    }
-    
-    # Determine Type
-    $type = 'Unknown'
-    if ($accountIdentity) {
-      $type = $accountIdentity.Type
-    } elseif ($admin.IsBuiltIn) {
-      $type = 'BuiltIn'
-    } elseif ($admin.IsDomain) {
-      $type = 'Domain'
-    } else {
-      $type = 'Local'
-    }
-    
-    # Get SID
-    $sid = $null
-    if ($accountIdentity -and $accountIdentity.Sid) {
-      $sid = $accountIdentity.Sid
-    } elseif ($admin.SID) {
-      $sid = $admin.SID
-    }
-    
-    # Determine IsOldDomain
-    $isOldDomain = $false
-    if ($accountIdentity) {
-      $isOldDomain = $accountIdentity.IsOldDomain
-    } elseif ($admin.Name) {
-      $isOldDomain = $matchers.Match($admin.Name)
-    }
-    
-    $localAdministrators += [pscustomobject]@{
-      Name = $admin.Name
-      Type = $type
-      Sid = $sid
-      IsOldDomain = $isOldDomain
-      Source = if ($admin.Source) { $admin.Source } else { 'LocalGroup' }
-    }
-  }
-
-  # --------------------------------------------------------------------------------
-  # Local Accounts Discovery
-  # --------------------------------------------------------------------------------
-  # Enumerate local users and groups, their memberships, and usage
-  $localAccounts = Safe-Try {
-    $localUsers = @()
-    $localGroups = @()
-    
-    # Enumerate local users
-    if ($script:CompatibilityMode -eq 'Full') {
-      if (Get-Command Get-LocalUser -ErrorAction SilentlyContinue) {
-        $localUsersRaw = Get-LocalUser -ErrorAction SilentlyContinue
-        foreach ($user in $localUsersRaw) {
-          $accountIdentity = Resolve-AccountIdentity -Raw $user.Name -DomainMatchers $matchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -ComputerName $env:COMPUTERNAME
-          $localUsers += [pscustomobject]@{
-            Name = $user.Name
-            SID = $user.SID.Value
-            Description = $user.Description
-            Enabled = $user.Enabled
-            PasswordExpires = if ($user.PasswordExpires) { $user.PasswordExpires.ToString('o') } else { $null }
-            PasswordLastSet = if ($user.PasswordLastSet) { $user.PasswordLastSet.ToString('o') } else { $null }
-            PasswordNeverExpires = $user.PasswordNeverExpires
-            UserMayChangePassword = $user.UserMayChangePassword
-            AccountExpires = if ($user.AccountExpires) { $user.AccountExpires.ToString('o') } else { $null }
-            LastLogon = if ($user.LastLogon) { $user.LastLogon.ToString('o') } else { $null }
-            IsBuiltIn = ($user.SID.Value -match '^S-1-5-21-\d+-\d+-\d+-500$|^S-1-5-21-\d+-\d+-\d+-501$')  # Administrator or Guest
-            AccountIdentity = $accountIdentity
-          }
-        }
-      }
-    }
-    
-    # Fallback to WMI for older PowerShell versions
-    if ($localUsers.Count -eq 0) {
-      try {
-        if ($script:CompatibilityMode -eq 'Full') {
-          $wmiUsers = Get-CimInstance Win32_UserAccount -Filter "LocalAccount='True'" -ErrorAction SilentlyContinue
-        } else {
-          $wmiUsers = Get-WmiObject -Class Win32_UserAccount -Filter "LocalAccount='True'" -ErrorAction SilentlyContinue
-        }
-        foreach ($user in $wmiUsers) {
-          $accountIdentity = Resolve-AccountIdentity -Raw $user.Name -DomainMatchers $matchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -ComputerName $env:COMPUTERNAME
-          $localUsers += [pscustomobject]@{
-            Name = $user.Name
-            SID = $user.SID
-            Description = $user.Description
-            Enabled = -not $user.Disabled
-            PasswordExpires = $null  # Not available via WMI
-            PasswordLastSet = $null  # Not available via WMI
-            PasswordNeverExpires = $user.PasswordExpires -eq $false
-            UserMayChangePassword = $null  # Not available via WMI
-            AccountExpires = $null  # Not available via WMI
-            LastLogon = $null  # Not available via WMI
-            IsBuiltIn = ($user.SID -match '^S-1-5-21-\d+-\d+-\d+-500$|^S-1-5-21-\d+-\d+-\d+-501$')
-            AccountIdentity = $accountIdentity
-          }
-        }
-      } catch {
-        if ($script:log) { $script:log.Write("Error enumerating local users via WMI: $($_.Exception.Message)", 'WARN') }
-      }
-    }
-    
-    # Enumerate local groups and their members
-    if ($script:CompatibilityMode -eq 'Full') {
-      if (Get-Command Get-LocalGroup -ErrorAction SilentlyContinue) {
-        $localGroupsRaw = Get-LocalGroup -ErrorAction SilentlyContinue
-        foreach ($group in $localGroupsRaw) {
-          $groupMembers = @()
-          try {
-            $members = Get-LocalGroupMember -Group $group.Name -ErrorAction SilentlyContinue
-            foreach ($member in $members) {
-              $memberIdentity = Resolve-AccountIdentity -Raw $member.Name -DomainMatchers $matchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -ComputerName $env:COMPUTERNAME
-              $groupMembers += [pscustomobject]@{
-                Name = $member.Name
-                SID = $member.SID.Value
-                ObjectClass = $member.ObjectClass
-                PrincipalSource = $member.PrincipalSource
-                AccountIdentity = $memberIdentity
-              }
-            }
-          } catch {
-            if ($script:log) { $script:log.Write("Error getting members for group $($group.Name): $($_.Exception.Message)", 'WARN') }
-          }
-          
-          $localGroups += [pscustomobject]@{
-            Name = $group.Name
-            SID = $group.SID.Value
-            Description = $group.Description
-            Members = $groupMembers
-            IsAdministratorsGroup = ($group.Name -eq 'Administrators')
-          }
-        }
-      }
-    }
-    
-    # Fallback to WMI for older PowerShell versions
-    if ($localGroups.Count -eq 0) {
-      try {
-        if ($script:CompatibilityMode -eq 'Full') {
-          $wmiGroups = Get-CimInstance Win32_Group -Filter "LocalAccount='True'" -ErrorAction SilentlyContinue
-        } else {
-          $wmiGroups = Get-WmiObject -Class Win32_Group -Filter "LocalAccount='True'" -ErrorAction SilentlyContinue
-        }
-        foreach ($group in $wmiGroups) {
-          $groupMembers = @()
-          try {
-            $groupObj = [ADSI]"WinNT://./$($group.Name),group"
-            $members = $groupObj.psbase.Invoke('Members')
-            foreach ($member in $members) {
-              $memberName = $member.GetType().InvokeMember('Name','GetProperty',$null,$member,$null)
-              $memberIdentity = Resolve-AccountIdentity -Raw $memberName -DomainMatchers $matchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -ComputerName $env:COMPUTERNAME
-              $memberSid = $null
-              try {
-                $ntAccount = New-Object System.Security.Principal.NTAccount($memberName)
-                $memberSid = $ntAccount.Translate([System.Security.Principal.SecurityIdentifier]).Value
-              } catch {}
-              $groupMembers += [pscustomobject]@{
-                Name = $memberName
-                SID = $memberSid
-                ObjectClass = $null
-                PrincipalSource = 'WinNT'
-                AccountIdentity = $memberIdentity
-              }
-            }
-          } catch {
-            if ($script:log) { $script:log.Write("Error getting members for group $($group.Name): $($_.Exception.Message)", 'WARN') }
-          }
-          
-          $localGroups += [pscustomobject]@{
-            Name = $group.Name
-            SID = $group.SID
-            Description = $group.Description
-            Members = $groupMembers
-            IsAdministratorsGroup = ($group.Name -eq 'Administrators')
-          }
-        }
-      } catch {
-        if ($script:log) { $script:log.Write("Error enumerating local groups via WMI: $($_.Exception.Message)", 'WARN') }
-      }
-    }
-    
-    # Map local user usage (services, tasks, etc.)
-    foreach ($user in $localUsers) {
-      $usage = @{
-        Services = @()
-        ScheduledTasks = @()
-        LocalGroups = @()
-        IsLocalAdministrator = $false
-      }
-      
-      # Check services
-      foreach ($svc in $services) {
-        if ($svc.AccountIdentity -and $svc.AccountIdentity.Name -eq $user.Name -and $svc.AccountIdentity.Type -eq 'Local') {
-          $usage.Services += $svc.Name
-        }
-      }
-      
-      # Check scheduled tasks
-      foreach ($task in $tasks) {
-        if ($task.AccountIdentity -and $task.AccountIdentity.Name -eq $user.Name -and $task.AccountIdentity.Type -eq 'Local') {
-          $usage.ScheduledTasks += $task.Path
-        }
-      }
-      
-      # Check local group memberships
-      foreach ($group in $localGroups) {
-        foreach ($member in $group.Members) {
-          if ($member.AccountIdentity -and $member.AccountIdentity.Name -eq $user.Name -and $member.AccountIdentity.Type -eq 'Local') {
-            $usage.LocalGroups += $group.Name
-            if ($group.IsAdministratorsGroup) {
-              $usage.IsLocalAdministrator = $true
-            }
-          }
-        }
-      }
-      
-      # Add usage to user object
-      $user | Add-Member -MemberType NoteProperty -Name 'Usage' -Value ([pscustomobject]$usage) -Force
-    }
-    
-    [pscustomobject]@{
-      Users = $localUsers
-      Groups = $localGroups
-    }
-  } 'LocalAccounts'
+  $localAdministrators = Safe-Try { Get-LocalAdministratorsDetailed } 'LocalAdministrators'
 
   # --------------------------------------------------------------------------------
   # Printers
@@ -2310,14 +1436,7 @@ try {
     if (Get-Command Get-Printer -ErrorAction SilentlyContinue){
       Get-Printer | Select-Object Name,DriverName,PortName,ShareName,ComputerName,Type,Location,Comment
     } else {
-      # Full (PS 5.1+) path
-      if ($script:CompatibilityMode -eq 'Full') {
-        Get-CimInstance Win32_Printer | Select-Object Name,DriverName,PortName,ShareName,SystemName,ServerName,Network
-      }
-      else {
-        # Legacy path for PS 3.0–4.0
-        Get-WmiObject -Class Win32_Printer | Select-Object Name,DriverName,PortName,ShareName,SystemName,ServerName,Network
-      }
+      Get-CimInstance Win32_Printer | Select-Object Name,DriverName,PortName,ShareName,SystemName,ServerName,Network
     }
   } 'Printers'
   if (-not $printers) { $printers = @() }
@@ -2344,13 +1463,7 @@ try {
   $servicesRunAsOldDomain = @()
   foreach($svc in @($services)){
     if ($null -eq $svc) { continue }
-    if ($svc.AccountIdentity -and $svc.AccountIdentity.IsOldDomain) { 
-      $servicesRunAsOldDomain += $svc.Name 
-    }
-    # Fallback to string matching if account identity not resolved
-    elseif ($svc.StartName -and (Has-OldDomain $svc.StartName)) { 
-      $servicesRunAsOldDomain += $svc.Name 
-    }
+    if (Has-OldDomain $svc.StartName) { $servicesRunAsOldDomain += $svc.Name }
   }
 
   # Check service executable paths for old domain references
@@ -2377,7 +1490,7 @@ try {
         $hay = @($a.Execute,$a.Arguments,$a.WorkingDir) -join ' '
         if (Has-OldDomain $hay) { $hasOldRefInActions = $true; break }
       }
-      $hasOldRefInPrincipal = ($t.AccountIdentity -and $t.AccountIdentity.IsOldDomain) -or (Has-OldDomain $t.UserId)
+      $hasOldRefInPrincipal = Has-OldDomain $t.UserId
       if ($hasOldRefInActions -or $hasOldRefInPrincipal) { $tasksForDetection += $t }
     } else {
       $tasksForDetection += $t
@@ -2389,9 +1502,7 @@ try {
   $tasksWithOldActionRefs = @()
   foreach($t in @($tasksForDetection)){
     if ($null -eq $t) { continue }
-    if (($t.AccountIdentity -and $t.AccountIdentity.IsOldDomain) -or (Has-OldDomain $t.UserId)) { 
-      $tasksWithOldAccounts += $t.Path 
-    }
+    if (Has-OldDomain $t.UserId) { $tasksWithOldAccounts += $t.Path }
     foreach($a in @($t.Actions)){
       if ($null -eq $a) { continue }
       $hay = @($a.Execute,$a.Arguments,$a.WorkingDir) -join ' '
@@ -2432,10 +1543,7 @@ try {
   $localAdministratorsOldDomain = @()
   foreach($m in @($localAdministrators)){
     if ($null -eq $m) { continue }
-    # Use IsOldDomain from the transformed object, with fallback to string matching
-    if ($m.IsOldDomain -or (Has-OldDomain $m.Name)) { 
-      $localAdministratorsOldDomain += $m.Name 
-    }
+    if (Has-OldDomain $m.Name) { $localAdministratorsOldDomain += $m.Name }
   }
 
   $driveMapsToOld = @()
@@ -2462,35 +1570,11 @@ try {
     foreach($cert in @($certificates)){
       if ($null -eq $cert) { continue }
       if ($cert.HasDomainReference) {
-        $matchedFieldsStr = if ($cert.MatchedFields -and $cert.MatchedFields.Count -gt 0) { 
-          ($cert.MatchedFields -join ', ') 
-        } else { 
-          if ($cert.MatchedField) { $cert.MatchedField } else { 'Unknown' }
-        }
-        $certificatesOldDomain += ("{0}: {1} ({2})" -f $cert.Store, $cert.Thumbprint, $matchedFieldsStr)
+        $certificatesOldDomain += ("{0}: {1} ({2})" -f $cert.Store, $cert.Thumbprint, $cert.MatchedField)
       }
     }
   }
   $certificatesOldDomain = $certificatesOldDomain | Sort-Object -Unique
-  
-  # Check certificate endpoints
-  $endpointsOldDomain = @()
-  if ($certificateEndpoints) {
-    foreach($endpoint in @($certificateEndpoints)){
-      if ($null -eq $endpoint) { continue }
-      if ($endpoint.HasDomainReference) {
-        $matchedFieldsStr = if ($endpoint.MatchedFields -and $endpoint.MatchedFields.Count -gt 0) { 
-          ($endpoint.MatchedFields -join ', ') 
-        } else { 
-          'Unknown' 
-        }
-        $endpointDesc = "$($endpoint.Type): $($endpoint.Name)"
-        if ($endpoint.HostHeader) { $endpointDesc += " ($($endpoint.HostHeader))" }
-        $endpointsOldDomain += ("{0} ({1})" -f $endpointDesc, $matchedFieldsStr)
-      }
-    }
-  }
-  $endpointsOldDomain = $endpointsOldDomain | Sort-Object -Unique
 
   $log.Write('Detect: starting firewall rules')
   $firewallRulesOldDomain = @()
@@ -2612,14 +1696,12 @@ try {
     LocalAdministratorsOldDomain   = @($localAdministratorsOldDomain)
     CredentialManagerOldDomain     = @($credentialManagerOldDomain)
     CertificatesOldDomain          = @($certificatesOldDomain)
-    CertificateEndpointsOldDomain  = @($endpointsOldDomain)
     FirewallRulesOldDomain         = @($firewallRulesOldDomain)
     IISSitesOldDomain              = @($iisSitesOldDomain)
     IISAppPoolsOldDomain           = @($iisAppPoolsOldDomain)
     SqlServerOldDomain             = @($sqlServerOldDomain)
     EventLogDomainReferences       = @($eventLogOldDomain)
     ApplicationConfigFilesOldDomain = @($appConfigOldDomain)
-    HardCodedReferences            = @($hardCodedReferences)
   }
 
   # --------------------------------------------------------------------------------
@@ -2629,7 +1711,7 @@ try {
   # Summary counts (safe)
   function Get-CountSafe { param($x) @(@($x) | Where-Object { $_ -ne $null -and $_ -ne '' } | Sort-Object -Unique).Count }
   $summary = [pscustomobject]@{
-    HasOldDomainRefs = ((Get-CountSafe $flags.ServicesRunAsOldDomain) -or (Get-CountSafe $flags.ServicesOldPathRefs) -or (Get-CountSafe $tasksWithOldAccounts) -or (Get-CountSafe $tasksWithOldActionRefs) -or (Get-CountSafe $taskCombined) -or (Get-CountSafe $flags.DriveMapsToOldDomain) -or (Get-CountSafe $flags.LocalGroupsOldDomainMembers) -or (Get-CountSafe $flags.PrintersToOldDomain) -or (Get-CountSafe $flags.OdbcOldDomain) -or (Get-CountSafe $flags.LocalAdministratorsOldDomain) -or (Get-CountSafe $flags.CredentialManagerOldDomain) -or (Get-CountSafe $flags.CertificatesOldDomain) -or (Get-CountSafe $flags.FirewallRulesOldDomain) -or (Get-CountSafe $flags.IISSitesOldDomain) -or (Get-CountSafe $flags.IISAppPoolsOldDomain) -or (Get-CountSafe $flags.SqlServerOldDomain) -or (Get-CountSafe $flags.EventLogDomainReferences) -or (Get-CountSafe $flags.ApplicationConfigFilesOldDomain) -or (Get-CountSafe $flags.HardCodedReferences))
+    HasOldDomainRefs = ((Get-CountSafe $flags.ServicesRunAsOldDomain) -or (Get-CountSafe $flags.ServicesOldPathRefs) -or (Get-CountSafe $tasksWithOldAccounts) -or (Get-CountSafe $tasksWithOldActionRefs) -or (Get-CountSafe $taskCombined) -or (Get-CountSafe $flags.DriveMapsToOldDomain) -or (Get-CountSafe $flags.LocalGroupsOldDomainMembers) -or (Get-CountSafe $flags.PrintersToOldDomain) -or (Get-CountSafe $flags.OdbcOldDomain) -or (Get-CountSafe $flags.LocalAdministratorsOldDomain) -or (Get-CountSafe $flags.CredentialManagerOldDomain) -or (Get-CountSafe $flags.CertificatesOldDomain) -or (Get-CountSafe $flags.FirewallRulesOldDomain) -or (Get-CountSafe $flags.IISSitesOldDomain) -or (Get-CountSafe $flags.IISAppPoolsOldDomain) -or (Get-CountSafe $flags.SqlServerOldDomain) -or (Get-CountSafe $flags.EventLogDomainReferences) -or (Get-CountSafe $flags.ApplicationConfigFilesOldDomain))
     Counts = [pscustomobject]@{
       Services       = (Get-CountSafe $flags.ServicesRunAsOldDomain)
       ServicesPath   = (Get-CountSafe $flags.ServicesOldPathRefs)
@@ -2643,14 +1725,12 @@ try {
       LocalAdmins    = (Get-CountSafe $flags.LocalAdministratorsOldDomain)
       CredentialManager = (Get-CountSafe $flags.CredentialManagerOldDomain)
       Certificates   = (Get-CountSafe $flags.CertificatesOldDomain)
-      CertificateEndpoints = (Get-CountSafe $flags.CertificateEndpointsOldDomain)
       FirewallRules  = (Get-CountSafe $flags.FirewallRulesOldDomain)
       IISSites       = (Get-CountSafe $flags.IISSitesOldDomain)
       IISAppPools    = (Get-CountSafe $flags.IISAppPoolsOldDomain)
       SqlServer      = (Get-CountSafe $flags.SqlServerOldDomain)
       EventLogs      = (Get-CountSafe $flags.EventLogDomainReferences)
       ApplicationConfigFiles = (Get-CountSafe $flags.ApplicationConfigFilesOldDomain)
-      HardCodedReferences = (Get-CountSafe $flags.HardCodedReferences)
     }
   }
 #endregion
@@ -2745,11 +1825,7 @@ try {
       [Parameter(Mandatory)]
       $DomainMatchers,
       [Parameter(Mandatory=$false)]
-      $Log,
-      [Parameter(Mandatory=$false)]
-      [string]$OldDomainFqdn,
-      [Parameter(Mandatory=$false)]
-      [string]$OldDomainNetBIOS
+      $Log
     )
     
     $results = @()
@@ -2794,16 +1870,9 @@ try {
             
             # Only add entry if we have at least one meaningful value (target or username)
             if ($target -or $userName) {
-              # Resolve account identity for username
-              $accountIdentity = $null
-              if ($userName) {
-                $accountIdentity = Resolve-AccountIdentity -Raw $userName -DomainMatchers $DomainMatchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -ComputerName $env:COMPUTERNAME
-              }
-              
               # Check if target or username contains domain reference
               $hasDomainRef = $false
               if ($target -and $DomainMatchers.Match($target)) { $hasDomainRef = $true }
-              if (-not $hasDomainRef -and $accountIdentity -and $accountIdentity.IsOldDomain) { $hasDomainRef = $true }
               if (-not $hasDomainRef -and $userName -and $DomainMatchers.Match($userName)) { $hasDomainRef = $true }
               
               $profileName = if ($ProfileSID) { $ProfileSID } else { $env:USERNAME }
@@ -2811,7 +1880,6 @@ try {
                 Profile = $profileName
                 Target = $target
                 UserName = $userName
-                AccountIdentity = $accountIdentity
                 Source = 'Registry'
                 HasDomainReference = $hasDomainRef
               }
@@ -2841,21 +1909,14 @@ try {
               if ($lineStr -match '^Target:\s*(.+)') {
                 # If we have a previous entry, save it before starting a new one
                 if ($inEntry -and $currentTarget) {
-                  $accountIdentity = $null
-                  if ($currentUser) {
-                    $accountIdentity = Resolve-AccountIdentity -Raw $currentUser -DomainMatchers $DomainMatchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -ComputerName $env:COMPUTERNAME
-                  }
-                  
                   $hasDomainRef = $false
                   if ($currentTarget -and $DomainMatchers.Match($currentTarget)) { $hasDomainRef = $true }
-                  if (-not $hasDomainRef -and $accountIdentity -and $accountIdentity.IsOldDomain) { $hasDomainRef = $true }
                   if (-not $hasDomainRef -and $currentUser -and $DomainMatchers.Match($currentUser)) { $hasDomainRef = $true }
                   
                   $results += [pscustomobject]@{
                     Profile = $env:USERNAME
                     Target = $currentTarget
                     UserName = $currentUser
-                    AccountIdentity = $accountIdentity
                     Source = 'CmdKey'
                     HasDomainReference = $hasDomainRef
                   }
@@ -2873,21 +1934,14 @@ try {
               elseif ([string]::IsNullOrWhiteSpace($lineStr) -and $inEntry) {
                 # Empty line indicates end of credential entry
                 if ($currentTarget) {
-                  $accountIdentity = $null
-                  if ($currentUser) {
-                    $accountIdentity = Resolve-AccountIdentity -Raw $currentUser -DomainMatchers $DomainMatchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -ComputerName $env:COMPUTERNAME
-                  }
-                  
                   $hasDomainRef = $false
                   if ($currentTarget -and $DomainMatchers.Match($currentTarget)) { $hasDomainRef = $true }
-                  if (-not $hasDomainRef -and $accountIdentity -and $accountIdentity.IsOldDomain) { $hasDomainRef = $true }
                   if (-not $hasDomainRef -and $currentUser -and $DomainMatchers.Match($currentUser)) { $hasDomainRef = $true }
                   
                   $results += [pscustomobject]@{
                     Profile = $env:USERNAME
                     Target = $currentTarget
                     UserName = $currentUser
-                    AccountIdentity = $accountIdentity
                     Source = 'CmdKey'
                     HasDomainReference = $hasDomainRef
                   }
@@ -2928,28 +1982,11 @@ try {
       [Parameter(Mandatory)]
       $DomainMatchers,
       [Parameter(Mandatory=$false)]
-      $Log,
-      [Parameter(Mandatory=$false)]
-      [string]$OldDomainFqdn
+      $Log
     )
     
     $results = @()
-    # Primary stores: My (Personal) stores where server/client certificates are typically stored
-    # Also check Root and CA stores for domain-issued certificates
-    $stores = @('Cert:\LocalMachine\My', 'Cert:\CurrentUser\My', 'Cert:\LocalMachine\Root', 'Cert:\LocalMachine\CA')
-    
-    # Extract DNS suffixes from old domain FQDN
-    $oldDomainSuffixes = @()
-    if ($OldDomainFqdn) {
-      $parts = $OldDomainFqdn -split '\.'
-      for ($i = 1; $i -lt $parts.Length; $i++) {
-        $suffix = ($parts[$i..($parts.Length-1)] -join '.')
-        if ($suffix -ne $OldDomainFqdn) {
-          $oldDomainSuffixes += $suffix
-        }
-      }
-      $oldDomainSuffixes += $OldDomainFqdn
-    }
+    $stores = @('Cert:\LocalMachine\My', 'Cert:\CurrentUser\My')
     
     foreach ($storePath in $stores) {
       try {
@@ -2963,11 +2000,10 @@ try {
             $subject = [string]$cert.Subject
             $issuer = [string]$cert.Issuer
             $sanText = $null
-            $sanEntries = @()
-            $matchedFields = @()
+            $matchedField = $null
             $hasDomainReference = $false
             
-            # Extract Subject Alternative Name extension and parse individual entries
+            # Extract Subject Alternative Name extension
             try {
               $sanExt = $cert.Extensions | Where-Object { 
                 ($_.Oid.FriendlyName -eq 'Subject Alternative Name') -or 
@@ -2976,119 +2012,38 @@ try {
               
               if ($sanExt) {
                 $sanText = $sanExt.Format($false)
-                
-                # Parse SAN entries - extract DNS names
-                # SAN format can be: DNS Name=name1, DNS Name=name2, etc.
-                $sanMatches = [regex]::Matches($sanText, 'DNS Name=([^,]+)')
-                foreach ($match in $sanMatches) {
-                  if ($match.Groups.Count -gt 1) {
-                    $sanEntries += $match.Groups[1].Value.Trim()
-                  }
-                }
-                
-                # Also try alternative format (just DNS names separated by commas)
-                if ($sanEntries.Count -eq 0) {
-                  $sanMatches = [regex]::Matches($sanText, 'DNS:\s*([^\s,]+)')
-                  foreach ($match in $sanMatches) {
-                    if ($match.Groups.Count -gt 1) {
-                      $sanEntries += $match.Groups[1].Value.Trim()
-                    }
-                  }
-                }
               }
             } catch {
               if ($Log) { $Log.Write("Error reading SAN extension for cert $($cert.Thumbprint): $($_.Exception.Message)", 'WARN') }
             }
             
-            # Extract key usages
-            $keyUsages = @()
-            try {
-              $keyUsageExt = $cert.Extensions | Where-Object { 
-                ($_.Oid.FriendlyName -eq 'Key Usage') -or 
-                ($_.Oid.Value -eq '2.5.29.15')
-              } | Select-Object -First 1
-              
-              if ($keyUsageExt) {
-                $keyUsageText = $keyUsageExt.Format($false)
-                # Parse key usage flags
-                if ($keyUsageText -match 'Digital Signature') { $keyUsages += 'DigitalSignature' }
-                if ($keyUsageText -match 'Key Encipherment') { $keyUsages += 'KeyEncipherment' }
-                if ($keyUsageText -match 'Data Encipherment') { $keyUsages += 'DataEncipherment' }
-                if ($keyUsageText -match 'Key Agreement') { $keyUsages += 'KeyAgreement' }
-                if ($keyUsageText -match 'Certificate Signing') { $keyUsages += 'CertificateSigning' }
-                if ($keyUsageText -match 'CRL Signing') { $keyUsages += 'CRLSigning' }
-                if ($keyUsageText -match 'Encipher Only') { $keyUsages += 'EncipherOnly' }
-                if ($keyUsageText -match 'Decipher Only') { $keyUsages += 'DecipherOnly' }
-              }
-            } catch {
-              # Key usage extraction failed, continue
-            }
-            
             # Check Subject
-            if (-not [string]::IsNullOrWhiteSpace($subject)) {
-              if ($DomainMatchers.Match($subject)) {
-                $hasDomainReference = $true
-                if (-not ($matchedFields -contains 'Subject')) { $matchedFields += 'Subject' }
-              }
-              # Also check for DNS suffixes in subject CN
-              if ($OldDomainFqdn -and $subject -match 'CN=([^,]+)') {
-                $cn = $Matches[1]
-                foreach ($suffix in $oldDomainSuffixes) {
-                  if ($cn -like "*.$suffix" -or $cn -eq $suffix) {
-                    $hasDomainReference = $true
-                    if (-not ($matchedFields -contains 'Subject')) { $matchedFields += 'Subject' }
-                    break
-                  }
-                }
-              }
+            if (-not [string]::IsNullOrWhiteSpace($subject) -and $DomainMatchers.Match($subject)) {
+              $hasDomainReference = $true
+              $matchedField = 'Subject'
             }
             
             # Check Issuer
-            if (-not [string]::IsNullOrWhiteSpace($issuer) -and $DomainMatchers.Match($issuer)) {
+            if (-not $hasDomainReference -and -not [string]::IsNullOrWhiteSpace($issuer) -and $DomainMatchers.Match($issuer)) {
               $hasDomainReference = $true
-              if (-not ($matchedFields -contains 'Issuer')) { $matchedFields += 'Issuer' }
+              $matchedField = 'Issuer'
             }
             
-            # Check SAN entries
-            foreach ($sanEntry in $sanEntries) {
-              if ([string]::IsNullOrWhiteSpace($sanEntry)) { continue }
-              
-              if ($DomainMatchers.Match($sanEntry)) {
-                $hasDomainReference = $true
-                if (-not ($matchedFields -contains 'SAN')) { $matchedFields += 'SAN' }
-              }
-              
-              # Also check for DNS suffixes
-              if ($OldDomainFqdn) {
-                foreach ($suffix in $oldDomainSuffixes) {
-                  if ($sanEntry -like "*.$suffix" -or $sanEntry -eq $suffix) {
-                    $hasDomainReference = $true
-                    if (-not ($matchedFields -contains 'SAN')) { $matchedFields += 'SAN' }
-                    break
-                  }
-                }
-              }
-            }
-            
-            # Check SAN text as fallback
+            # Check SAN
             if (-not $hasDomainReference -and -not [string]::IsNullOrWhiteSpace($sanText) -and $DomainMatchers.Match($sanText)) {
               $hasDomainReference = $true
-              if (-not ($matchedFields -contains 'SAN')) { $matchedFields += 'SAN' }
+              $matchedField = 'SAN'
             }
             
-            # Return all certificates with enhanced details
+            # Return all certificates, but flag those with domain references
             $results += [pscustomobject]@{
               Store = $storePath
               Thumbprint = $cert.Thumbprint
               Subject = $subject
               Issuer = $issuer
-              NotBefore = if ($cert.NotBefore) { $cert.NotBefore.ToString('o') } else { $null }
               NotAfter = if ($cert.NotAfter) { $cert.NotAfter.ToString('o') } else { $null }
-              SANs = $sanEntries
-              SANText = $sanText
-              KeyUsages = $keyUsages
               HasDomainReference = $hasDomainReference
-              MatchedFields = $matchedFields
+              MatchedField = $matchedField
             }
           } catch {
             if ($Log) { $Log.Write("Error processing certificate $($cert.Thumbprint): $($_.Exception.Message)", 'WARN') }
@@ -3100,236 +2055,6 @@ try {
     }
     
     return $results
-  }
-
-  function Get-CertificateEndpoints {
-    [CmdletBinding()]
-    param(
-      [Parameter(Mandatory)]
-      $Certificates,
-      [Parameter(Mandatory)]
-      $DomainMatchers,
-      [Parameter(Mandatory=$false)]
-      $Log,
-      [Parameter(Mandatory=$false)]
-      [string]$OldDomainFqdn
-    )
-    
-    $endpoints = @()
-    
-    # --------------------------------------------------------------------------------
-    # IIS HTTPS Bindings
-    # --------------------------------------------------------------------------------
-    if ($Log) { $Log.Write('Cross-referencing IIS HTTPS bindings with certificates', 'INFO') }
-    
-    try {
-      # Check if IIS is installed
-      $iisInstalled = $false
-      if (Get-Command Get-Website -ErrorAction SilentlyContinue) {
-        try {
-          $testSite = Get-Website -ErrorAction Stop | Select-Object -First 1
-          $iisInstalled = $true
-        } catch {
-          # IIS not available
-        }
-      }
-      
-      if ($iisInstalled) {
-        try {
-          # Ensure WebAdministration module is loaded
-          if (-not (Get-Module -Name WebAdministration -ErrorAction SilentlyContinue)) {
-            Import-Module WebAdministration -ErrorAction SilentlyContinue | Out-Null
-          }
-          
-          $websites = Get-Website -ErrorAction SilentlyContinue
-          foreach ($site in $websites) {
-            if ($null -eq $site) { continue }
-            
-            try {
-              $siteBindings = Get-WebBinding -Name $site.Name -ErrorAction SilentlyContinue
-              foreach ($binding in $siteBindings) {
-                if ($null -eq $binding -or $binding.Protocol -ne 'https') { continue }
-                
-                $bindingInfo = [string]$binding.BindingInformation
-                $hostHeader = $null
-                $port = $null
-                $ipAddress = $null
-                
-                # Parse binding information (format: IP:Port:HostHeader)
-                if ($bindingInfo -match '^([^:]*):(\d+):(.*)$') {
-                  $ipAddress = $Matches[1]
-                  $port = $Matches[2]
-                  $hostHeader = $Matches[3]
-                } elseif ($bindingInfo -match '^([^:]*):(\d+)$') {
-                  $ipAddress = $Matches[1]
-                  $port = $Matches[2]
-                }
-                
-                # Get certificate thumbprint for this binding
-                $certThumbprint = $null
-                try {
-                  $siteObj = Get-Item "IIS:\Sites\$($site.Name)" -ErrorAction SilentlyContinue
-                  if ($siteObj) {
-                    $bindingObj = $siteObj.Bindings | Where-Object { 
-                      $_.Protocol -eq 'https' -and 
-                      $_.BindingInformation -eq $bindingInfo 
-                    } | Select-Object -First 1
-                    
-                    if ($bindingObj -and $bindingObj.CertificateHash) {
-                      $certThumbprint = [System.BitConverter]::ToString($bindingObj.CertificateHash).Replace('-', '')
-                    }
-                  }
-                } catch {
-                  # Could not get certificate from binding
-                }
-                
-                # Check if host header contains old domain
-                $hasDomainReference = $false
-                $matchedFields = @()
-                if ($hostHeader -and $DomainMatchers.Match($hostHeader)) {
-                  $hasDomainReference = $true
-                  $matchedFields += 'HostHeader'
-                }
-                
-                # Check if certificate is tied to old domain
-                $certTiedToOldDomain = $false
-                if ($certThumbprint) {
-                  $cert = $Certificates | Where-Object { $_.Thumbprint -eq $certThumbprint } | Select-Object -First 1
-                  if ($cert -and $cert.HasDomainReference) {
-                    $certTiedToOldDomain = $true
-                    $hasDomainReference = $true
-                    if (-not ($matchedFields -contains 'Certificate')) { $matchedFields += 'Certificate' }
-                  }
-                }
-                
-                if ($hasDomainReference) {
-                  $endpoints += [pscustomobject]@{
-                    Type = 'IIS'
-                    Name = $site.Name
-                    Protocol = 'HTTPS'
-                    HostHeader = $hostHeader
-                    IPAddress = $ipAddress
-                    Port = $port
-                    CertificateThumbprint = $certThumbprint
-                    CertificateTiedToOldDomain = $certTiedToOldDomain
-                    HasDomainReference = $hasDomainReference
-                    MatchedFields = $matchedFields
-                  }
-                }
-              }
-            } catch {
-              if ($Log) { $Log.Write("Error processing IIS site $($site.Name): $($_.Exception.Message)", 'WARN') }
-            }
-          }
-        } catch {
-          if ($Log) { $Log.Write("Error accessing IIS bindings: $($_.Exception.Message)", 'WARN') }
-        }
-      }
-    } catch {
-      if ($Log) { $Log.Write("Error checking IIS installation: $($_.Exception.Message)", 'WARN') }
-    }
-    
-    # --------------------------------------------------------------------------------
-    # RDP Listener SSL Configuration
-    # --------------------------------------------------------------------------------
-    if ($Log) { $Log.Write('Checking RDP listener SSL configuration', 'INFO') }
-    
-    try {
-      # Check RDP configuration in registry
-      $rdpRegPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
-      if (Test-Path $rdpRegPath) {
-        try {
-          $rdpConfig = Get-ItemProperty -Path $rdpRegPath -ErrorAction SilentlyContinue
-          if ($rdpConfig) {
-            # Check for SSL certificate configuration
-            $rdpCertThumbprint = $null
-            if ($rdpConfig.PSObject.Properties['SSLCertificateSHA1Hash']) {
-              $rdpCertThumbprint = $rdpConfig.SSLCertificateSHA1Hash
-              if ($rdpCertThumbprint -is [byte[]]) {
-                $rdpCertThumbprint = [System.BitConverter]::ToString($rdpCertThumbprint).Replace('-', '')
-              }
-            }
-            
-            # Check if certificate is tied to old domain
-            $hasDomainReference = $false
-            $certTiedToOldDomain = $false
-            if ($rdpCertThumbprint) {
-              $cert = $Certificates | Where-Object { $_.Thumbprint -eq $rdpCertThumbprint } | Select-Object -First 1
-              if ($cert -and $cert.HasDomainReference) {
-                $certTiedToOldDomain = $true
-                $hasDomainReference = $true
-              }
-            }
-            
-            # Also check RDP server name if available
-            $rdpServerName = $null
-            if ($rdpConfig.PSObject.Properties['SSLCertificateName']) {
-              $rdpServerName = $rdpConfig.SSLCertificateName
-              if ($rdpServerName -and $DomainMatchers.Match($rdpServerName)) {
-                $hasDomainReference = $true
-              }
-            }
-            
-            if ($hasDomainReference -or $rdpCertThumbprint) {
-              $endpoints += [pscustomobject]@{
-                Type = 'RDP'
-                Name = 'RDP-Tcp'
-                Protocol = 'RDP'
-                HostHeader = $rdpServerName
-                IPAddress = $null
-                Port = $null
-                CertificateThumbprint = $rdpCertThumbprint
-                CertificateTiedToOldDomain = $certTiedToOldDomain
-                HasDomainReference = $hasDomainReference
-                MatchedFields = if ($hasDomainReference) { @('Certificate', 'ServerName') } else { @() }
-              }
-            }
-          }
-        } catch {
-          if ($Log) { $Log.Write("Error reading RDP configuration: $($_.Exception.Message)", 'WARN') }
-        }
-      }
-      
-      # Also check via WMI/CIM for Terminal Services configuration
-      try {
-        if ($script:CompatibilityMode -eq 'Full') {
-          $tsSettings = Get-CimInstance -Namespace 'root\CIMV2\TerminalServices' -ClassName 'Win32_TSGeneralSetting' -ErrorAction SilentlyContinue
-        } else {
-          $tsSettings = Get-WmiObject -Namespace 'root\CIMV2\TerminalServices' -Class 'Win32_TSGeneralSetting' -ErrorAction SilentlyContinue
-        }
-        
-        if ($tsSettings) {
-          foreach ($tsSetting in $tsSettings) {
-            if ($null -eq $tsSetting) { continue }
-            
-            # Check for SSL certificate or domain references in terminal services
-            $tsName = if ($tsSetting.PSObject.Properties['Name']) { $tsSetting.Name } else { $null }
-            if ($tsName -and $DomainMatchers.Match($tsName)) {
-              $endpoints += [pscustomobject]@{
-                Type = 'RDP'
-                Name = $tsName
-                Protocol = 'RDP'
-                HostHeader = $tsName
-                IPAddress = $null
-                Port = $null
-                CertificateThumbprint = $null
-                CertificateTiedToOldDomain = $false
-                HasDomainReference = $true
-                MatchedFields = @('ServerName')
-              }
-            }
-          }
-        }
-      } catch {
-        # Terminal Services WMI may not be available, continue
-      }
-    } catch {
-      if ($Log) { $Log.Write("Error checking RDP configuration: $($_.Exception.Message)", 'WARN') }
-    }
-    
-    if ($Log) { $Log.Write("Found $($endpoints.Count) endpoint(s) with domain references", 'INFO') }
-    
-    return $endpoints
   }
 
   function Get-FirewallRulesWithDomainReferences {
@@ -3465,11 +2190,7 @@ try {
       [Parameter(Mandatory)]
       $DomainMatchers,
       [Parameter(Mandatory=$false)]
-      $Log,
-      [Parameter(Mandatory=$false)]
-      [string]$OldDomainFqdn,
-      [Parameter(Mandatory=$false)]
-      [string]$OldDomainNetBIOS
+      $Log
     )
     
     $result = [pscustomobject]@{
@@ -3668,20 +2389,9 @@ try {
                 $identityType = [string]$processModel.identityType
                 $identityUser = [string]$processModel.userName
                 
-                # Resolve account identity
-                $accountIdentity = $null
+                # Check identity user for domain references
                 if (-not [string]::IsNullOrWhiteSpace($identityUser)) {
-                  $accountIdentity = Resolve-AccountIdentity -Raw $identityUser -DomainMatchers $DomainMatchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -ComputerName $env:COMPUTERNAME
-                  
-                  # Check identity user for domain references
-                  if ($accountIdentity.IsOldDomain) {
-                    $hasDomainReference = $true
-                    if (-not ($matchedFields -contains 'IdentityUser')) {
-                      $matchedFields += 'IdentityUser'
-                    }
-                  }
-                  # Fallback to string matching
-                  elseif ($DomainMatchers.Match($identityUser)) {
+                  if ($DomainMatchers.Match($identityUser)) {
                     $hasDomainReference = $true
                     if (-not ($matchedFields -contains 'IdentityUser')) {
                       $matchedFields += 'IdentityUser'
@@ -3705,7 +2415,6 @@ try {
               Name = $poolName
               IdentityType = $identityType
               IdentityUser = $identityUser
-              AccountIdentity = $accountIdentity
               HasDomainReference = $hasDomainReference
               MatchedFields = $matchedFields
             }
@@ -3731,11 +2440,7 @@ try {
       [Parameter(Mandatory)]
       $DomainMatchers,
       [Parameter(Mandatory=$false)]
-      $Log,
-      [Parameter(Mandatory=$false)]
-      [string]$OldDomainFqdn,
-      [Parameter(Mandatory=$false)]
-      [string]$OldDomainNetBIOS
+      $Log
     )
     
     $results = @()
@@ -3871,14 +2576,12 @@ try {
             foreach ($login in $server.Logins) {
               if ($login.LoginType -eq 'WindowsUser' -or $login.LoginType -eq 'WindowsGroup') {
                 $loginName = $login.Name
-                $accountIdentity = Resolve-AccountIdentity -Raw $loginName -DomainMatchers $DomainMatchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -ComputerName $env:COMPUTERNAME
-                if ($accountIdentity.IsOldDomain -or $DomainMatchers.Match($loginName)) {
+                if ($DomainMatchers.Match($loginName)) {
                   $domainLogins += [pscustomobject]@{
                     LoginName = $loginName
                     LoginType = $login.LoginType
                     DefaultDatabase = $login.DefaultDatabase
                     IsDisabled = $login.IsDisabled
-                    AccountIdentity = $accountIdentity
                   }
                 }
               }
@@ -3907,12 +2610,9 @@ try {
               }
               
               # Check remote login (if configured)
-              if (-not $hasDomainRef -and $linkedServer.RemoteLogin) {
-                $remoteLoginIdentity = Resolve-AccountIdentity -Raw $linkedServer.RemoteLogin -DomainMatchers $DomainMatchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -ComputerName $env:COMPUTERNAME
-                if ($remoteLoginIdentity.IsOldDomain -or $DomainMatchers.Match($linkedServer.RemoteLogin)) {
-                  $hasDomainRef = $true
-                  $matchedFields += 'RemoteLogin'
-                }
+              if (-not $hasDomainRef -and $linkedServer.RemoteLogin -and $DomainMatchers.Match($linkedServer.RemoteLogin)) {
+                $hasDomainRef = $true
+                $matchedFields += 'RemoteLogin'
               }
               
               if ($hasDomainRef) {
@@ -3954,14 +2654,12 @@ WHERE type IN ('U', 'G')
               if ($loginResults) {
                 foreach ($row in $loginResults) {
                   $loginName = $row.LoginName
-                  $accountIdentity = Resolve-AccountIdentity -Raw $loginName -DomainMatchers $DomainMatchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -ComputerName $env:COMPUTERNAME
-                  if ($accountIdentity.IsOldDomain -or $DomainMatchers.Match($loginName)) {
+                  if ($DomainMatchers.Match($loginName)) {
                     $domainLogins += [pscustomobject]@{
                       LoginName = $loginName
                       LoginType = $row.LoginType
                       DefaultDatabase = $row.DefaultDatabase
                       IsDisabled = $row.IsDisabled
-                      AccountIdentity = $accountIdentity
                     }
                   }
                 }
@@ -4000,12 +2698,9 @@ WHERE srv.is_linked = 1
                     $matchedFields += 'DataSource'
                   }
                   
-                  if (-not $hasDomainRef -and $row.RemoteLogin) {
-                    $remoteLoginIdentity = Resolve-AccountIdentity -Raw $row.RemoteLogin -DomainMatchers $DomainMatchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -ComputerName $env:COMPUTERNAME
-                    if ($remoteLoginIdentity.IsOldDomain -or $DomainMatchers.Match($row.RemoteLogin)) {
-                      $hasDomainRef = $true
-                      $matchedFields += 'RemoteLogin'
-                    }
+                  if (-not $hasDomainRef -and $row.RemoteLogin -and $DomainMatchers.Match($row.RemoteLogin)) {
+                    $hasDomainRef = $true
+                    $matchedFields += 'RemoteLogin'
                   }
                   
                   if ($hasDomainRef) {
@@ -4067,19 +2762,7 @@ WHERE srv.is_linked = 1
           try {
             if (-not (Test-Path -LiteralPath $configFile.FullName)) { continue }
             
-            # Full (PS 5.1+) path
-            if ($script:CompatibilityMode -eq 'Full') {
-                $content = Get-Content -Path $configFile.FullName -Raw -ErrorAction SilentlyContinue
-            }
-            else {
-                # Legacy path for PS 3.0–4.0 (Get-Content -Raw not available)
-                try {
-                    $content = [System.IO.File]::ReadAllText($configFile.FullName)
-                }
-                catch {
-                    $content = $null
-                }
-            }
+            $content = Get-Content -Path $configFile.FullName -Raw -ErrorAction SilentlyContinue
             if ($content -and $DomainMatchers.Match($content)) {
               # Extract connection strings or relevant sections
               $matchedLines = @()
@@ -4277,34 +2960,16 @@ WHERE srv.is_linked = 1
           $hasCredentials = $false
           $credentialPatterns = @()
           
-          # Full (PS 5.1+) path
-          if ($script:CompatibilityMode -eq 'Full') {
+          try {
+            # Try to read as text
+            $content = Get-Content -Path $configFile.FullName -Raw -ErrorAction Stop -Encoding UTF8
+          } catch {
+            # Try alternative encoding
             try {
-              # Try to read as text
-              $content = Get-Content -Path $configFile.FullName -Raw -ErrorAction Stop -Encoding UTF8
+              $content = Get-Content -Path $configFile.FullName -Raw -ErrorAction Stop -Encoding Default
             } catch {
-              # Try alternative encoding
-              try {
-                $content = Get-Content -Path $configFile.FullName -Raw -ErrorAction Stop -Encoding Default
-              } catch {
-                # Skip files we can't read
-                continue
-              }
-            }
-          }
-          else {
-            # Legacy path for PS 3.0–4.0 (Get-Content -Raw and -Encoding not available)
-            try {
-              # Try UTF8 first
-              $content = [System.IO.File]::ReadAllText($configFile.FullName, [System.Text.Encoding]::UTF8)
-            } catch {
-              try {
-                # Try default encoding
-                $content = [System.IO.File]::ReadAllText($configFile.FullName)
-              } catch {
-                # Skip files we can't read
-                continue
-              }
+              # Skip files we can't read
+              continue
             }
           }
           
@@ -4535,28 +3200,9 @@ WHERE srv.is_linked = 1
         }
         
         # Query events within time window (query more events since we'll filter many out)
-        # Full (PS 5.1+) path
-        if ($script:CompatibilityMode -eq 'Full') {
-          $events = Get-WinEvent -LogName $logName -FilterHashtable @{
-            StartTime = $startTime
-          } -ErrorAction SilentlyContinue -MaxEvents ($maxEventsPerLog * 5)
-        }
-        else {
-          # Legacy path for PS 3.0–4.0 (FilterHashtable available but using FilterXPath for compatibility)
-          try {
-            $xpathFilter = "*[System[TimeCreated[@SystemTime >= '{0:yyyy-MM-ddTHH:mm:ss.fffZ}']]]" -f $startTime.ToUniversalTime()
-            $events = Get-WinEvent -LogName $logName -FilterXPath $xpathFilter -ErrorAction SilentlyContinue -MaxEvents ($maxEventsPerLog * 5)
-          }
-          catch {
-            # If FilterXPath fails, try without time filter (less efficient but works)
-            if ($Log) { $Log.Write("Event log query with time filter failed for '$logName', attempting without time filter: $($_.Exception.Message)", 'WARN') }
-            $events = Get-WinEvent -LogName $logName -ErrorAction SilentlyContinue -MaxEvents ($maxEventsPerLog * 5)
-            # Filter by time manually
-            if ($events) {
-              $events = $events | Where-Object { $_.TimeCreated -ge $startTime }
-            }
-          }
-        }
+        $events = Get-WinEvent -LogName $logName -FilterHashtable @{
+          StartTime = $startTime
+        } -ErrorAction SilentlyContinue -MaxEvents ($maxEventsPerLog * 5)
         
         if (-not $events) { continue }
         
@@ -4614,1387 +3260,6 @@ WHERE srv.is_linked = 1
         if ($Log) { $Log.Write("Error accessing event log '$logName': $($_.Exception.Message)", 'WARN') }
       }
     }
-    
-    return $results
-  }
-
-  function Parse-DbConnectionString {
-    <#
-    .SYNOPSIS
-      Parses a database connection string into structured fields.
-    
-    .DESCRIPTION
-      Splits connection string on semicolons, normalizes key names, and extracts
-      common connection string properties. Handles various formats and key name variations.
-    
-    .PARAMETER ConnectionString
-      Raw connection string to parse.
-    
-    .PARAMETER DomainMatchers
-      Domain matcher object for checking if DataSource matches old domain.
-    
-    .PARAMETER OldDomainFqdn
-      Old domain FQDN for domain matching.
-    
-    .PARAMETER OldDomainNetBIOS
-      Old domain NetBIOS name for domain matching.
-    
-    .OUTPUTS
-      PSCustomObject with Raw, DataSource, InitialCatalog, IntegratedSecurity, UserId, HasPassword, and IsOldDomainServer properties.
-    #>
-    [CmdletBinding()]
-    param(
-      [Parameter(Mandatory)]
-      [string]$ConnectionString,
-      [Parameter(Mandatory=$false)]
-      $DomainMatchers,
-      [Parameter(Mandatory=$false)]
-      [string]$OldDomainFqdn,
-      [Parameter(Mandatory=$false)]
-      [string]$OldDomainNetBIOS
-    )
-    
-    if ([string]::IsNullOrWhiteSpace($ConnectionString)) {
-      return [pscustomobject]@{
-        Raw = $ConnectionString
-        DataSource = $null
-        InitialCatalog = $null
-        IntegratedSecurity = $null
-        UserId = $null
-        HasPassword = $false
-        IsOldDomainServer = $false
-      }
-    }
-    
-    # Parse key-value pairs (split on semicolon)
-    $pairs = @{}
-    $parts = $ConnectionString -split ';'
-    
-    foreach ($part in $parts) {
-      $part = $part.Trim()
-      if ([string]::IsNullOrWhiteSpace($part)) { continue }
-      
-      # Split on equals sign
-      $keyValue = $part -split '=', 2
-      if ($keyValue.Count -eq 2) {
-        $key = $keyValue[0].Trim()
-        $value = $keyValue[1].Trim()
-        
-        # Normalize key name (case-insensitive)
-        $normalizedKey = $key.ToLowerInvariant()
-        if (-not $pairs.ContainsKey($normalizedKey)) {
-          $pairs[$normalizedKey] = $value
-        }
-      }
-    }
-    
-    # Extract DataSource (normalize various key names)
-    $dataSource = $null
-    $dataSourceKeys = @('datasource', 'server', 'address', 'addr', 'network address', 'data source')
-    foreach ($key in $dataSourceKeys) {
-      if ($pairs.ContainsKey($key)) {
-        $dataSource = $pairs[$key]
-        break
-      }
-    }
-    
-    # Extract InitialCatalog (normalize various key names)
-    $initialCatalog = $null
-    $catalogKeys = @('initial catalog', 'database', 'initialcatalog')
-    foreach ($key in $catalogKeys) {
-      if ($pairs.ContainsKey($key)) {
-        $initialCatalog = $pairs[$key]
-        break
-      }
-    }
-    
-    # Extract IntegratedSecurity/TrustedConnection
-    $integratedSecurity = $null
-    $trustedKeys = @('integrated security', 'trusted_connection', 'trusted connection', 'integratedsecurity')
-    foreach ($key in $trustedKeys) {
-      if ($pairs.ContainsKey($key)) {
-        $trustedValue = $pairs[$key].ToLowerInvariant()
-        if ($trustedValue -eq 'true' -or $trustedValue -eq 'yes' -or $trustedValue -eq 'sspi') {
-          $integratedSecurity = $true
-        } elseif ($trustedValue -eq 'false' -or $trustedValue -eq 'no') {
-          $integratedSecurity = $false
-        }
-        break
-      }
-    }
-    
-    # Extract UserId
-    $userId = $null
-    $userIdKeys = @('user id', 'userid', 'uid', 'user')
-    foreach ($key in $userIdKeys) {
-      if ($pairs.ContainsKey($key)) {
-        $userId = $pairs[$key]
-        break
-      }
-    }
-    
-    # Check for password (but don't store it)
-    $hasPassword = $false
-    $passwordKeys = @('password', 'pwd', 'passwd')
-    foreach ($key in $passwordKeys) {
-      if ($pairs.ContainsKey($key)) {
-        $hasPassword = $true
-        break
-      }
-    }
-    
-    # Check if DataSource matches old domain
-    $isOldDomainServer = $false
-    if ($dataSource -and $DomainMatchers) {
-      $isOldDomainServer = $DomainMatchers.Match($dataSource)
-    }
-    
-    return [pscustomobject]@{
-      Raw = $ConnectionString
-      DataSource = $dataSource
-      InitialCatalog = $initialCatalog
-      IntegratedSecurity = $integratedSecurity
-      UserId = $userId
-      HasPassword = $hasPassword
-      IsOldDomainServer = $isOldDomainServer
-    }
-  }
-
-  function Get-DatabaseConnections {
-    <#
-    .SYNOPSIS
-      Discovers and parses database connection strings from various sources.
-    
-    .DESCRIPTION
-      Scans ODBC entries, registry, and config files for database connection strings,
-      parses them into structured fields, and identifies old domain server references.
-    
-    .PARAMETER OdbcEntries
-      Array of ODBC DSN entries from Get-OdbcFromRegPath.
-    
-    .PARAMETER DomainMatchers
-      Domain matcher object for checking domain references.
-    
-    .PARAMETER OldDomainFqdn
-      Old domain FQDN for domain matching.
-    
-    .PARAMETER OldDomainNetBIOS
-      Old domain NetBIOS name for domain matching.
-    
-    .PARAMETER SlimOutputOnly
-      If true, omits Raw connection string from output.
-    
-    .PARAMETER Log
-      Logger object for writing log messages.
-    
-    .OUTPUTS
-      Array of PSCustomObject with LocationType, Location, and Parsed properties.
-    #>
-    [CmdletBinding()]
-    param(
-      [Parameter(Mandatory=$false)]
-      $OdbcEntries = @(),
-      [Parameter(Mandatory)]
-      $DomainMatchers,
-      [Parameter(Mandatory)]
-      [string]$OldDomainFqdn,
-      [Parameter(Mandatory=$false)]
-      [string]$OldDomainNetBIOS,
-      [Parameter(Mandatory=$false)]
-      [switch]$SlimOutputOnly = $false,
-      [Parameter(Mandatory=$false)]
-      $Log
-    )
-    
-    $results = @()
-    
-    if ($Log) { $Log.Write('Discovering and parsing database connection strings', 'INFO') }
-    
-    # Helper to add a database connection finding
-    function Add-DatabaseConnection {
-      param(
-        [string]$LocationType,
-        [string]$Location,
-        [string]$ConnectionString
-      )
-      if ([string]::IsNullOrWhiteSpace($ConnectionString)) { return }
-      
-      # Check if this looks like a connection string
-      $isConnectionString = $false
-      $connectionStringPatterns = @(
-        '(?i)data\s+source\s*=',
-        '(?i)server\s*=',
-        '(?i)initial\s+catalog\s*=',
-        '(?i)database\s*=',
-        '(?i)connection\s+string\s*=',
-        '(?i)provider\s*=.*sql',
-        '(?i)driver\s*=\s*\{.*sql'
-      )
-      
-      foreach ($pattern in $connectionStringPatterns) {
-        if ($ConnectionString -match $pattern) {
-          $isConnectionString = $true
-          break
-        }
-      }
-      
-      if (-not $isConnectionString) { return }
-      
-      # Parse the connection string
-      $parsed = Parse-DbConnectionString -ConnectionString $ConnectionString -DomainMatchers $DomainMatchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS
-      
-      # Only include if it has a DataSource or matches old domain
-      if ($parsed.DataSource -or $parsed.IsOldDomainServer) {
-        $resultObj = [pscustomobject]@{
-          LocationType = $LocationType
-          Location = $Location
-        }
-        
-        if ($SlimOutputOnly) {
-          # In Slim mode, omit Raw but keep parsed fields
-          $resultObj | Add-Member -MemberType NoteProperty -Name 'Parsed' -Value ([pscustomobject]@{
-            DataSource = $parsed.DataSource
-            InitialCatalog = $parsed.InitialCatalog
-            IntegratedSecurity = $parsed.IntegratedSecurity
-            UserId = $parsed.UserId
-            HasPassword = $parsed.HasPassword
-            IsOldDomainServer = $parsed.IsOldDomainServer
-          }) -Force
-        } else {
-          # In Full mode, include Raw
-          $resultObj | Add-Member -MemberType NoteProperty -Name 'Parsed' -Value $parsed -Force
-        }
-        
-        $results += $resultObj
-      }
-    }
-    
-    # Process ODBC entries
-    foreach ($odbcEntry in $OdbcEntries) {
-      if ($null -eq $odbcEntry) { continue }
-      
-      # Build connection string from ODBC properties
-      $connParts = @()
-      
-      if ($odbcEntry.Server) {
-        $connParts += "Server=$($odbcEntry.Server)"
-      }
-      if ($odbcEntry.Database) {
-        $connParts += "Initial Catalog=$($odbcEntry.Database)"
-      }
-      if ($odbcEntry.Trusted) {
-        $connParts += "Trusted_Connection=$($odbcEntry.Trusted)"
-      }
-      if ($odbcEntry.Driver) {
-        $connParts += "Driver=$($odbcEntry.Driver)"
-      }
-      
-      if ($connParts.Count -gt 0) {
-        $connString = $connParts -join ';'
-        $location = "ODBC DSN: $($odbcEntry.Name) ($($odbcEntry.Scope))"
-        Add-DatabaseConnection -LocationType 'ODBC' -Location $location -ConnectionString $connString
-      }
-    }
-    
-    # Scan registry for connection strings
-    if ($Log) { $Log.Write('Scanning registry for database connection strings', 'INFO') }
-    
-    $registryPathsToScan = @(
-      @{ Hive = 'LocalMachine'; Path = 'SOFTWARE'; View = 'Default' },
-      @{ Hive = 'CurrentUser'; Path = 'SOFTWARE'; View = 'Default' }
-    )
-    
-    if ([Environment]::Is64BitOperatingSystem) {
-      $registryPathsToScan += @(
-        @{ Hive = 'LocalMachine'; Path = 'SOFTWARE'; View = 'Registry64' },
-        @{ Hive = 'LocalMachine'; Path = 'SOFTWARE'; View = 'Registry32' }
-      )
-    }
-    
-    foreach ($regPath in $registryPathsToScan) {
-      try {
-        $hive = switch ($regPath.Hive) {
-          'LocalMachine' { [Microsoft.Win32.RegistryHive]::LocalMachine }
-          'CurrentUser' { [Microsoft.Win32.RegistryHive]::CurrentUser }
-          default { continue }
-        }
-        
-        $view = switch ($regPath.View) {
-          'Registry64' { [Microsoft.Win32.RegistryView]::Registry64 }
-          'Registry32' { [Microsoft.Win32.RegistryView]::Registry32 }
-          default { [Microsoft.Win32.RegistryView]::Default }
-        }
-        
-        $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($hive, $view)
-        $key = $baseKey.OpenSubKey($regPath.Path)
-        
-        if ($null -eq $key) { continue }
-        
-        # Recursively scan registry keys (limited depth)
-        $keysToProcess = New-Object System.Collections.Queue
-        $keysToProcess.Enqueue(@{ Key = $key; Path = $regPath.Path; Depth = 0 })
-        $maxDepth = 5
-        
-        while ($keysToProcess.Count -gt 0) {
-          $current = $keysToProcess.Dequeue()
-          $currentKey = $current.Key
-          $currentPath = $current.Path
-          $currentDepth = $current.Depth
-          
-          if ($currentDepth -ge $maxDepth) { continue }
-          
-          try {
-            # Check all values in current key
-            foreach ($valueName in $currentKey.GetValueNames()) {
-              try {
-                $value = $currentKey.GetValue($valueName)
-                if ($null -eq $value) { continue }
-                
-                $valueStr = [string]$value
-                
-                # Check if value looks like a connection string
-                if ($valueStr -match '(?i)(data\s+source|server|initial\s+catalog|database|connectionstring)\s*=') {
-                  $fullPath = "$($regPath.Hive):\$currentPath\$valueName"
-                  Add-DatabaseConnection -LocationType 'Registry' -Location $fullPath -ConnectionString $valueStr
-                }
-              } catch {
-                # Skip values we can't read
-              }
-            }
-            
-            # Enqueue subkeys for recursive scanning
-            foreach ($subKeyName in $currentKey.GetSubKeyNames()) {
-              try {
-                $subKey = $currentKey.OpenSubKey($subKeyName)
-                if ($subKey) {
-                  $subPath = "$currentPath\$subKeyName"
-                  $keysToProcess.Enqueue(@{ Key = $subKey; Path = $subPath; Depth = ($currentDepth + 1) })
-                }
-              } catch {
-                # Skip subkeys we can't access
-              }
-            }
-          } catch {
-            # Continue with next key
-          } finally {
-            if ($currentKey -ne $key) {
-              $currentKey.Close()
-            }
-          }
-        }
-        
-        $key.Close()
-        $baseKey.Close()
-      } catch {
-        if ($Log) { $Log.Write("Error scanning registry for connection strings in $($regPath.Hive):\$($regPath.Path): $($_.Exception.Message)", 'WARN') }
-      }
-    }
-    
-    # Scan config files for connection strings
-    if ($Log) { $Log.Write('Scanning config files for database connection strings', 'INFO') }
-    
-    $configFilePatterns = @('*.config', '*.ini', '*.json', '*.xml', '*.conf', '*.properties')
-    $configLocations = @(
-      "$env:ProgramData",
-      "$env:ProgramFiles",
-      "${env:ProgramFiles(x86)}"
-    )
-    
-    $maxFilesPerLocation = if ($SlimOutputOnly) { 50 } else { 200 }
-    
-    foreach ($location in $configLocations) {
-      if (-not (Test-Path $location)) { continue }
-      
-      try {
-        foreach ($ext in $configFilePatterns) {
-          $files = Get-ChildItem -Path $location -Filter $ext -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object -First $maxFilesPerLocation
-          foreach ($file in $files) {
-            try {
-              # Skip very large files (> 5MB)
-              $fileInfo = Get-Item -LiteralPath $file.FullName -ErrorAction SilentlyContinue
-              if ($fileInfo -and $fileInfo.Length -gt 5MB) { continue }
-              
-              $content = Get-Content -Path $file.FullName -Raw -ErrorAction Stop
-              if ([string]::IsNullOrWhiteSpace($content)) { continue }
-              
-              # Look for connection string patterns
-              $connectionStringPatterns = @(
-                '(?i)connectionstring\s*[=:]\s*["'']([^"'']+)["'']',
-                '(?i)connection\s+string\s*[=:]\s*["'']([^"'']+)["'']',
-                '(?i)<add\s+key\s*=\s*["'']connectionstring["'']\s+value\s*=\s*["'']([^"'']+)["'']',
-                '(?i)data\s+source\s*=\s*[^;]+',
-                '(?i)server\s*=\s*[^;]+'
-              )
-              
-              foreach ($pattern in $connectionStringPatterns) {
-                $patternMatches = [regex]::Matches($content, $pattern)
-                foreach ($match in $patternMatches) {
-                  $connString = $null
-                  if ($match.Groups.Count -gt 1) {
-                    $connString = $match.Groups[1].Value
-                  } else {
-                    $connString = $match.Value
-                  }
-                  
-                  if ($connString) {
-                    Add-DatabaseConnection -LocationType 'File' -Location $file.FullName -ConnectionString $connString
-                  }
-                }
-              }
-            } catch {
-              # Skip files we can't read
-            }
-          }
-        }
-      } catch {
-        if ($Log) { $Log.Write("Error scanning config files in ${location}: $($_.Exception.Message)", 'WARN') }
-      }
-    }
-    
-    if ($Log) { 
-      $Log.Write("Found $($results.Count) database connection string(s)", 'INFO') 
-    }
-    
-    return $results
-  }
-
-  function Get-AppSpecificDiscovery {
-    <#
-    .SYNOPSIS
-      Discovers app-specific domain references based on JSON configuration.
-    
-    .DESCRIPTION
-      Reads a JSON configuration file specifying registry keys and folders to scan
-      for specific applications. Scans those locations for old domain references
-      (FQDN, NetBIOS, UNC, LDAP, etc.) and returns structured results per app.
-    
-    .PARAMETER ConfigPath
-      Path to JSON configuration file containing app definitions.
-    
-    .PARAMETER DomainMatchers
-      Domain matcher object for checking domain references.
-    
-    .PARAMETER OldDomainFqdn
-      Old domain FQDN for domain matching.
-    
-    .PARAMETER OldDomainNetBIOS
-      Old domain NetBIOS name for domain matching.
-    
-    .PARAMETER SlimOutputOnly
-      If true, truncates snippets and limits hits per app.
-    
-    .PARAMETER Log
-      Logger object for writing log messages.
-    
-    .OUTPUTS
-      Array of PSCustomObject with Name and Hits properties.
-    #>
-    [CmdletBinding()]
-    param(
-      [Parameter(Mandatory)]
-      [string]$ConfigPath,
-      [Parameter(Mandatory)]
-      $DomainMatchers,
-      [Parameter(Mandatory)]
-      [string]$OldDomainFqdn,
-      [Parameter(Mandatory=$false)]
-      [string]$OldDomainNetBIOS,
-      [Parameter(Mandatory=$false)]
-      [switch]$SlimOutputOnly = $false,
-      [Parameter(Mandatory=$false)]
-      $Log
-    )
-    
-    $results = @()
-    $maxSnippetLength = if ($SlimOutputOnly) { 100 } else { 200 }
-    $maxHitsPerApp = if ($SlimOutputOnly) { 50 } else { 1000 }
-    $configFileExtensions = @('.config', '.ini', '.xml', '.json', '.conf', '.properties', '.txt')
-    
-    # Check if config file exists
-    if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf -ErrorAction SilentlyContinue)) {
-      if ($Log) { $Log.Write("App discovery config file not found: $ConfigPath", 'WARN') }
-      return $results
-    }
-    
-    if ($Log) { $Log.Write("Reading app discovery config from: $ConfigPath", 'INFO') }
-    
-    # Read and parse JSON config
-    try {
-      $configContent = Get-Content -Path $ConfigPath -Raw -ErrorAction Stop
-      $appConfigs = $configContent | ConvertFrom-Json -ErrorAction Stop
-      
-      if (-not $appConfigs) {
-        if ($Log) { $Log.Write("App discovery config file is empty or invalid JSON", 'WARN') }
-        return $results
-      }
-      
-      # Ensure it's an array
-      if ($appConfigs -isnot [Array]) {
-        $appConfigs = @($appConfigs)
-      }
-      
-      if ($Log) { $Log.Write("Found $($appConfigs.Count) app(s) in discovery config", 'INFO') }
-    } catch {
-      if ($Log) { $Log.Write("Error reading or parsing app discovery config file: $($_.Exception.Message)", 'WARN') }
-      return $results
-    }
-    
-    # Process each app configuration
-    foreach ($appConfig in $appConfigs) {
-      if ($null -eq $appConfig) { continue }
-      
-      $appName = $appConfig.Name
-      if ([string]::IsNullOrWhiteSpace($appName)) {
-        if ($Log) { $Log.Write("Skipping app config entry with missing Name property", 'WARN') }
-        continue
-      }
-      
-      if ($Log) { $Log.Write("Scanning app: $appName", 'INFO') }
-      
-      $appHits = @()
-      
-      # Process RegistryRoots
-      if ($appConfig.RegistryRoots -and $appConfig.RegistryRoots.Count -gt 0) {
-        foreach ($regRoot in $appConfig.RegistryRoots) {
-          if ([string]::IsNullOrWhiteSpace($regRoot)) { continue }
-          
-          try {
-            if (-not (Test-Path -LiteralPath $regRoot -ErrorAction SilentlyContinue)) {
-              if ($Log) { $Log.Write("Registry path does not exist for $appName : $regRoot", 'INFO') }
-              continue
-            }
-            
-            if ($Log) { $Log.Write("Scanning registry path for $appName : $regRoot", 'INFO') }
-            
-            # Parse registry path (e.g., "HKLM:\SOFTWARE\Vendor\App1")
-            $regParts = $regRoot -split ':', 2
-            if ($regParts.Count -ne 2) {
-              if ($Log) { $Log.Write("Invalid registry path format for $appName : $regRoot (expected format: HKLM:\\Path)", 'WARN') }
-              continue
-            }
-            
-            $hiveName = $regParts[0].Trim()
-            $regPath = $regParts[1].Trim().TrimStart('\')
-            
-            # Map hive name to RegistryHive enum
-            $hive = switch ($hiveName.ToUpperInvariant()) {
-              'HKLM' { [Microsoft.Win32.RegistryHive]::LocalMachine }
-              'HKCU' { [Microsoft.Win32.RegistryHive]::CurrentUser }
-              'HKU'  { [Microsoft.Win32.RegistryHive]::Users }
-              'HKCR' { [Microsoft.Win32.RegistryHive]::ClassesRoot }
-              'HKCC' { [Microsoft.Win32.RegistryHive]::CurrentConfig }
-              default {
-                if ($Log) { $Log.Write("Unsupported registry hive for $appName : $hiveName (supported: HKLM, HKCU, HKU, HKCR, HKCC)", 'WARN') }
-                continue
-              }
-            }
-            
-            # Scan registry key recursively (limited depth)
-            try {
-              $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($hive, [Microsoft.Win32.RegistryView]::Default)
-              $key = $baseKey.OpenSubKey($regPath)
-              
-              if ($null -eq $key) {
-                if ($Log) { $Log.Write("Could not open registry key for $appName : $regRoot", 'WARN') }
-                $baseKey.Close()
-                continue
-              }
-              
-              # Recursively scan registry keys (limited depth to avoid performance issues)
-              $keysToProcess = New-Object System.Collections.Queue
-              $keysToProcess.Enqueue(@{ Key = $key; Path = $regPath; Depth = 0 })
-              $maxDepth = 10  # Allow deeper scanning for app-specific paths
-              
-              while ($keysToProcess.Count -gt 0 -and $appHits.Count -lt $maxHitsPerApp) {
-                $current = $keysToProcess.Dequeue()
-                $currentKey = $current.Key
-                $currentPath = $current.Path
-                $currentDepth = $current.Depth
-                
-                if ($currentDepth -ge $maxDepth) { continue }
-                
-                try {
-                  # Check all values in current key
-                  foreach ($valueName in $currentKey.GetValueNames()) {
-                    try {
-                      $value = $currentKey.GetValue($valueName)
-                      if ($null -eq $value) { continue }
-                      
-                      $valueStr = [string]$value
-                      if ($DomainMatchers.Match($valueStr)) {
-                        $evidenceType = $DomainMatchers.GetEvidenceType($valueStr)
-                        if (-not $evidenceType) { $evidenceType = 'FQDN' }  # Default fallback
-                        
-                        $fullPath = "$hiveName`:\$currentPath\$valueName"
-                        $valueOrSnippet = if ($valueStr.Length -gt $maxSnippetLength) {
-                          $valueStr.Substring(0, $maxSnippetLength) + '...'
-                        } else {
-                          $valueStr
-                        }
-                        
-                        $appHits += [pscustomobject]@{
-                          LocationType = 'Registry'
-                          Location = $fullPath
-                          EvidenceType = $evidenceType
-                          ValueOrSnippet = $valueOrSnippet
-                        }
-                        
-                        if ($appHits.Count -ge $maxHitsPerApp) { break }
-                      }
-                    } catch {
-                      # Skip values we can't read
-                    }
-                  }
-                  
-                  # Enqueue subkeys for recursive scanning
-                  if ($appHits.Count -lt $maxHitsPerApp) {
-                    foreach ($subKeyName in $currentKey.GetSubKeyNames()) {
-                      try {
-                        $subKey = $currentKey.OpenSubKey($subKeyName)
-                        if ($subKey) {
-                          $subPath = "$currentPath\$subKeyName"
-                          $keysToProcess.Enqueue(@{ Key = $subKey; Path = $subPath; Depth = ($currentDepth + 1) })
-                        }
-                      } catch {
-                        # Skip subkeys we can't access
-                      }
-                    }
-                  }
-                } catch {
-                  # Continue with next key
-                } finally {
-                  if ($currentKey -ne $key) {
-                    $currentKey.Close()
-                  }
-                }
-              }
-              
-              $key.Close()
-              $baseKey.Close()
-            } catch {
-              if ($Log) { $Log.Write("Error scanning registry path $regRoot for $appName : $($_.Exception.Message)", 'WARN') }
-            }
-          } catch {
-            if ($Log) { $Log.Write("Error processing registry root $regRoot for $appName : $($_.Exception.Message)", 'WARN') }
-          }
-        }
-      }
-      
-      # Process Folders
-      if ($appConfig.Folders -and $appConfig.Folders.Count -gt 0) {
-        foreach ($folderPath in $appConfig.Folders) {
-          if ([string]::IsNullOrWhiteSpace($folderPath)) { continue }
-          
-          try {
-            # Expand environment variables
-            $expandedPath = [Environment]::ExpandEnvironmentVariables($folderPath)
-            
-            if (-not (Test-Path -LiteralPath $expandedPath -PathType Container -ErrorAction SilentlyContinue)) {
-              if ($Log) { $Log.Write("Folder does not exist for $appName : $expandedPath", 'INFO') }
-              continue
-            }
-            
-            if ($Log) { $Log.Write("Scanning folder for $appName : $expandedPath", 'INFO') }
-            
-            # Scan for config files with specified extensions
-            foreach ($ext in $configFileExtensions) {
-              if ($appHits.Count -ge $maxHitsPerApp) { break }
-              
-              try {
-                $files = Get-ChildItem -Path $expandedPath -Filter "*$ext" -File -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object -First 100
-                
-                foreach ($file in $files) {
-                  if ($appHits.Count -ge $maxHitsPerApp) { break }
-                  
-                  try {
-                    # Skip very large files (> 5MB) to avoid memory issues
-                    $fileInfo = Get-Item -LiteralPath $file.FullName -ErrorAction SilentlyContinue
-                    if ($fileInfo -and $fileInfo.Length -gt 5MB) {
-                      continue
-                    }
-                    
-                    $content = Get-Content -Path $file.FullName -Raw -ErrorAction Stop
-                    if ([string]::IsNullOrWhiteSpace($content)) { continue }
-                    
-                    # Check for domain references
-                    if ($DomainMatchers.Match($content)) {
-                      # Extract matching snippet
-                      $lines = $content -split "`r?`n"
-                      $matchedSnippet = ''
-                      
-                      foreach ($line in $lines) {
-                        if ($DomainMatchers.Match($line)) {
-                          $matchedSnippet = $line.Trim()
-                          break
-                        }
-                      }
-                      
-                      # If no line match found, extract a snippet from the content
-                      if ([string]::IsNullOrWhiteSpace($matchedSnippet)) {
-                        # Find first match position
-                        $contentMatch = [regex]::Match($content, $DomainMatchers.Fqdn.ToString(), [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-                        if (-not $contentMatch.Success) {
-                          $contentMatch = [regex]::Match($content, $DomainMatchers.Netbios.ToString(), [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-                        }
-                        if (-not $contentMatch.Success) {
-                          # UncPath is an array of regex objects, iterate through them
-                          if ($DomainMatchers.UncPath -and $DomainMatchers.UncPath.Count -gt 0) {
-                            foreach ($uncPattern in $DomainMatchers.UncPath) {
-                              if ($uncPattern) {
-                                $contentMatch = [regex]::Match($content, $uncPattern.ToString(), [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-                                if ($contentMatch.Success) { break }
-                              }
-                            }
-                          }
-                        }
-                        
-                        if ($contentMatch.Success) {
-                          $start = [Math]::Max(0, $contentMatch.Index - 30)
-                          $endPosition = $start + $maxSnippetLength
-                          $length = [Math]::Min($maxSnippetLength, $content.Length - $start)
-                          $matchedSnippet = $content.Substring($start, $length)
-                          if ($endPosition -lt $content.Length) {
-                            $matchedSnippet += '...'
-                          }
-                        }
-                      }
-                      
-                      # Truncate snippet if needed
-                      if ($matchedSnippet.Length -gt $maxSnippetLength) {
-                        $matchedSnippet = $matchedSnippet.Substring(0, $maxSnippetLength) + '...'
-                      }
-                      
-                      # Determine evidence type
-                      $evidenceType = $DomainMatchers.GetEvidenceType($matchedSnippet)
-                      if (-not $evidenceType) { $evidenceType = 'FQDN' }  # Default fallback
-                      
-                      $appHits += [pscustomobject]@{
-                        LocationType = 'File'
-                        Location = $file.FullName
-                        EvidenceType = $evidenceType
-                        ValueOrSnippet = $matchedSnippet
-                      }
-                    }
-                  } catch {
-                    # Skip files we can't read (permissions, locked, etc.)
-                    if ($Log) { $Log.Write("Error reading file $($file.FullName) for $appName : $($_.Exception.Message)", 'WARN') }
-                  }
-                }
-              } catch {
-                if ($Log) { $Log.Write("Error scanning folder $expandedPath for $appName : $($_.Exception.Message)", 'WARN') }
-              }
-            }
-          } catch {
-            if ($Log) { $Log.Write("Error processing folder $folderPath for $appName : $($_.Exception.Message)", 'WARN') }
-          }
-        }
-      }
-      
-      # Add app result (even if no hits, so Power BI can show "scanned but clean")
-      $results += [pscustomobject]@{
-        Name = $appName
-        Hits = $appHits
-      }
-      
-      if ($Log) { 
-        $hitCount = $appHits.Count
-        $Log.Write("Completed scanning $appName : found $hitCount hit(s)", 'INFO') 
-      }
-    }
-    
-    return $results
-  }
-
-  function Get-ScriptAutomationReferences {
-    <#
-    .SYNOPSIS
-      Discovers script and automation files referenced by services and scheduled tasks.
-    
-    .DESCRIPTION
-      Extracts script file paths from service PathName properties and scheduled task Actions,
-      then scans those files for hard-coded domain references. Optionally includes well-known
-      script directories. Focuses on files actually referenced rather than blind recursion.
-    
-    .PARAMETER Services
-      Array of service objects with PathName property.
-    
-    .PARAMETER ScheduledTasks
-      Array of scheduled task objects with Actions property.
-    
-    .PARAMETER DomainMatchers
-      Domain matcher object for checking domain references.
-    
-    .PARAMETER OldDomainFqdn
-      Old domain FQDN for domain matching.
-    
-    .PARAMETER OldDomainNetBIOS
-      Old domain NetBIOS name for domain matching.
-    
-    .PARAMETER SlimOutputOnly
-      If true, limits the number of script references and truncates snippets.
-    
-    .PARAMETER Log
-      Logger object for writing log messages.
-    
-    .OUTPUTS
-      Array of PSCustomObject with Path, Type, ScriptType, EvidenceType, Snippet, and LineNumber properties.
-    #>
-    [CmdletBinding()]
-    param(
-      [Parameter(Mandatory=$false)]
-      $Services = @(),
-      [Parameter(Mandatory=$false)]
-      $ScheduledTasks = @(),
-      [Parameter(Mandatory)]
-      $DomainMatchers,
-      [Parameter(Mandatory)]
-      [string]$OldDomainFqdn,
-      [Parameter(Mandatory=$false)]
-      [string]$OldDomainNetBIOS,
-      [Parameter(Mandatory=$false)]
-      [switch]$SlimOutputOnly = $false,
-      [Parameter(Mandatory=$false)]
-      $Log
-    )
-    
-    $results = @()
-    $scriptExtensions = @('.ps1', '.psm1', '.psd1', '.bat', '.cmd', '.vbs', '.js', '.kix', '.wsf', '.sh')
-    $candidatePaths = @{}
-    $maxScriptsInSlimMode = 50
-    $maxSnippetLength = if ($SlimOutputOnly) { 100 } else { 200 }
-    
-    if ($Log) { $Log.Write('Discovering script and automation files from services and scheduled tasks', 'INFO') }
-    
-    # Helper to normalize and add a candidate path
-    function Add-CandidatePath {
-      param([string]$FilePath)
-      if ([string]::IsNullOrWhiteSpace($FilePath)) { return }
-      
-      # Expand environment variables
-      $expanded = [Environment]::ExpandEnvironmentVariables($FilePath)
-      
-      # Remove quotes if present
-      $expanded = $expanded.Trim('"', "'")
-      
-      # Check if it's a script extension
-      $ext = [System.IO.Path]::GetExtension($expanded)
-      if ($ext -and $scriptExtensions -contains $ext.ToLowerInvariant()) {
-        # Resolve to full path if possible
-        try {
-          if ([System.IO.Path]::IsPathRooted($expanded)) {
-            $fullPath = $expanded
-          } else {
-            # Try to resolve relative paths (may not always work)
-            $fullPath = $expanded
-          }
-          
-          # Only add if file exists
-          if (Test-Path -LiteralPath $fullPath -PathType Leaf -ErrorAction SilentlyContinue) {
-            $normalized = $fullPath.ToUpperInvariant()
-            if (-not $candidatePaths.ContainsKey($normalized)) {
-              $candidatePaths[$normalized] = $fullPath
-            }
-          }
-        } catch {
-          # Skip paths we can't resolve
-        }
-      }
-    }
-    
-    # Extract script paths from services
-    foreach ($service in $Services) {
-      if ($null -eq $service) { continue }
-      
-      $pathName = $service.PathName
-      if ([string]::IsNullOrWhiteSpace($pathName)) { continue }
-      
-      # Extract executable path (may be a script)
-      $exePath = Get-ExecutableFromCommand $pathName
-      if ($exePath) {
-        Add-CandidatePath $exePath
-      }
-      
-      # Also check the full PathName for script references in arguments
-      # Extract potential script paths from arguments (simple pattern matching)
-      if ($pathName -match '\.(ps1|psm1|bat|cmd|vbs|js|kix|wsf)\b') {
-        # Try to extract the script path from the command line
-        $scriptMatches = [regex]::Matches($pathName, '["\s]([^"\s]+\.(?:ps1|psm1|bat|cmd|vbs|js|kix|wsf))', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-        foreach ($scriptMatch in $scriptMatches) {
-          if ($scriptMatch.Groups.Count -gt 1) {
-            Add-CandidatePath $scriptMatch.Groups[1].Value
-          }
-        }
-      }
-    }
-    
-    # Extract script paths from scheduled tasks
-    foreach ($task in $ScheduledTasks) {
-      if ($null -eq $task -or -not $task.Actions) { continue }
-      
-      foreach ($action in $task.Actions) {
-        if ($null -eq $action) { continue }
-        
-        # Check Execute property
-        if ($action.Execute) {
-          Add-CandidatePath $action.Execute
-        }
-        
-        # Check Arguments property for script references
-        if ($action.Arguments) {
-          $actionArgs = [string]$action.Arguments
-          if ($actionArgs -match '\.(ps1|psm1|bat|cmd|vbs|js|kix|wsf)\b') {
-            $scriptMatches = [regex]::Matches($actionArgs, '["\s]([^"\s]+\.(?:ps1|psm1|bat|cmd|vbs|js|kix|wsf))', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-            foreach ($scriptMatch in $scriptMatches) {
-              if ($scriptMatch.Groups.Count -gt 1) {
-                Add-CandidatePath $scriptMatch.Groups[1].Value
-              }
-            }
-          }
-        }
-        
-        # Check WorkingDir property (might contain script paths)
-        if ($action.WorkingDir) {
-          Add-CandidatePath $action.WorkingDir
-        }
-      }
-    }
-    
-    # Optionally add well-known script directories (bounded, no deep recursion)
-    $wellKnownScriptDirs = @(
-      'C:\Scripts',
-      'C:\ProgramData\Scripts',
-      "$env:ProgramData\Scripts"
-    )
-    
-    foreach ($scriptDir in $wellKnownScriptDirs) {
-      if (-not (Test-Path -LiteralPath $scriptDir -PathType Container -ErrorAction SilentlyContinue)) { continue }
-      
-      try {
-        # Only scan one level deep in well-known directories (no recursion)
-        foreach ($ext in $scriptExtensions) {
-          $files = Get-ChildItem -Path $scriptDir -Filter "*$ext" -File -ErrorAction SilentlyContinue | Select-Object -First 20
-          foreach ($file in $files) {
-            $normalized = $file.FullName.ToUpperInvariant()
-            if (-not $candidatePaths.ContainsKey($normalized)) {
-              $candidatePaths[$normalized] = $file.FullName
-            }
-          }
-        }
-      } catch {
-        if ($Log) { $Log.Write("Error scanning script directory $scriptDir : $($_.Exception.Message)", 'WARN') }
-      }
-    }
-    
-    if ($Log) { $Log.Write("Found $($candidatePaths.Count) unique candidate script file(s) to scan", 'INFO') }
-    
-    # Scan candidate script files for domain references
-    $filesScanned = 0
-    $filesWithMatches = 0
-    
-    foreach ($scriptPath in $candidatePaths.Values) {
-      # Apply Slim mode limit
-      if ($SlimOutputOnly -and $filesWithMatches -ge $maxScriptsInSlimMode) {
-        if ($Log) { $Log.Write("Reached Slim mode limit ($maxScriptsInSlimMode script references), stopping scan", 'INFO') }
-        break
-      }
-      
-      if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf -ErrorAction SilentlyContinue)) { continue }
-      
-      try {
-        # Skip very large files (> 1MB) to avoid memory issues
-        $fileInfo = Get-Item -LiteralPath $scriptPath -ErrorAction SilentlyContinue
-        if ($fileInfo -and $fileInfo.Length -gt 1MB) {
-          if ($Log) { $Log.Write("Skipping large script file: $scriptPath ($([math]::Round($fileInfo.Length / 1MB, 2)) MB)", 'INFO') }
-          continue
-        }
-        
-        $content = Get-Content -Path $scriptPath -Raw -ErrorAction Stop
-        if ([string]::IsNullOrWhiteSpace($content)) { continue }
-        
-        $filesScanned++
-        
-        # Check for domain references
-        if ($DomainMatchers.Match($content)) {
-          $filesWithMatches++
-          
-          # Extract matching snippet
-          $lines = $content -split "`r?`n"
-          $matchedSnippet = ''
-          $matchedLineNumber = 0
-          
-          foreach ($lineNum in 0..($lines.Count - 1)) {
-            $line = $lines[$lineNum]
-            if ($DomainMatchers.Match($line)) {
-              $matchedSnippet = $line.Trim()
-              $matchedLineNumber = $lineNum + 1
-              break
-            }
-          }
-          
-          # If no line match found, extract a snippet from the content
-          if ([string]::IsNullOrWhiteSpace($matchedSnippet)) {
-            # Find first match position
-            $contentMatch = [regex]::Match($content, $DomainMatchers.Fqdn.ToString(), [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-            if (-not $contentMatch.Success) {
-              $contentMatch = [regex]::Match($content, $DomainMatchers.Netbios.ToString(), [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-            }
-            if (-not $contentMatch.Success) {
-              # UncPath is an array of regex objects, iterate through them
-              if ($DomainMatchers.UncPath -and $DomainMatchers.UncPath.Count -gt 0) {
-                foreach ($uncPattern in $DomainMatchers.UncPath) {
-                  if ($uncPattern) {
-                    $contentMatch = [regex]::Match($content, $uncPattern.ToString(), [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-                    if ($contentMatch.Success) { break }
-                  }
-                }
-              }
-            }
-            
-            if ($contentMatch.Success) {
-              $start = [Math]::Max(0, $contentMatch.Index - 30)
-              $length = [Math]::Min($maxSnippetLength, $content.Length - $start)
-              $matchedSnippet = $content.Substring($start, $length)
-              $endPosition = $start + $length
-              if ($endPosition -lt $content.Length) {
-                $matchedSnippet += '...'
-              }
-            }
-          }
-          
-          # Truncate snippet if needed
-          if ($matchedSnippet.Length -gt $maxSnippetLength) {
-            $matchedSnippet = $matchedSnippet.Substring(0, $maxSnippetLength) + '...'
-          }
-          
-          # Determine evidence type
-          $evidenceType = $DomainMatchers.GetEvidenceType($matchedSnippet)
-          if (-not $evidenceType) { $evidenceType = 'FQDN' }  # Default fallback
-          
-          # Determine script type from extension
-          $ext = [System.IO.Path]::GetExtension($scriptPath).ToLowerInvariant()
-          $scriptType = switch ($ext) {
-            '.ps1' { 'PowerShell' }
-            '.psm1' { 'PowerShellModule' }
-            '.psd1' { 'PowerShellManifest' }
-            '.bat' { 'Batch' }
-            '.cmd' { 'Command' }
-            '.vbs' { 'VBScript' }
-            '.js' { 'JavaScript' }
-            '.kix' { 'KiXtart' }
-            '.wsf' { 'WindowsScript' }
-            '.sh' { 'Shell' }
-            default { 'Script' }
-          }
-          
-          $results += [pscustomobject]@{
-            Path = $scriptPath
-            Type = 'ScriptFile'
-            ScriptType = $scriptType
-            EvidenceType = $evidenceType
-            Snippet = $matchedSnippet
-            LineNumber = if ($matchedLineNumber -gt 0) { $matchedLineNumber } else { $null }
-          }
-        }
-      } catch {
-        # Skip files we can't read (permissions, locked, etc.)
-        if ($Log) { $Log.Write("Error reading script file $scriptPath : $($_.Exception.Message)", 'WARN') }
-      }
-    }
-    
-    if ($Log) { 
-      $Log.Write("Scanned $filesScanned script file(s), found $filesWithMatches file(s) with domain references", 'INFO') 
-    }
-    
-    return $results
-  }
-
-  function Get-HardCodedDomainReferences {
-    [CmdletBinding()]
-    param(
-      [Parameter(Mandatory)]
-      $DomainMatchers,
-      [Parameter(Mandatory=$false)]
-      $Log,
-      [Parameter(Mandatory=$false)]
-      [bool]$SlimMode = $false,
-      [Parameter(Mandatory=$false)]
-      $DriveMaps = @()
-    )
-    
-    $results = @()
-    
-    if ($Log) { $Log.Write('Scanning for hard-coded domain references in registry, files, and configurations', 'INFO') }
-    
-    # Helper to add a reference finding
-    function Add-Reference {
-      param(
-        [string]$LocationType,
-        [string]$Location,
-        [string]$EvidenceType,
-        [string]$Value
-      )
-      if ([string]::IsNullOrWhiteSpace($Value)) { return }
-      $results += [pscustomobject]@{
-        LocationType = $LocationType
-        Location = $Location
-        EvidenceType = $EvidenceType
-        Value = if ($Value.Length -gt 200) { $Value.Substring(0, 200) + '...' } else { $Value }
-      }
-    }
-    
-    # --------------------------------------------------------------------------------
-    # 1. Registry Scanning
-    # --------------------------------------------------------------------------------
-    if ($Log) { $Log.Write('Scanning registry for domain references', 'INFO') }
-    
-    $registryPathsToScan = @(
-      @{ Hive = 'LocalMachine'; Path = 'SOFTWARE'; View = 'Default' },
-      @{ Hive = 'LocalMachine'; Path = 'SYSTEM\CurrentControlSet\Services'; View = 'Default' },
-      @{ Hive = 'CurrentUser'; Path = 'SOFTWARE'; View = 'Default' }
-    )
-    
-    # Add 64-bit and 32-bit views if on 64-bit OS
-    if ([Environment]::Is64BitOperatingSystem) {
-      $registryPathsToScan += @(
-        @{ Hive = 'LocalMachine'; Path = 'SOFTWARE'; View = 'Registry64' },
-        @{ Hive = 'LocalMachine'; Path = 'SOFTWARE'; View = 'Registry32' },
-        @{ Hive = 'LocalMachine'; Path = 'SYSTEM\CurrentControlSet\Services'; View = 'Registry64' },
-        @{ Hive = 'LocalMachine'; Path = 'SYSTEM\CurrentControlSet\Services'; View = 'Registry32' }
-      )
-    }
-    
-    foreach ($regPath in $registryPathsToScan) {
-      try {
-        $hive = switch ($regPath.Hive) {
-          'LocalMachine' { [Microsoft.Win32.RegistryHive]::LocalMachine }
-          'CurrentUser' { [Microsoft.Win32.RegistryHive]::CurrentUser }
-          default { continue }
-        }
-        
-        $view = switch ($regPath.View) {
-          'Registry64' { [Microsoft.Win32.RegistryView]::Registry64 }
-          'Registry32' { [Microsoft.Win32.RegistryView]::Registry32 }
-          default { [Microsoft.Win32.RegistryView]::Default }
-        }
-        
-        $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($hive, $view)
-        $key = $baseKey.OpenSubKey($regPath.Path)
-        
-        if ($null -eq $key) { continue }
-        
-        # Recursively scan registry keys (limited depth to avoid performance issues)
-        $keysToProcess = New-Object System.Collections.Queue
-        $keysToProcess.Enqueue(@{ Key = $key; Path = $regPath.Path; Depth = 0 })
-        $maxDepth = 5  # Limit recursion depth
-        
-        while ($keysToProcess.Count -gt 0) {
-          $current = $keysToProcess.Dequeue()
-          $currentKey = $current.Key
-          $currentPath = $current.Path
-          $currentDepth = $current.Depth
-          
-          if ($currentDepth -ge $maxDepth) { continue }
-          
-          try {
-            # Check all values in current key
-            foreach ($valueName in $currentKey.GetValueNames()) {
-              try {
-                $value = $currentKey.GetValue($valueName)
-                if ($null -eq $value) { continue }
-                
-                $valueStr = [string]$value
-                if ($DomainMatchers.Match($valueStr)) {
-                  $evidenceType = $DomainMatchers.GetEvidenceType($valueStr)
-                  if (-not $evidenceType) { $evidenceType = 'FQDN' }  # Default fallback
-                  
-                  $fullPath = "$($regPath.Hive):\$currentPath\$valueName"
-                  Add-Reference -LocationType 'Registry' -Location $fullPath -EvidenceType $evidenceType -Value $valueStr
-                }
-              } catch {
-                # Skip values we can't read
-              }
-            }
-            
-            # Add subkeys to queue for processing
-            foreach ($subKeyName in $currentKey.GetSubKeyNames()) {
-              try {
-                $subKey = $currentKey.OpenSubKey($subKeyName)
-                if ($subKey) {
-                  $subPath = "$currentPath\$subKeyName"
-                  $keysToProcess.Enqueue(@{ Key = $subKey; Path = $subPath; Depth = ($currentDepth + 1) })
-                }
-              } catch {
-                # Skip subkeys we can't access
-              }
-            }
-          } catch {
-            # Continue with next key
-          } finally {
-            if ($currentKey -ne $key) {
-              $currentKey.Close()
-            }
-          }
-        }
-        
-        $key.Close()
-        $baseKey.Close()
-      } catch {
-        if ($Log) { $Log.Write("Error scanning registry path $($regPath.Hive):\$($regPath.Path): $($_.Exception.Message)", 'WARN') }
-      }
-    }
-    
-    # --------------------------------------------------------------------------------
-    # 2. Scheduled Task XML Files
-    # --------------------------------------------------------------------------------
-    if ($Log) { $Log.Write('Scanning scheduled task XML files', 'INFO') }
-    
-    $taskXmlPath = Join-Path $env:SystemRoot 'System32\Tasks'
-    if (Test-Path $taskXmlPath) {
-      try {
-        $taskXmlFiles = Get-ChildItem -Path $taskXmlPath -Filter '*.xml' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 200
-        foreach ($taskFile in $taskXmlFiles) {
-          try {
-            $content = Get-Content -Path $taskFile.FullName -Raw -ErrorAction Stop
-            if ($DomainMatchers.Match($content)) {
-              # Extract matching lines
-              $lines = $content -split "`r?`n"
-              $matchedSnippet = ''
-              foreach ($line in $lines) {
-                if ($DomainMatchers.Match($line)) {
-                  $matchedSnippet = $line.Trim()
-                  if ($matchedSnippet.Length -gt 200) { $matchedSnippet = $matchedSnippet.Substring(0, 200) + '...' }
-                  break
-                }
-              }
-              
-              $evidenceType = $DomainMatchers.GetEvidenceType($matchedSnippet)
-              if (-not $evidenceType) { $evidenceType = 'FQDN' }
-              
-              Add-Reference -LocationType 'ScheduledTask' -Location $taskFile.FullName -EvidenceType $evidenceType -Value $matchedSnippet
-            }
-          } catch {
-            # Skip files we can't read
-          }
-        }
-      } catch {
-        if ($Log) { $Log.Write("Error scanning scheduled task XML files: $($_.Exception.Message)", 'WARN') }
-      }
-    }
-    
-    # --------------------------------------------------------------------------------
-    # 3. Config Files (Enhanced - only in Full mode or limited in Slim mode)
-    # --------------------------------------------------------------------------------
-    if (-not $SlimMode) {
-      if ($Log) { $Log.Write('Scanning config files for domain references', 'INFO') }
-      
-      $configExtensions = @('*.config', '*.ini', '*.xml', '*.json', '*.conf')
-      $configLocations = @(
-        "$env:ProgramData",
-        "$env:ProgramFiles",
-        "${env:ProgramFiles(x86)}"
-      )
-      
-      $maxFilesPerLocation = 200
-      
-      foreach ($location in $configLocations) {
-        if (-not (Test-Path $location)) { continue }
-        
-        try {
-          foreach ($ext in $configExtensions) {
-            $files = Get-ChildItem -Path $location -Filter $ext -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object -First $maxFilesPerLocation
-            foreach ($file in $files) {
-              try {
-                $content = Get-Content -Path $file.FullName -Raw -ErrorAction Stop
-                if ($DomainMatchers.Match($content)) {
-                  # Extract matching snippet
-                  $lines = $content -split "`r?`n"
-                  $matchedSnippet = ''
-                  foreach ($line in $lines) {
-                    if ($DomainMatchers.Match($line)) {
-                      $matchedSnippet = $line.Trim()
-                      break
-                    }
-                  }
-                  
-                  $evidenceType = $DomainMatchers.GetEvidenceType($matchedSnippet)
-                  if (-not $evidenceType) { $evidenceType = 'FQDN' }
-                  
-                  Add-Reference -LocationType 'File' -Location $file.FullName -EvidenceType $evidenceType -Value $matchedSnippet
-                }
-              } catch {
-                # Skip files we can't read
-              }
-            }
-          }
-        } catch {
-          if ($Log) { $Log.Write("Error scanning config files in ${location}: $($_.Exception.Message)", 'WARN') }
-        }
-      }
-    } else {
-      if ($Log) { $Log.Write('Skipping config file scanning in Slim mode', 'INFO') }
-    }
-    
-    # --------------------------------------------------------------------------------
-    # 4. Printer Connections
-    # --------------------------------------------------------------------------------
-    if ($Log) { $Log.Write('Scanning printer connections for domain references', 'INFO') }
-    
-    try {
-      $printers = Get-Printer -ErrorAction SilentlyContinue
-      if (-not $printers) {
-        # Fallback to WMI/CIM
-        if ($script:CompatibilityMode -eq 'Full') {
-          $printers = Get-CimInstance Win32_Printer -ErrorAction SilentlyContinue
-        } else {
-          $printers = Get-WmiObject -Class Win32_Printer -ErrorAction SilentlyContinue
-        }
-      }
-      
-      foreach ($printer in $printers) {
-        if ($null -eq $printer) { continue }
-        
-        $printerFields = @()
-        if ($printer.PSObject.Properties['ShareName']) { $printerFields += $printer.ShareName }
-        if ($printer.PSObject.Properties['PortName']) { $printerFields += $printer.PortName }
-        if ($printer.PSObject.Properties['ComputerName']) { $printerFields += $printer.ComputerName }
-        if ($printer.PSObject.Properties['ServerName']) { $printerFields += $printer.ServerName }
-        if ($printer.PSObject.Properties['SystemName']) { $printerFields += $printer.SystemName }
-        
-        foreach ($field in $printerFields) {
-          if ([string]::IsNullOrWhiteSpace($field)) { continue }
-          if ($DomainMatchers.Match($field)) {
-            $evidenceType = $DomainMatchers.GetEvidenceType($field)
-            if (-not $evidenceType) { $evidenceType = 'UNC' }  # Printers often use UNC paths
-            
-            $printerName = if ($printer.PSObject.Properties['Name']) { $printer.Name } else { 'Unknown' }
-            Add-Reference -LocationType 'Printer' -Location "Printer:${printerName}" -EvidenceType $evidenceType -Value $field
-          }
-        }
-      }
-    } catch {
-      if ($Log) { $Log.Write("Error scanning printer connections: $($_.Exception.Message)", 'WARN') }
-    }
-    
-    # --------------------------------------------------------------------------------
-    # 5. Mapped Drives and Persistent Network Connections
-    # --------------------------------------------------------------------------------
-    if ($Log) { $Log.Write('Scanning mapped drives for domain references', 'INFO') }
-    
-    foreach ($drive in $DriveMaps) {
-      if ($null -eq $drive) { continue }
-      $remotePath = if ($drive.PSObject.Properties['Remote']) { $drive.Remote } else { $null }
-      if ([string]::IsNullOrWhiteSpace($remotePath)) { continue }
-      
-      if ($DomainMatchers.Match($remotePath)) {
-        $evidenceType = $DomainMatchers.GetEvidenceType($remotePath)
-        if (-not $evidenceType) { $evidenceType = 'UNC' }
-        
-        $driveLetter = if ($drive.PSObject.Properties['Drive']) { $drive.Drive } else { 'Unknown' }
-        Add-Reference -LocationType 'ServiceConfig' -Location "MappedDrive:${driveLetter}" -EvidenceType $evidenceType -Value $remotePath
-      }
-    }
-    
-    if ($Log) { $Log.Write("Found $($results.Count) hard-coded domain references", 'INFO') }
     
     return $results
   }
@@ -6166,305 +3431,6 @@ function Get-GPOMachineDN {
 .OUTPUTS
     PSCustomObject with Shares and Errors arrays.
 #>
-function Get-ServerSummaryFromReferences {
-  <#
-  .SYNOPSIS
-    Aggregates file server and print server references from discovered data.
-  
-  .DESCRIPTION
-    Extracts server names from shares, printers, mapped drives, and hard-coded references,
-    normalizes them, and groups them into file servers and print servers with their
-    associated paths and printers.
-  
-  .PARAMETER SharedFolders
-    Array of shared folder objects from Get-SharedFoldersWithACL.
-  
-  .PARAMETER Printers
-    Array of printer objects from Get-Printer or Win32_Printer.
-  
-  .PARAMETER MappedDrives
-    Array of mapped drive objects with Remote property.
-  
-  .PARAMETER References
-    Array of hard-coded domain reference objects with Value property.
-  
-  .PARAMETER DomainMatchers
-    Domain matcher object for checking domain references.
-  
-  .PARAMETER OldDomainFqdn
-    Old domain FQDN for domain matching.
-  
-  .PARAMETER OldDomainNetBIOS
-    Old domain NetBIOS name for domain matching.
-  
-  .PARAMETER SlimOutputOnly
-    If true, limits the number of paths listed per server.
-  
-  .PARAMETER Log
-    Logger object for writing log messages.
-  
-  .OUTPUTS
-    PSCustomObject with FileServers and PrintServers arrays.
-  #>
-  [CmdletBinding()]
-  param(
-    [Parameter(Mandatory=$false)]
-    $SharedFolders = @(),
-    [Parameter(Mandatory=$false)]
-    $Printers = @(),
-    [Parameter(Mandatory=$false)]
-    $MappedDrives = @(),
-    [Parameter(Mandatory=$false)]
-    $References = @(),
-    [Parameter(Mandatory)]
-    $DomainMatchers,
-    [Parameter(Mandatory)]
-    [string]$OldDomainFqdn,
-    [Parameter(Mandatory=$false)]
-    [string]$OldDomainNetBIOS,
-    [Parameter(Mandatory=$false)]
-    [switch]$SlimOutputOnly = $false,
-    [Parameter(Mandatory=$false)]
-    $Log
-  )
-  
-  if ($Log) { $Log.Write('Aggregating file server and print server references', 'INFO') }
-  
-  # Helper function to normalize server name
-  function Normalize-ServerName {
-    param([string]$ServerName)
-    if ([string]::IsNullOrWhiteSpace($ServerName)) { return $null }
-    
-    # Remove leading \\ if present
-    $normalized = $ServerName.TrimStart('\')
-    
-    # Extract server name from UNC path (\\server\share -> server)
-    if ($normalized -match '^([^\\]+)') {
-      $normalized = $Matches[1]
-    }
-    
-    # Extract server name from FQDN (server.domain.com -> server)
-    # But keep FQDN if it's a full domain name
-    if ($normalized -match '^([^.]+)\.') {
-      $hostname = $Matches[1]
-      # If the rest matches a domain pattern, it's likely an FQDN
-      if ($normalized -match "^$hostname\.(.+)$") {
-        # Check if domain part matches old domain
-        if ($DomainMatchers.Match($normalized)) {
-          # Keep FQDN for old domain servers
-          return $normalized
-        }
-      }
-      # Otherwise, return just the hostname
-      return $hostname
-    }
-    
-    return $normalized
-  }
-  
-  # Helper function to check if server is in old domain
-  function Test-IsOldDomainServer {
-    param([string]$ServerName)
-    if ([string]::IsNullOrWhiteSpace($ServerName)) { return $false }
-    
-    # Check FQDN match
-    if ($DomainMatchers.Match($ServerName)) {
-      return $true
-    }
-    
-    # Check if server name contains old domain FQDN or NetBIOS
-    if ($OldDomainFqdn -and $ServerName -like "*.$OldDomainFqdn") {
-      return $true
-    }
-    if ($OldDomainNetBIOS -and $ServerName -like "*\$OldDomainNetBIOS") {
-      return $true
-    }
-    
-    return $false
-  }
-  
-  # Helper function to extract UNC paths from a string
-  function Get-UncPathsFromString {
-    param([string]$Text)
-    $uncPaths = @()
-    if ([string]::IsNullOrWhiteSpace($Text)) { return $uncPaths }
-    
-    # Match UNC paths: \\server\share or \\server.domain.com\share
-    $uncMatches = [regex]::Matches($Text, '\\\\[^\\\s]+(?:\\[^\\\s]+)*')
-    foreach ($uncMatch in $uncMatches) {
-      $uncPaths += $uncMatch.Value
-    }
-    
-    return $uncPaths
-  }
-  
-  $fileServerMap = @{}
-  $printServerMap = @{}
-  
-  # Process shared folders (local shares - these are on THIS machine, not remote file servers)
-  # Skip these as they don't represent remote file servers
-  
-  # Process printers
-  foreach ($printer in $Printers) {
-    if ($null -eq $printer) { continue }
-    
-    $serverName = $null
-    $printerName = $null
-    
-    # Extract printer name
-    if ($printer.PSObject.Properties['Name']) {
-      $printerName = [string]$printer.Name
-    }
-    
-    # Extract server name from various printer properties
-    if ($printer.PSObject.Properties['ServerName'] -and -not [string]::IsNullOrWhiteSpace($printer.ServerName)) {
-      $serverName = Normalize-ServerName $printer.ServerName
-    } elseif ($printer.PSObject.Properties['ComputerName'] -and -not [string]::IsNullOrWhiteSpace($printer.ComputerName)) {
-      $serverName = Normalize-ServerName $printer.ComputerName
-    } elseif ($printer.PSObject.Properties['SystemName'] -and -not [string]::IsNullOrWhiteSpace($printer.SystemName)) {
-      $serverName = Normalize-ServerName $printer.SystemName
-    } elseif ($printer.PSObject.Properties['PortName'] -and -not [string]::IsNullOrWhiteSpace($printer.PortName)) {
-      # PortName might be a UNC path like \\server\printer
-      $portName = [string]$printer.PortName
-      if ($portName -like '\\*') {
-        $serverName = Normalize-ServerName $portName
-      }
-    } elseif ($printer.PSObject.Properties['ShareName'] -and -not [string]::IsNullOrWhiteSpace($printer.ShareName)) {
-      # ShareName might contain server reference
-      $shareName = [string]$printer.ShareName
-      if ($shareName -like '\\*') {
-        $serverName = Normalize-ServerName $shareName
-      }
-    }
-    
-    if ($serverName) {
-      $normalizedServer = $serverName.ToUpperInvariant()
-      
-      if (-not $printServerMap.ContainsKey($normalizedServer)) {
-        $printServerMap[$normalizedServer] = [pscustomobject]@{
-          Name = $serverName
-          IsOldDomain = Test-IsOldDomainServer $serverName
-          Printers = @()
-          SourceTypes = @('Printer')
-        }
-      }
-      
-      if ($printerName -and -not ($printServerMap[$normalizedServer].Printers -contains $printerName)) {
-        $printServerMap[$normalizedServer].Printers += $printerName
-      }
-    }
-  }
-  
-  # Process mapped drives
-  foreach ($drive in $MappedDrives) {
-    if ($null -eq $drive -or [string]::IsNullOrWhiteSpace($drive.Remote)) { continue }
-    
-    $remotePath = [string]$drive.Remote
-    if ($remotePath -notlike '\\*') { continue }  # Skip non-UNC paths
-    
-    $serverName = Normalize-ServerName $remotePath
-    if (-not $serverName) { continue }
-    
-    $normalizedServer = $serverName.ToUpperInvariant()
-    
-    if (-not $fileServerMap.ContainsKey($normalizedServer)) {
-      $fileServerMap[$normalizedServer] = [pscustomobject]@{
-        Name = $serverName
-        IsOldDomain = Test-IsOldDomainServer $serverName
-        SourceTypes = @()
-        Paths = @()
-      }
-    }
-    
-    if (-not ($fileServerMap[$normalizedServer].SourceTypes -contains 'MappedDrive')) {
-      $fileServerMap[$normalizedServer].SourceTypes += 'MappedDrive'
-    }
-    
-    if (-not ($fileServerMap[$normalizedServer].Paths -contains $remotePath)) {
-      $fileServerMap[$normalizedServer].Paths += $remotePath
-    }
-  }
-  
-  # Process hard-coded references (extract UNC paths)
-  foreach ($ref in $References) {
-    if ($null -eq $ref) { continue }
-    
-    $value = $ref.Value
-    if ([string]::IsNullOrWhiteSpace($value)) { continue }
-    
-    # Extract UNC paths from the value
-    $uncPaths = Get-UncPathsFromString $value
-    
-    foreach ($uncPath in $uncPaths) {
-      $serverName = Normalize-ServerName $uncPath
-      if (-not $serverName) { continue }
-      
-      $normalizedServer = $serverName.ToUpperInvariant()
-      
-      if (-not $fileServerMap.ContainsKey($normalizedServer)) {
-        $fileServerMap[$normalizedServer] = [pscustomobject]@{
-          Name = $serverName
-          IsOldDomain = Test-IsOldDomainServer $serverName
-          SourceTypes = @()
-          Paths = @()
-        }
-      }
-      
-      $sourceType = $ref.LocationType
-      if ($sourceType -eq 'File' -or $sourceType -eq 'Registry' -or $sourceType -eq 'ScheduledTask') {
-        $sourceType = 'UNCReference'
-      }
-      
-      if ($sourceType -and -not ($fileServerMap[$normalizedServer].SourceTypes -contains $sourceType)) {
-        $fileServerMap[$normalizedServer].SourceTypes += $sourceType
-      }
-      
-      if (-not ($fileServerMap[$normalizedServer].Paths -contains $uncPath)) {
-        $fileServerMap[$normalizedServer].Paths += $uncPath
-      }
-    }
-  }
-  
-  # Convert maps to arrays and apply Slim mode limits
-  $fileServers = @()
-  foreach ($server in $fileServerMap.Values) {
-    # Limit paths in Slim mode
-    if ($SlimOutputOnly -and $server.Paths.Count -gt 10) {
-      $server.Paths = $server.Paths | Select-Object -First 10
-      # Note: We keep all servers, just limit paths per server
-    }
-    
-    $fileServers += [pscustomobject]@{
-      Name = $server.Name
-      IsOldDomain = $server.IsOldDomain
-      SourceTypes = $server.SourceTypes
-      Paths = $server.Paths
-    }
-  }
-  
-  $printServers = @()
-  foreach ($server in $printServerMap.Values) {
-    $printServers += [pscustomobject]@{
-      Name = $server.Name
-      IsOldDomain = $server.IsOldDomain
-      Printers = $server.Printers
-    }
-  }
-  
-  # Sort by name for consistent output
-  $fileServers = $fileServers | Sort-Object Name
-  $printServers = $printServers | Sort-Object Name
-  
-  if ($Log) { 
-    $Log.Write("Found $($fileServers.Count) unique file server(s) and $($printServers.Count) unique print server(s)", 'INFO') 
-  }
-  
-  return [pscustomobject]@{
-    FileServers = $fileServers
-    PrintServers = $printServers
-  }
-}
-
 function Get-SharedFoldersWithACL {
     [CmdletBinding()]
     param(
@@ -6476,14 +3442,7 @@ function Get-SharedFoldersWithACL {
     $errors = @()
     
     try {
-        # Full (PS 5.1+) path
-        if ($script:CompatibilityMode -eq 'Full') {
-            $shares = Get-CimInstance -ClassName Win32_Share -ErrorAction Stop | Where-Object { $_.Type -eq 0 }
-        }
-        else {
-            # Legacy path for PS 3.0–4.0
-            $shares = Get-WmiObject -Class Win32_Share -ErrorAction Stop | Where-Object { $_.Type -eq 0 }
-        }
+        $shares = Get-CimInstance -ClassName Win32_Share -ErrorAction Stop | Where-Object { $_.Type -eq 0 }
     } catch {
         $errorMsg = "Failed to enumerate shares: $($_.Exception.Message)"
         if ($Log) { $Log.Write($errorMsg, 'WARN') }
@@ -6603,84 +3562,12 @@ function Get-SharedFoldersWithACL {
     $sharedFolders = if ($sharedFoldersResult) { $sharedFoldersResult } else { @() }
     $sharedFoldersErrors = @()
   }
-
-  # --------------------------------------------------------------------------------
-  # Server Summary (File Servers & Print Servers)
-  # --------------------------------------------------------------------------------
-  # Aggregate server references from shares, printers, mapped drives, and references
-  # Note: This must be called after hardCodedReferences is collected
-  $serverSummary = Safe-Try {
-    Get-ServerSummaryFromReferences -SharedFolders $sharedFolders -Printers $printers -MappedDrives $driveMaps -References $hardCodedReferences -DomainMatchers $matchers -OldDomainFqdn $OldDomainFqdn -OldDomainNetBIOS $OldDomainNetBIOS -SlimOutputOnly $SlimOutputOnly -Log $script:log
-  } 'ServerSummary'
-  if (-not $serverSummary) {
-    $serverSummary = [pscustomobject]@{
-      FileServers = @()
-      PrintServers = @()
-    }
-  }
-  
   $dnsConfiguration = Safe-Try { Get-DnsConfigurationForMigration -DomainMatchers $matchers -Log $script:log } 'Get-DnsConfigurationForMigration'
 #endregion
 
 #region ============================================================================
 # MAIN EXECUTION - Output Generation
 # ============================================================================
-<#
-.SYNOPSIS
-    Generates standardized JSON output for Power BI and custom web application ingestion.
-
-.DESCRIPTION
-    The JSON output structure is designed for consistent ingestion into reporting tools:
-    - All property names use PascalCase
-    - All array properties are guaranteed to be arrays (never null)
-    - Object properties (IIS, SqlServer, DnsConfiguration) may be null if services are not installed
-    - Properties set to null in SlimOutputOnly mode are documented in the Schema section
-    - Dates are in ISO 8601 format (o)
-    - SIDs are strings in standard Windows SID format
-    
-    The JSON includes a self-documenting Schema section that describes:
-    - Each top-level section and its purpose
-    - Property types (Object, Array, String, etc.)
-    - Nested structure details
-    - Notes on data formats and conventions
-    
-    Top-level sections (in order):
-    1. Schema - Self-documenting schema information
-    2. Metadata - Collection metadata (timestamps, domain info, script version)
-    3. System - System hardware and OS information
-    4. Profiles - User profiles
-    5. SharedFolders - Shared folders with ACLs
-    6. InstalledApps - Installed applications (filtered in SlimOutputOnly mode)
-    7. Services - Windows services (filtered in SlimOutputOnly mode)
-    8. ScheduledTasks - Scheduled tasks (filtered in SlimOutputOnly mode)
-    9. LocalGroupMembers - Local group memberships
-    10. LocalAdministrators - Local Administrators group (always included)
-    11. LocalAccounts - Local user and group accounts
-    12. MappedDrives - Mapped network drives
-    13. Printers - Installed printers (filtered in SlimOutputOnly mode)
-    14. OdbcDsn - ODBC data sources
-    15. AutoAdminLogon - Auto-admin logon config
-    16. CredentialManager - Stored credentials
-    17. Certificates - Certificates with domain references
-    18. Endpoints - Certificate endpoints (IIS, RDP)
-    19. FirewallRules - Firewall rules with domain references
-    20. DnsConfiguration - DNS configuration (may be null)
-    21. IIS - IIS configuration (null if IIS not installed)
-    22. SqlServer - SQL Server configuration (null if SQL Server not installed)
-    23. EventLogDomainReferences - Event log entries with domain references
-    24. ApplicationConfigFiles - Config files with domain references
-    25. SecurityAgents - Security agent tenant information
-    26. QuestConfig - Quest AD Migration Agent configuration
-    27. References - Hard-coded domain references (registry, files, etc.)
-    28. AppSpecific - App-specific domain references from config-driven discovery (null if config not provided)
-    29. DatabaseConnections - Parsed database connection strings from ODBC, registry, and config files
-    30. ServerSummary - Aggregated file server and print server references
-    31. Detection - Domain reference detection summary and counts
-
-.NOTES
-    ConvertTo-Json is called with -Depth 10 to ensure deeply nested structures are fully serialized.
-    The JSON structure is identical regardless of SlimOutputOnly setting - only content is filtered.
-#>
 
   # --------------------------------------------------------------------------------
   # Build Result Object
@@ -6718,293 +3605,12 @@ function Get-SharedFoldersWithACL {
   $scheduledTasksData = if ($SlimOutputOnly) { $tasksFiltered } else { $tasks }
   $printersData = if ($SlimOutputOnly) { $printersFiltered } else { $printers }
 
-  # Ensure all array properties are arrays (not null) for consistent JSON structure
-  # This ensures Power BI and other tools can reliably expect array types
-  if (-not $profiles) { $profiles = @() }
-  if (-not $sharedFolders) { $sharedFolders = @() }
-  if (-not $sharedFoldersErrors) { $sharedFoldersErrors = @() }
-  if (-not $installedAppsData) { $installedAppsData = @() }
-  if (-not $servicesData) { $servicesData = @() }
-  if (-not $scheduledTasksData) { $scheduledTasksData = @() }
-  if (-not $localGroupMembers) { $localGroupMembers = @() }
-  if (-not $localAdministrators) { $localAdministrators = @() }
-  if (-not $localAccounts) { 
-    $localAccounts = [pscustomobject]@{
-      Users = @()
-      Groups = @()
-    }
-  }
-  if (-not $driveMaps) { $driveMaps = @() }
-  if (-not $printersData) { $printersData = @() }
-  if (-not $odbc) { $odbc = @() }
-  if (-not $auto) { $auto = @() }
-  if (-not $credentialManager) { $credentialManager = @() }
-  if (-not $databaseConnections) { $databaseConnections = @() }
-  if (-not $certificates) { $certificates = @() }
-  if (-not $certificateEndpoints) { $certificateEndpoints = @() }
-  if (-not $firewallRules) { $firewallRules = @() }
-  if (-not $eventLogDomainReferences) { $eventLogDomainReferences = @() }
-  if (-not $applicationConfigFiles) { $applicationConfigFiles = @() }
-  if (-not $hardCodedReferences) { $hardCodedReferences = @() }
-  if (-not $serverSummary) {
-    $serverSummary = [pscustomobject]@{
-      FileServers = @()
-      PrintServers = @()
-    }
-  }
-  if (-not $securityAgents) { $securityAgents = @() }
-  if (-not $questConfig) { $questConfig = @() }
-
-  # Build JSON Schema documentation object
-  # This provides a self-documenting structure for Power BI and custom web applications
-  $jsonSchema = [pscustomobject]@{
-    SchemaVersion = '1.0'
-    Description = 'Domain Migration Discovery Script JSON Output Schema'
-    GeneratedAt = (Get-Date).ToString('o')
-    Sections = [pscustomobject]@{
-      Metadata = [pscustomobject]@{
-        Description = 'Collection metadata including timestamps, domain information, and script version'
-        Type = 'Object'
-        Properties = @('GpoMachineDN', 'ComputerName', 'CollectedAt', 'UserContext', 'Domain', 'OldDomainFqdn', 'OldDomainNetBIOS', 'NewDomainFqdn', 'ProfileDays', 'PlantId', 'Version')
-      }
-      System = [pscustomobject]@{
-        Description = 'System hardware and OS information'
-        Type = 'Object'
-        Properties = @('Hostname', 'Manufacturer', 'Model', 'OSVersion', 'IPAddress', 'MACAddress', 'LoggedInUser')
-      }
-      Profiles = [pscustomobject]@{
-        Description = 'User profiles on the system'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('SID', 'LocalPath', 'LastUseTime', 'ProfileSize', 'Status')
-      }
-      SharedFolders = [pscustomobject]@{
-        Description = 'Shared folders with ACLs'
-        Type = 'Object'
-        Properties = @('Shares', 'Errors')
-        Nested = [pscustomobject]@{
-          Shares = [pscustomobject]@{ Type = 'Array'; ItemType = 'Object'; ItemProperties = @('Name', 'Path', 'Description', 'ACLs') }
-          Errors = [pscustomobject]@{ Type = 'Array'; ItemType = 'String' }
-        }
-      }
-      InstalledApps = [pscustomobject]@{
-        Description = 'Installed applications (filtered in SlimOutputOnly mode)'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('DisplayName', 'DisplayVersion', 'Publisher', 'InstallDate', 'InstallLocation', 'UninstallString', 'KeyPath', 'Scope')
-      }
-      Services = [pscustomobject]@{
-        Description = 'Windows services (filtered in SlimOutputOnly mode)'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('Name', 'DisplayName', 'State', 'StartMode', 'Account', 'PathName', 'AccountIdentity', 'HasDomainReference', 'MatchedField')
-      }
-      ScheduledTasks = [pscustomobject]@{
-        Description = 'Scheduled tasks (filtered in SlimOutputOnly mode)'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('Name', 'State', 'Principal', 'AccountIdentity', 'Actions', 'HasDomainReference', 'MatchedFields')
-      }
-      LocalGroupMembers = [pscustomobject]@{
-        Description = 'Local group memberships'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('GroupName', 'Members', 'HasDomainReference')
-      }
-      LocalAdministrators = [pscustomobject]@{
-        Description = 'Local Administrators group members (always included)'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('Name', 'Type', 'Sid', 'IsOldDomain', 'Source')
-      }
-      LocalAccounts = [pscustomobject]@{
-        Description = 'Local user and group accounts'
-        Type = 'Object'
-        Properties = @('Users', 'Groups')
-        Nested = [pscustomobject]@{
-          Users = [pscustomobject]@{ Type = 'Array'; ItemType = 'Object'; ItemProperties = @('Name', 'Sid', 'Enabled', 'Locked', 'PasswordExpires', 'LastLogon') }
-          Groups = [pscustomobject]@{ Type = 'Array'; ItemType = 'Object'; ItemProperties = @('Name', 'Sid', 'Description', 'Members') }
-        }
-      }
-      MappedDrives = [pscustomobject]@{
-        Description = 'Mapped network drives'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('Drive', 'RemotePath', 'Provider', 'AccountIdentity', 'HasDomainReference')
-      }
-      Printers = [pscustomobject]@{
-        Description = 'Installed printers (filtered in SlimOutputOnly mode)'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('Name', 'ShareName', 'PortName', 'ComputerName', 'ServerName', 'HasDomainReference', 'MatchedField')
-      }
-      OdbcDsn = [pscustomobject]@{
-        Description = 'ODBC data sources'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('Name', 'Driver', 'Server', 'Database', 'HasDomainReference')
-      }
-      AutoAdminLogon = [pscustomobject]@{
-        Description = 'Auto-admin logon configuration'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('Domain', 'Username', 'HasDomainReference')
-      }
-      CredentialManager = [pscustomobject]@{
-        Description = 'Stored credentials from Credential Manager'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('Profile', 'Target', 'UserName', 'AccountIdentity', 'Source', 'HasDomainReference')
-      }
-      Certificates = [pscustomobject]@{
-        Description = 'Certificates with old domain references in Subject, Issuer, or SAN'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('Store', 'Thumbprint', 'Subject', 'Issuer', 'NotBefore', 'NotAfter', 'SANs', 'SANText', 'KeyUsages', 'HasDomainReference', 'MatchedFields')
-      }
-      Endpoints = [pscustomobject]@{
-        Description = 'Certificate endpoints (IIS HTTPS bindings, RDP listeners) tied to old domain'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('Type', 'Name', 'Protocol', 'HostHeader', 'IPAddress', 'Port', 'CertificateThumbprint', 'CertificateTiedToOldDomain', 'HasDomainReference', 'MatchedFields')
-      }
-      FirewallRules = [pscustomobject]@{
-        Description = 'Firewall rules with old domain references'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('Name', 'DisplayName', 'Direction', 'Action', 'ApplicationPath', 'LocalUser', 'RemoteUser', 'HasDomainReference', 'MatchedField')
-      }
-      DnsConfiguration = [pscustomobject]@{
-        Description = 'DNS configuration including suffixes and per-adapter settings'
-        Type = 'Object'
-        Properties = @('PrimaryDNSSuffix', 'DNSSuffixSearchList', 'PerAdapterDNS')
-      }
-      IIS = [pscustomobject]@{
-        Description = 'IIS configuration (null if IIS not installed)'
-        Type = 'Object'
-        Properties = @('Sites', 'AppPools')
-        Nested = [pscustomobject]@{
-          Sites = [pscustomobject]@{ Type = 'Array'; ItemType = 'Object'; ItemProperties = @('Name', 'State', 'Bindings', 'HasDomainReference', 'MatchedFields') }
-          AppPools = [pscustomobject]@{ Type = 'Array'; ItemType = 'Object'; ItemProperties = @('Name', 'State', 'Identity', 'AccountIdentity', 'HasDomainReference', 'MatchedField') }
-        }
-      }
-      SqlServer = [pscustomobject]@{
-        Description = 'SQL Server configuration (null if SQL Server not installed)'
-        Type = 'Object'
-        Properties = @('Instances', 'Logins', 'LinkedServers', 'Jobs', 'ConfigFiles')
-      }
-      EventLogDomainReferences = [pscustomobject]@{
-        Description = 'Event log entries containing old domain references'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('LogName', 'EventId', 'TimeGenerated', 'Message', 'MatchedField')
-      }
-      ApplicationConfigFiles = [pscustomobject]@{
-        Description = 'Application configuration files containing old domain references'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('FilePath', 'FileExtension', 'MatchedField', 'Snippet')
-      }
-      References = [pscustomobject]@{
-        Description = 'Hard-coded domain references found in registry, files, scheduled tasks, scripts, etc.'
-        Type = 'Object'
-        Properties = @('OldDomain', 'ScriptAutomation')
-        Nested = [pscustomobject]@{
-          OldDomain = [pscustomobject]@{ Type = 'Array'; ItemType = 'Object'; ItemProperties = @('LocationType', 'Location', 'EvidenceType', 'Value') }
-          ScriptAutomation = [pscustomobject]@{ 
-            Type = 'Array'; 
-            ItemType = 'Object'; 
-            ItemProperties = @('Path', 'Type', 'ScriptType', 'EvidenceType', 'Snippet', 'LineNumber');
-            Description = 'Script and automation files (PowerShell, batch, VBScript, etc.) containing domain references. Discovered from services, scheduled tasks, and well-known script directories. Limited to 50 files in Slim mode.'
-          }
-        }
-      }
-      AppSpecific = [pscustomobject]@{
-        Description = 'App-specific domain references discovered from config-driven registry and folder scanning (null if AppDiscoveryConfigPath not provided)'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('Name', 'Hits')
-        Nested = [pscustomobject]@{
-          Hits = [pscustomobject]@{ 
-            Type = 'Array'; 
-            ItemType = 'Object'; 
-            ItemProperties = @('LocationType', 'Location', 'EvidenceType', 'ValueOrSnippet');
-            Description = 'Domain references found for this app. Empty array indicates app was scanned but no references found. Limited to 50 hits per app in Slim mode.'
-          }
-        }
-      }
-      DatabaseConnections = [pscustomobject]@{
-        Description = 'Database connection strings discovered from ODBC, registry, and config files, parsed into structured fields'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('LocationType', 'Location', 'Parsed')
-        Nested = [pscustomobject]@{
-          Parsed = [pscustomobject]@{ 
-            Type = 'Object'; 
-            ItemProperties = @('Raw', 'DataSource', 'InitialCatalog', 'IntegratedSecurity', 'UserId', 'HasPassword', 'IsOldDomainServer');
-            Description = 'Parsed connection string fields. Raw is omitted in Slim mode. Passwords are never included, only HasPassword flag.'
-          }
-        }
-      }
-      SecurityAgents = [pscustomobject]@{
-        Description = 'Security agent tenant information'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('AgentName', 'TenantId', 'TenantName', 'HasDomainReference')
-      }
-      QuestConfig = [pscustomobject]@{
-        Description = 'Quest AD Migration Agent configuration'
-        Type = 'Array'
-        ItemType = 'Object'
-        ItemProperties = @('ConfigPath', 'Settings', 'HasDomainReference')
-      }
-      ServerSummary = [pscustomobject]@{
-        Description = 'Aggregated file server and print server references discovered from mapped drives, printers, and hard-coded references'
-        Type = 'Object'
-        Properties = @('FileServers', 'PrintServers')
-        Nested = [pscustomobject]@{
-          FileServers = [pscustomobject]@{ 
-            Type = 'Array'; 
-            ItemType = 'Object'; 
-            ItemProperties = @('Name', 'IsOldDomain', 'SourceTypes', 'Paths');
-            Description = 'File servers discovered from mapped drives, UNC references in registry/files, etc. Paths limited to first 10 in Slim mode.'
-          }
-          PrintServers = [pscustomobject]@{ 
-            Type = 'Array'; 
-            ItemType = 'Object'; 
-            ItemProperties = @('Name', 'IsOldDomain', 'Printers');
-            Description = 'Print servers discovered from printer objects (ServerName, ComputerName, PortName, ShareName properties)'
-          }
-        }
-      }
-      Detection = [pscustomobject]@{
-        Description = 'Domain reference detection summary and counts'
-        Type = 'Object'
-        Properties = @('OldDomain', 'Summary')
-        Nested = [pscustomobject]@{
-          OldDomain = [pscustomobject]@{ Type = 'Object'; Description = 'Detailed detection flags for each discovery area' }
-          Summary = [pscustomobject]@{ Type = 'Object'; Description = 'Summary counts and overall detection status' }
-        }
-      }
-    }
-    Notes = @(
-      'All array properties are guaranteed to be arrays (never null) for consistent Power BI ingestion',
-      'Properties set to null in SlimOutputOnly mode are explicitly documented',
-      'All property names use PascalCase for consistency',
-      'Dates are in ISO 8601 format (o)',
-      'SIDs are strings in standard Windows SID format',
-      'AccountIdentity objects contain: Raw, Name, Domain, Type, Sid, IsOldDomain'
-    )
-  }
-
   # Build consistent JSON structure regardless of SlimOutputOnly setting
   # Properties that are only available in full mode are set to $null in slim mode
-  # All array properties are guaranteed to be arrays (not null) for consistent structure
   $result = [pscustomobject]@{
-    Schema = $jsonSchema
     Metadata = $metadata
     System   = $sysInfo
-    Profiles = $profiles
+    Profiles = if ($SlimOutputOnly) { $null } else { $profiles }
     SharedFolders = [pscustomobject]@{
       Shares = $sharedFolders
       Errors = $sharedFoldersErrors
@@ -7012,16 +3618,14 @@ function Get-SharedFoldersWithACL {
     InstalledApps  = $installedAppsData
     Services       = $servicesData
     ScheduledTasks = $scheduledTasksData
-    LocalGroupMembers    = $localGroupMembers
-    LocalAdministrators  = $localAdministrators  # Always include, regardless of Slim mode
-    LocalAccounts        = $localAccounts
-    MappedDrives  = $driveMaps
+    LocalGroupMembers    = if ($SlimOutputOnly) { $null } else { $localGroupMembers }
+    LocalAdministrators  = if ($SlimOutputOnly) { $null } else { $localAdministrators }
+    MappedDrives  = if ($SlimOutputOnly) { $null } else { $driveMaps }
     Printers      = $printersData
-    OdbcDsn       = $odbc
-    AutoAdminLogon= $auto
+    OdbcDsn       = if ($SlimOutputOnly) { $null } else { $odbc }
+    AutoAdminLogon= if ($SlimOutputOnly) { $null } else { $auto }
     CredentialManager = $credentialManager
     Certificates = $certificates
-    Endpoints = $certificateEndpoints
     FirewallRules = $firewallRules
     DnsConfiguration = $dnsConfiguration
     IIS = $iisConfiguration
@@ -7029,17 +3633,6 @@ function Get-SharedFoldersWithACL {
     EventLogDomainReferences = $eventLogDomainReferences
     ApplicationConfigFiles = $applicationConfigFiles
     SecurityAgents = $securityAgents
-    QuestConfig    = $questConfig
-    References = [pscustomobject]@{
-      OldDomain = $hardCodedReferences
-      ScriptAutomation = $scriptAutomationReferences
-    }
-    AppSpecific = $appSpecificResults
-    DatabaseConnections = $databaseConnections
-    ServerSummary = [pscustomobject]@{
-      FileServers = $serverSummary.FileServers
-      PrintServers = $serverSummary.PrintServers
-    }
     Detection     = [pscustomobject]@{ OldDomain = $flags; Summary = $summary }
   }
 
@@ -7050,33 +3643,174 @@ function Get-SharedFoldersWithACL {
   $fname = ('{0}_{1}.json' -f $env:COMPUTERNAME, (Get-Date).ToString('MM-dd-yyyy'))
   $localPath = Join-Path $OutputRoot $fname
   try {
-    # Full (PS 5.1+) path
+    # Convert to JSON with proper depth and error handling
     # Use depth 10 to ensure deeply nested structures (e.g., Detection.OldDomain, IIS.Sites.Bindings) are fully serialized
-    if ($script:CompatibilityMode -eq 'Full') {
-      $json = $result | ConvertTo-Json -Depth 10
-    }
-    else {
-      # Legacy path for PS 3.0–4.0 (-Depth parameter available but may have limitations)
+    $json = $null
+    $jsonConversionError = $null
+    try {
+      if ($script:CompatibilityMode -eq 'Full') {
+        $json = $result | ConvertTo-Json -Depth 10 -ErrorAction Stop
+      } else {
+        # Legacy path for PS 3.0–4.0 (-Depth parameter available but may have limitations)
+        try {
+          $json = $result | ConvertTo-Json -Depth 10 -ErrorAction Stop
+        } catch {
+          if ($script:log) { $script:log.Write("ConvertTo-Json -Depth failed, using default depth: $($_.Exception.Message)", 'WARN') }
+          $json = $result | ConvertTo-Json -ErrorAction Stop
+        }
+      }
+      
+      # Validate JSON is not empty
+      if ([string]::IsNullOrWhiteSpace($json)) {
+        throw "JSON conversion resulted in empty string"
+      }
+      
+      # Validate JSON can be parsed (ensures valid JSON format for Power BI)
       try {
-        $json = $result | ConvertTo-Json -Depth 10
+        $null = $json | ConvertFrom-Json -ErrorAction Stop
+      } catch {
+        throw "Generated JSON is not valid JSON format: $($_.Exception.Message)"
       }
-      catch {
-        # Fallback to default depth if -Depth fails
-        if ($Log) { $Log.Write("ConvertTo-Json -Depth failed, using default depth: $($_.Exception.Message)", 'WARN') }
-        $json = $result | ConvertTo-Json
+    } catch {
+      $jsonConversionError = $_.Exception.Message
+      $script:log.Write("JSON conversion failed: $jsonConversionError", 'ERROR')
+      throw
+    }
+    
+    # Write JSON to file with UTF-8 encoding (no BOM for Power BI compatibility)
+    try {
+      if ($script:CompatibilityMode -eq 'Full') {
+        # Use UTF8NoBOM encoding for Power BI compatibility
+        $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::WriteAllText($localPath, $json, $utf8NoBom)
+      } else {
+        # Legacy path for PS 3.0–4.0
+        [System.IO.File]::WriteAllText($localPath, $json, [System.Text.Encoding]::UTF8)
       }
+      $script:log.Write("Wrote JSON locally: $localPath")
+    } catch {
+      $script:log.Write("Failed to write JSON file: $($_.Exception.Message)", 'ERROR')
+      throw
     }
-    # Full (PS 5.1+) path
-    if ($script:CompatibilityMode -eq 'Full') {
-      Set-Content -Path $localPath -Value $json -Encoding UTF8
-    }
-    else {
-      # Legacy path for PS 3.0–4.0 (Set-Content -Encoding not available)
-      [System.IO.File]::WriteAllText($localPath, $json, [System.Text.Encoding]::UTF8)
-    }
-    $script:log.Write("Wrote JSON locally: $localPath")
   } catch {
-    $script:log.Write("Failed to write local JSON: $($_.Exception.Message)", 'ERROR'); throw
+    # If JSON conversion or file write fails, generate error JSON instead
+    $errorMessage = if ($jsonConversionError) { "JSON conversion failed: $jsonConversionError" } else { "Failed to write JSON file: $($_.Exception.Message)" }
+    $script:log.Write("Fatal error during JSON output: $errorMessage", 'ERROR')
+    
+    # Generate error JSON structure (reuse the error generation logic from catch block)
+    $hostname = $env:COMPUTERNAME
+    $domain = $null
+    try {
+      if ($script:CompatibilityMode -eq 'Full') {
+        $systemInfo = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+      } else {
+        $systemInfo = Get-WmiObject -Class Win32_ComputerSystem -ErrorAction SilentlyContinue
+      }
+      if ($systemInfo) {
+        $domain = $systemInfo.Domain
+      }
+    } catch {
+      # Ignore errors getting system info
+    }
+    
+    $errorResult = [pscustomobject]@{
+      Schema = $null
+      Metadata = [pscustomobject]@{
+        GpoMachineDN = $null
+        ComputerName = $hostname
+        CollectedAt = (Get-Date).ToString('o')
+        UserContext = $env:USERNAME
+        Domain = $domain
+        OldDomainFqdn = if ($OldDomainFqdn) { $OldDomainFqdn } else { $null }
+        OldDomainNetBIOS = if ($OldDomainNetBIOS) { $OldDomainNetBIOS } else { $null }
+        NewDomainFqdn = if ($NewDomainFqdn) { $NewDomainFqdn } else { $null }
+        ProfileDays = if ($ProfileDays) { $ProfileDays } else { $null }
+        PlantId = if ($PlantId) { $PlantId } else { $null }
+        Version = $ScriptVersion
+      }
+      System = [pscustomobject]@{
+        Hostname = $hostname
+        Manufacturer = $null
+        Model = $null
+        OSVersion = $null
+        IPAddress = $null
+        MACAddress = $null
+        LoggedInUser = $null
+      }
+      Profiles = @()
+      SharedFolders = [pscustomobject]@{ Shares = @(); Errors = @() }
+      InstalledApps = @()
+      Services = @()
+      ScheduledTasks = @()
+      LocalGroupMembers = @()
+      LocalAdministrators = @()
+      LocalAccounts = [pscustomobject]@{ Users = @(); Groups = @() }
+      MappedDrives = @()
+      Printers = @()
+      OdbcDsn = @()
+      AutoAdminLogon = $null
+      CredentialManager = @()
+      Certificates = @()
+      Endpoints = @()
+      FirewallRules = @()
+      DnsConfiguration = $null
+      IIS = $null
+      SqlServer = $null
+      EventLogDomainReferences = @()
+      ApplicationConfigFiles = [pscustomobject]@{ FilesWithDomainReferences = @(); FilesWithCredentials = @() }
+      SecurityAgents = [pscustomobject]@{
+        CrowdStrike = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }
+        Qualys = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }
+      }
+      QuestConfig = @()
+      References = [pscustomobject]@{ OldDomain = @(); ScriptAutomation = @() }
+      AppSpecific = $null
+      DatabaseConnections = @()
+      ServerSummary = [pscustomobject]@{ FileServers = @(); PrintServers = @() }
+      Detection = [pscustomobject]@{
+        OldDomain = @{}
+        Summary = [pscustomobject]@{
+          HasOldDomainRefs = $false
+          Counts = [pscustomobject]@{
+            Services = 0; ServicesPath = 0; TaskPrincipals = 0; TaskActions = 0; Tasks = 0
+            DriveMaps = 0; LocalGroups = 0; Printers = 0; ODBC = 0; LocalAdmins = 0
+            CredentialManager = 0; Certificates = 0; CertificateEndpoints = 0; FirewallRules = 0
+            IISSites = 0; IISAppPools = 0; SqlServer = 0; EventLogs = 0; ApplicationConfigFiles = 0
+            HardCodedReferences = 0; ScriptAutomation = 0; DatabaseConnections = 0; AppSpecific = 0
+            FileServers = 0; PrintServers = 0
+          }
+        }
+      }
+      Error = [pscustomobject]@{
+        HasError = $true
+        ErrorMessage = $errorMessage
+        ErrorType = "JSON_OUTPUT_ERROR"
+        ErrorStackTrace = $null
+        InnerException = $null
+        Timestamp = (Get-Date).ToString('o')
+      }
+    }
+    
+    try {
+      if ($script:CompatibilityMode -eq 'Full') {
+        $errorJson = $errorResult | ConvertTo-Json -Depth 10
+        $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::WriteAllText($localPath, $errorJson, $utf8NoBom)
+      } else {
+        try {
+          $errorJson = $errorResult | ConvertTo-Json -Depth 10
+        } catch {
+          $errorJson = $errorResult | ConvertTo-Json
+        }
+        [System.IO.File]::WriteAllText($localPath, $errorJson, [System.Text.Encoding]::UTF8)
+      }
+      $script:log.Write("Wrote error JSON to: $localPath")
+    } catch {
+      $script:log.Write("Failed to write error JSON: $($_.Exception.Message)", 'ERROR')
+      throw
+    }
+    
+    throw
   }
 
   if ($EmitStdOut){
@@ -7098,7 +3832,6 @@ function Get-SharedFoldersWithACL {
       CountLocalAdm       = $summary.Counts.LocalAdmins
       CountCredentialMgr  = $summary.Counts.CredentialManager
       CountCertificates   = $summary.Counts.Certificates
-      CountEndpoints      = $summary.Counts.CertificateEndpoints
       CountFirewallRules  = $summary.Counts.FirewallRules
       CountIISSites       = $summary.Counts.IISSites
       CountIISAppPools    = $summary.Counts.IISAppPools
@@ -7135,7 +3868,212 @@ function Get-SharedFoldersWithACL {
   exit 0
 }
 catch {
-  $script:log.Write("Fatal error: $($_.Exception.Message)", 'ERROR')
+  $errorMessage = $_.Exception.Message
+  $errorStackTrace = if ($_.ScriptStackTrace) { $_.ScriptStackTrace } else { $null }
+  $errorInnerException = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $null }
+  
+  if ($script:log) {
+    $script:log.Write("Fatal error: $errorMessage", 'ERROR')
+    if ($errorStackTrace) {
+      $script:log.Write("Stack trace: $errorStackTrace", 'ERROR')
+    }
+    if ($errorInnerException) {
+      $script:log.Write("Inner exception: $errorInnerException", 'ERROR')
+    }
+  }
+  
+  # Generate valid JSON error structure for PowerBI reporting
+  try {
+    # Get basic system info for error JSON
+    $hostname = $env:COMPUTERNAME
+    $domain = $null
+    try {
+      if ($script:CompatibilityMode -eq 'Full') {
+        $systemInfo = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+      } else {
+        $systemInfo = Get-WmiObject -Class Win32_ComputerSystem -ErrorAction SilentlyContinue
+      }
+      if ($systemInfo) {
+        $domain = $systemInfo.Domain
+      }
+    } catch {
+      # Ignore errors getting system info
+    }
+    
+    # Build minimal valid JSON structure with error information
+    # PlantId is included in Metadata for PowerBI pivoting
+    $errorResult = [pscustomobject]@{
+      Schema = $null
+      Metadata = [pscustomobject]@{
+        GpoMachineDN = $null
+        ComputerName = $hostname
+        CollectedAt = (Get-Date).ToString('o')
+        UserContext = $env:USERNAME
+        Domain = $domain
+        OldDomainFqdn = if ($OldDomainFqdn) { $OldDomainFqdn } else { $null }
+        OldDomainNetBIOS = if ($OldDomainNetBIOS) { $OldDomainNetBIOS } else { $null }
+        NewDomainFqdn = if ($NewDomainFqdn) { $NewDomainFqdn } else { $null }
+        ProfileDays = if ($ProfileDays) { $ProfileDays } else { $null }
+        PlantId = if ($PlantId) { $PlantId } else { $null }
+        Version = $ScriptVersion
+      }
+      System = [pscustomobject]@{
+        Hostname = $hostname
+        Manufacturer = $null
+        Model = $null
+        OSVersion = $null
+        IPAddress = $null
+        MACAddress = $null
+        LoggedInUser = $null
+      }
+      Profiles = @()
+      SharedFolders = [pscustomobject]@{
+        Shares = @()
+        Errors = @()
+      }
+      InstalledApps = @()
+      Services = @()
+      ScheduledTasks = @()
+      LocalGroupMembers = @()
+      LocalAdministrators = @()
+      LocalAccounts = [pscustomobject]@{
+        Users = @()
+        Groups = @()
+      }
+      MappedDrives = @()
+      Printers = @()
+      OdbcDsn = @()
+      AutoAdminLogon = $null
+      CredentialManager = @()
+      Certificates = @()
+      Endpoints = @()
+      FirewallRules = @()
+      DnsConfiguration = $null
+      IIS = $null
+      SqlServer = $null
+      EventLogDomainReferences = @()
+      ApplicationConfigFiles = [pscustomobject]@{
+        FilesWithDomainReferences = @()
+        FilesWithCredentials = @()
+      }
+      SecurityAgents = [pscustomobject]@{
+        CrowdStrike = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }
+        Qualys = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }
+      }
+      QuestConfig = @()
+      References = [pscustomobject]@{
+        OldDomain = @()
+        ScriptAutomation = @()
+      }
+      AppSpecific = $null
+      DatabaseConnections = @()
+      ServerSummary = [pscustomobject]@{
+        FileServers = @()
+        PrintServers = @()
+      }
+      Detection = [pscustomobject]@{
+        OldDomain = @{}
+        Summary = [pscustomobject]@{
+          HasOldDomainRefs = $false
+          Counts = [pscustomobject]@{
+            Services = 0
+            ServicesPath = 0
+            TaskPrincipals = 0
+            TaskActions = 0
+            Tasks = 0
+            DriveMaps = 0
+            LocalGroups = 0
+            Printers = 0
+            ODBC = 0
+            LocalAdmins = 0
+            CredentialManager = 0
+            Certificates = 0
+            CertificateEndpoints = 0
+            FirewallRules = 0
+            IISSites = 0
+            IISAppPools = 0
+            SqlServer = 0
+            EventLogs = 0
+            ApplicationConfigFiles = 0
+            HardCodedReferences = 0
+            ScriptAutomation = 0
+            DatabaseConnections = 0
+            AppSpecific = 0
+            FileServers = 0
+            PrintServers = 0
+          }
+        }
+      }
+      Error = [pscustomobject]@{
+        HasError = $true
+        ErrorMessage = $errorMessage
+        ErrorType = $_.Exception.GetType().FullName
+        ErrorStackTrace = $errorStackTrace
+        InnerException = $errorInnerException
+        Timestamp = (Get-Date).ToString('o')
+      }
+    }
+    
+    # Write error JSON to file
+    Ensure-Directory $OutputRoot
+    $fname = ('{0}_{1}.json' -f $hostname, (Get-Date).ToString('MM-dd-yyyy'))
+    $localPath = Join-Path $OutputRoot $fname
+    
+    if ($script:CompatibilityMode -eq 'Full') {
+      $json = $errorResult | ConvertTo-Json -Depth 10
+      # Use UTF8NoBOM encoding for Power BI compatibility
+      $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+      [System.IO.File]::WriteAllText($localPath, $json, $utf8NoBom)
+    } else {
+      try {
+        $json = $errorResult | ConvertTo-Json -Depth 10
+      } catch {
+        $json = $errorResult | ConvertTo-Json
+      }
+      [System.IO.File]::WriteAllText($localPath, $json, [System.Text.Encoding]::UTF8)
+    }
+    
+    if ($script:log) {
+      $script:log.Write("Wrote error JSON to: $localPath")
+    }
+    
+    # Emit error summary to stdout if requested - PlantId is included for PowerBI pivoting
+    if ($EmitStdOut) {
+      [pscustomobject]@{
+        Computer = $hostname
+        PlantId = if ($PlantId) { $PlantId } else { $null }
+        HasError = $true
+        ErrorMessage = $errorMessage
+        CollectedAt = (Get-Date).ToString('o')
+        Version = $ScriptVersion
+      } | ConvertTo-Json -Compress | Write-Output
+    }
+    
+    # Try to copy to central share if configured
+    if ($script:centralShareValidated -and $script:centralShareValidated.IsValid -and $script:centralShareValidated.IsWritable -and $script:centralShareValidated.ValidatedPath) {
+      try {
+        $validatedPath = $script:centralShareValidated.ValidatedPath
+        $targetDir = Join-Path $validatedPath 'workstations'
+        Ensure-Directory $targetDir
+        $dest = Join-Path $targetDir $fname
+        Copy-Item -Path $localPath -Destination $dest -Force
+        if ($script:log) {
+          $script:log.Write("Copied error JSON to central share: $dest")
+        }
+      } catch {
+        if ($script:log) {
+          $script:log.Write("Central copy failed: $($_.Exception.Message)", 'WARN')
+        }
+      }
+    }
+  } catch {
+    # If we can't even write the error JSON, at least try to log it
+    if ($script:log) {
+      $script:log.Write("Failed to write error JSON: $($_.Exception.Message)", 'ERROR')
+    }
+    Write-Error "Fatal error occurred and could not write error JSON: $errorMessage"
+  }
+  
   exit 1
 }
 #endregion
