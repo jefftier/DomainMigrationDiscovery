@@ -112,13 +112,50 @@ def load_latest_records(input_folder, explicit_plant_id=None):
     return pure_records, plant_ids_seen
 
 
+def filter_search_criteria_fields(row_dict, section_name=None):
+    """
+    Remove search criteria and anecdotal fields, keeping only output data.
+    Search criteria fields indicate HOW something was found, not WHAT was found.
+    """
+    if not isinstance(row_dict, dict):
+        return row_dict
+    
+    # Fields to remove (search criteria/anecdotal, not output data)
+    fields_to_remove = [
+        # Detection/search criteria fields
+        "MatchedField",
+        "MatchedFields",
+        "DetectionMethod",
+        "EvidenceType",
+        "LocationType",  # When used for detection method, not actual location
+        # Encase search criteria
+        "ServiceName",  # Only for Encase - it's the search criteria, not output
+    ]
+    
+    # Create filtered copy
+    filtered = {}
+    for k, v in row_dict.items():
+        # Remove search criteria fields
+        if k in fields_to_remove:
+            continue
+        # For Encase specifically, also check prefixed field names
+        if section_name == "SecurityAgents" and k.startswith("Encase_") and k.endswith("_ServiceName"):
+            continue
+        filtered[k] = v
+    
+    return filtered
+
+
 def add_row(sheet_rows, sheet_name, row_dict):
     """
     Append a row (dict) to the given sheet name in the rows dict.
+    Filters out search criteria fields before adding.
     """
     if row_dict is None:
         return
-    sheet_rows[sheet_name].append(row_dict)
+    # Filter out search criteria fields
+    filtered_row = filter_search_criteria_fields(row_dict, sheet_name)
+    sheet_rows[sheet_name].append(filtered_row)
 
 
 def parse_account_identity(account_identity):
@@ -282,20 +319,48 @@ def flatten_record(computer_name, record, sheet_rows):
     row_det["HasOldDomainRefs"] = summary.get("HasOldDomainRefs")
     row_det["PotentialServiceAccounts"] = potential_service_account_count
     
-    # Add security agent status flags for quick issue identification
+    # Add security agent status information (output data only, no issue flags)
     row_det["CrowdStrike_Tenant"] = crowdstrike.get("Tenant")
-    row_det["CrowdStrike_Issue"] = "Unknown Tenant" if not crowdstrike.get("Tenant") or crowdstrike.get("Tenant") == "UNKNOWN" else None
-    
     row_det["Qualys_Tenant"] = qualys.get("Tenant")
-    row_det["Qualys_Issue"] = "Unknown Tenant" if not qualys.get("Tenant") or qualys.get("Tenant") == "UNKNOWN" else None
-    
     row_det["SCCM_Tenant"] = sccm.get("Tenant")
     row_det["SCCM_HasDomainReference"] = sccm.get("HasDomainReference", False)
-    row_det["SCCM_Issue"] = "Domain Reference Found" if sccm.get("HasDomainReference") else None
+    
+    # Parse SCCM AllowedMPs if available in DomainReferences
+    sccm_allowed_mps = None
+    sccm_allowed_mp_domains = []
+    if sccm.get("DomainReferences"):
+        import re
+        for ref in sccm.get("DomainReferences", []):
+            if isinstance(ref, dict) and ref.get("ValueName") == "AllowedMPs":
+                sccm_allowed_mps = ref.get("Value")
+                # Parse AllowedMPs value to extract domain FQDNs
+                if sccm_allowed_mps and isinstance(sccm_allowed_mps, str):
+                    # AllowedMPs is typically a semicolon-separated list of MP URLs
+                    # Format: https://mp1.domain.com/CCM_Proxy_MutualAuth/72057594037927939
+                    # Extract domain FQDNs from URLs
+                    domain_pattern = r'https?://([^/:\s]+)'
+                    matches = re.findall(domain_pattern, sccm_allowed_mps)
+                    for match in matches:
+                        # Remove port if present and clean up
+                        domain = match.split(':')[0].strip()
+                        if domain and domain not in [d.split(' (')[0] for d in sccm_allowed_mp_domains]:
+                            # Check if it matches old or new domain
+                            domain_lower = domain.lower()
+                            domain_display = domain
+                            if old_domain_fqdn and domain_lower == old_domain_fqdn.lower():
+                                domain_display = f"{domain} (OldDomain)"
+                            elif new_domain_fqdn and domain_lower == new_domain_fqdn.lower():
+                                domain_display = f"{domain} (NewDomain)"
+                            sccm_allowed_mp_domains.append(domain_display)
+                break
+    
+    if sccm_allowed_mps:
+        row_det["SCCM_AllowedMPs"] = sccm_allowed_mps
+    if sccm_allowed_mp_domains:
+        row_det["SCCM_AllowedMPDomains"] = "; ".join(sccm_allowed_mp_domains)
     
     row_det["Encase_Installed"] = encase.get("Installed", False)
     row_det["Encase_Tenant"] = encase.get("Tenant")
-    row_det["Encase_Issue"] = "Installed but No Tenant" if encase.get("Installed") and not encase.get("Tenant") else None
 
     for k, v in counts.items():
         # Prefix with Count_ to make it obvious in Excel
@@ -537,17 +602,24 @@ def flatten_record(computer_name, record, sheet_rows):
             row["RawJson"] = json.dumps(app_cfg, ensure_ascii=False)
         add_row(sheet_rows, "ApplicationConfigFiles", row)
 
-    # --- SecurityAgents (CrowdStrike, Qualys, etc.) ---
+    # --- SecurityAgents (CrowdStrike, Qualys, SCCM, Encase) ---
+    # Only include output data, not search criteria or anecdotal information
     sec = record.get("SecurityAgents") or {}
     if sec:
         row = base.copy()
         for agent_name, agent_obj in sec.items():
             if isinstance(agent_obj, dict):
                 for k, v in agent_obj.items():
+                    # Filter out search criteria and anecdotal fields
+                    # Encase: ServiceName is search criteria, not output data
+                    if agent_name == "Encase" and k == "ServiceName":
+                        continue
+                    # Only include actual output/configuration data
                     col = f"{agent_name}_{k}"
                     row[col] = v
             else:
                 row[agent_name] = agent_obj
+        # Filter will be applied in add_row function
         add_row(sheet_rows, "SecurityAgents", row)
 
     # --- Service Account Candidates ---
@@ -608,13 +680,32 @@ def flatten_record(computer_name, record, sheet_rows):
         if not account_value and not account_identity:
             return
         
-        # Skip built-in accounts
-        if account_value and is_builtin_account(account_value):
-            return
-        
+        # Extract account info first to get the normalized account information
         account_info, parsed_account = extract_account_info(
             account_value, account_identity, old_domain_fqdn or "", old_domain_netbios or ""
         )
+        
+        # Determine the account name to check (prioritize AccountIdentity if available)
+        if account_info.get("AccountName"):
+            account_name_to_check = account_info.get("AccountName", "")
+        else:
+            account_name_to_check = parsed_account or ""
+        
+        # Skip built-in accounts, but prioritize AccountIdentity if it indicates a domain account
+        # This handles cases where the raw account_value might look like a built-in but
+        # AccountIdentity has the correct domain account information
+        if account_name_to_check and is_builtin_account(account_name_to_check):
+            # If AccountIdentity says it's a domain account, include it (AccountIdentity is more reliable)
+            if account_identity and isinstance(account_identity, dict):
+                if account_identity.get("IsDomainAccount", False):
+                    # AccountIdentity indicates domain account, so include it
+                    pass
+                else:
+                    # Confirmed built-in account, skip it
+                    return
+            else:
+                # No AccountIdentity to verify, and it looks like a built-in, skip it
+                return
         
         if not parsed_account and not account_info.get("AccountName"):
             return
@@ -646,9 +737,12 @@ def flatten_record(computer_name, record, sheet_rows):
         if not isinstance(svc, dict):
             continue
         service_name = svc.get("Name") or svc.get("ServiceName")
+        # Check multiple possible field names for service account
         start_name = svc.get("StartName") or svc.get("StartNameRaw") or svc.get("Account") or ""
         account_identity = svc.get("AccountIdentity")
         
+        # Include if we have either account value or AccountIdentity
+        # AccountIdentity is more reliable as it's normalized by the PowerShell script
         if start_name or account_identity:
             needs_attention = (
                 service_name in services_run_as_old_domain
@@ -676,9 +770,12 @@ def flatten_record(computer_name, record, sheet_rows):
         if not isinstance(task, dict):
             continue
         task_path = task.get("Path") or task.get("TaskName")
-        user_id = task.get("UserId") or task.get("Principal")
+        # Check multiple possible field names for task account
+        user_id = task.get("UserId") or task.get("Principal") or task.get("RunAs") or ""
         account_identity = task.get("AccountIdentity")
         
+        # Include if we have either account value or AccountIdentity
+        # AccountIdentity is more reliable as it's normalized by the PowerShell script
         if user_id or account_identity:
             needs_attention = task_path in tasks_old_accounts
             add_service_account_row(
@@ -933,10 +1030,10 @@ def write_excel(sheet_rows, output_path):
             # For Summary sheet, put key metrics first
             if sheet_name == "Summary":
                 summary_cols = ["HasOldDomainRefs", "PotentialServiceAccounts", 
-                               "CrowdStrike_Tenant", "CrowdStrike_Issue",
-                               "Qualys_Tenant", "Qualys_Issue",
-                               "SCCM_Tenant", "SCCM_HasDomainReference", "SCCM_Issue",
-                               "Encase_Installed", "Encase_Tenant", "Encase_Issue"]
+                               "CrowdStrike_Tenant",
+                               "Qualys_Tenant",
+                               "SCCM_Tenant", "SCCM_HasDomainReference", "SCCM_AllowedMPs", "SCCM_AllowedMPDomains",
+                               "Encase_Installed", "Encase_Tenant"]
                 core_cols = core_cols + [c for c in summary_cols if c in df.columns]
             # For Metadata sheet, include domain info
             elif sheet_name == "Metadata":

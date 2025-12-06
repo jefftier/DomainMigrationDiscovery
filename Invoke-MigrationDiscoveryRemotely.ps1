@@ -227,12 +227,22 @@ $InvokeDiscoveryOnServerScriptBlock = {
         [string]$RemoteOutputRoot,
         [scriptblock]$WriteErrorLogFunction,
         [string]$ConfigFile,
-        [string]$RemoteConfigPath
+        [string]$RemoteConfigPath,
+        [string]$CompatibilityMode
     )
 
     Write-Host "[$ComputerName] Testing WinRM connectivity and authentication..." -ForegroundColor Yellow
     $connectionSuccessful = $false
     $actualComputerName = $null
+    
+    # Determine compatibility mode locally (don't rely on script-level variables)
+    if (-not $CompatibilityMode) {
+        if ($PSVersionTable.PSVersion.Major -ge 5) {
+            $CompatibilityMode = 'Full'
+        } else {
+            $CompatibilityMode = 'Legacy3to4'
+        }
+    }
     
     # First attempt to connect
     try {
@@ -246,6 +256,12 @@ $InvokeDiscoveryOnServerScriptBlock = {
         if ($Credential) {
             $testParams['Credential'] = $Credential
         }
+        
+        # Add connection timeout to prevent hangs (PowerShell 5.1+)
+        if ($PSVersionTable.PSVersion.Major -ge 5) {
+            $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout (New-TimeSpan -Seconds 30)
+        }
+        
         $testResult = Invoke-Command @testParams
         Write-Host "[$ComputerName] Successfully connected (remote computer: $testResult)" -ForegroundColor Green
         
@@ -256,50 +272,72 @@ $InvokeDiscoveryOnServerScriptBlock = {
     }
     catch {
         $initialError = $_.Exception.Message
+        $errorCategory = $_.CategoryInfo.Category
+        $fullError = $_.Exception.ToString()
+        
         Write-Warning "[$ComputerName] Initial WinRM connection failed: $initialError"
+        Write-Warning "[$ComputerName] Error Category: $errorCategory"
+        
+        # Provide more specific error information
+        if ($_.Exception.InnerException) {
+            Write-Warning "[$ComputerName] Inner Exception: $($_.Exception.InnerException.Message)"
+        }
+        
+        # Check for common error patterns
+        if ($initialError -match "Access is denied" -or $initialError -match "authentication") {
+            Write-Warning "[$ComputerName] Authentication issue - verify credentials have admin rights on target"
+        }
+        elseif ($initialError -match "cannot connect" -or $initialError -match "network") {
+            Write-Warning "[$ComputerName] Network/connectivity issue - verify WinRM is enabled and firewall allows connections"
+        }
+        elseif ($initialError -match "timeout") {
+            Write-Warning "[$ComputerName] Connection timeout - verify WinRM service is running and network is accessible"
+        }
         
         # Attempt to start WinRM service remotely and retry
         Write-Host "[$ComputerName] Attempting to start WinRM service and retry connection..." -ForegroundColor Yellow
         
-        # Determine compatibility mode if not already set
-        if (-not $script:CompatibilityMode) {
-            if ($PSVersionTable.PSVersion.Major -ge 5) {
-                $script:CompatibilityMode = 'Full'
-            } else {
-                $script:CompatibilityMode = 'Legacy3to4'
-            }
-        }
-        
         # Try to start WinRM service remotely
+        # Note: This will likely fail if WinRM isn't working, but we try anyway
         $serviceStarted = $false
         $cimSession = $null
         try {
-            if ($script:CompatibilityMode -eq 'Full') {
+            if ($CompatibilityMode -eq 'Full') {
                 # PowerShell 5.1+ - Use CIM
-                # CIM requires a session for credentials, not a direct Credential parameter
-                if ($Credential) {
-                    # Create a CIM session with credentials
-                    $sessionParams = @{
-                        ComputerName = $ComputerName
-                        Credential   = $Credential
-                        ErrorAction = 'Stop'
+                # Note: CIM also requires WinRM, so this will likely fail if WinRM isn't working
+                # But we try it anyway in case the service just needs to be started
+                try {
+                    if ($Credential) {
+                        # Create a CIM session with credentials
+                        $sessionParams = @{
+                            ComputerName = $ComputerName
+                            Credential   = $Credential
+                            ErrorAction = 'Stop'
+                            SessionOption = New-CimSessionOption -Protocol Wsman
+                        }
+                        $cimSession = New-CimSession @sessionParams
                     }
-                    $cimSession = New-CimSession @sessionParams
+                    
+                    # Get the service using session or direct connection
+                    $cimParams = @{
+                        ClassName    = 'Win32_Service'
+                        Filter       = "Name='WinRM'"
+                        ErrorAction  = 'Stop'
+                    }
+                    if ($cimSession) {
+                        $cimParams['CimSession'] = $cimSession
+                    } else {
+                        $cimParams['ComputerName'] = $ComputerName
+                    }
+                    
+                    $service = Get-CimInstance @cimParams
+                }
+                catch {
+                    Write-Warning "[$ComputerName] CIM connection failed (WinRM likely not available): $($_.Exception.Message)"
+                    # CIM failed, which means WinRM isn't working - skip service start attempt
+                    $service = $null
                 }
                 
-                # Get the service using session or direct connection
-                $cimParams = @{
-                    ClassName    = 'Win32_Service'
-                    Filter       = "Name='WinRM'"
-                    ErrorAction  = 'Stop'
-                }
-                if ($cimSession) {
-                    $cimParams['CimSession'] = $cimSession
-                } else {
-                    $cimParams['ComputerName'] = $ComputerName
-                }
-                
-                $service = Get-CimInstance @cimParams
                 if ($service) {
                     if ($service.State -eq 'Running') {
                         Write-Host "[$ComputerName] WinRM service is already running, retrying connection..." -ForegroundColor Yellow
@@ -387,6 +425,12 @@ $InvokeDiscoveryOnServerScriptBlock = {
                 if ($Credential) {
                     $testParams['Credential'] = $Credential
                 }
+                
+                # Add connection timeout to prevent hangs (PowerShell 5.1+)
+                if ($PSVersionTable.PSVersion.Major -ge 5) {
+                    $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout (New-TimeSpan -Seconds 30)
+                }
+                
                 $testResult = Invoke-Command @testParams
                 Write-Host "[$ComputerName] Successfully connected after starting WinRM service (remote computer: $testResult)" -ForegroundColor Green
                 $actualComputerName = $testResult
@@ -401,9 +445,15 @@ $InvokeDiscoveryOnServerScriptBlock = {
             }
         }
         else {
-            # Service couldn't be started, log error and return
-            $errorMsg = "WinRM connection failed and could not start WinRM service remotely: $initialError"
+            # Service couldn't be started, log detailed error and return
+            $errorMsg = "WinRM connection failed. Initial error: $initialError"
             Write-Warning "[$ComputerName] $errorMsg"
+            Write-Warning "[$ComputerName] Troubleshooting tips:"
+            Write-Warning "[$ComputerName]   1. Verify WinRM is enabled: Enable-PSRemoting -Force"
+            Write-Warning "[$ComputerName]   2. Check WinRM service status: Get-Service WinRM"
+            Write-Warning "[$ComputerName]   3. Test connectivity: Test-WSMan -ComputerName $ComputerName"
+            Write-Warning "[$ComputerName]   4. Verify firewall rules allow WinRM"
+            Write-Warning "[$ComputerName]   5. Check credentials have admin rights on target"
             & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
             return
         }
@@ -497,6 +547,11 @@ $InvokeDiscoveryOnServerScriptBlock = {
         # Add credentials only if provided
         if ($Credential) {
             $invokeParams['Credential'] = $Credential
+        }
+        
+        # Add connection timeout to prevent hangs (PowerShell 5.1+)
+        if ($PSVersionTable.PSVersion.Major -ge 5) {
+            $invokeParams['SessionOption'] = New-PSSessionOption -OperationTimeout (New-TimeSpan -Seconds 300)
         }
         
         # Invoke your existing script remotely using ScriptBlock for proper parameter handling
@@ -722,7 +777,8 @@ if ($script:CompatibilityMode -eq 'Full' -and $UseParallel) {
                 -RemoteOutputRoot $using:RemoteOutputRoot `
                 -WriteErrorLogFunction $using:writeErrorLogScriptBlock `
                 -ConfigFile $using:ConfigFile `
-                -RemoteConfigPath $using:remoteConfigPath
+                -RemoteConfigPath $using:remoteConfigPath `
+                -CompatibilityMode $using:script:CompatibilityMode
         } -ThrottleLimit 10
     }
     else {
@@ -739,7 +795,8 @@ if ($script:CompatibilityMode -eq 'Full' -and $UseParallel) {
                     -RemoteOutputRoot $RemoteOutputRoot `
                     -WriteErrorLogFunction $writeErrorLogScriptBlock `
                     -ConfigFile $ConfigFile `
-                    -RemoteConfigPath $remoteConfigPath
+                    -RemoteConfigPath $remoteConfigPath `
+                    -CompatibilityMode $script:CompatibilityMode
             }
             catch {
                 # Log any unexpected errors that escape the function
