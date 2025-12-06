@@ -229,14 +229,16 @@ param(
 # ============================================================================
 # PowerShell version compatibility check
 if (-not $PSVersionTable -or -not $PSVersionTable.PSVersion) {
-    Write-Error "Unable to determine PowerShell version. This script requires at least PowerShell 5.1."
+    $techError = "Unable to determine PowerShell version. This script requires at least PowerShell 5.1."
+    Write-Error (Get-HumanReadableError -ErrorMessage $techError -Context "checking PowerShell version")
     exit 1
 }
 
 $script:PSMajorVersion = $PSVersionTable.PSVersion.Major
 
 if ($script:PSMajorVersion -lt 5) {
-    Write-Error "This script requires PowerShell 5.1 or higher. Current version: $($PSVersionTable.PSVersion)"
+    $techError = "This script requires PowerShell 5.1 or higher. Current version: $($PSVersionTable.PSVersion)"
+    Write-Error (Get-HumanReadableError -ErrorMessage $techError -Context "checking PowerShell version")
     exit 1
 }
 
@@ -289,7 +291,8 @@ function Import-ConfigurationFile {
     )
     
     if (-not (Test-Path -LiteralPath $ConfigFilePath)) {
-        Write-Warning "Configuration file not found: $ConfigFilePath"
+        $techError = "Configuration file not found: $ConfigFilePath"
+        Write-Warning (Get-HumanReadableError -ErrorMessage $techError -Context "loading configuration")
         return @{
             OldDomainFqdn = $OldDomainFqdn
             NewDomainFqdn = $NewDomainFqdn
@@ -358,7 +361,8 @@ function Import-ConfigurationFile {
         return $result
     }
     catch {
-        Write-Warning "Failed to load configuration file '$ConfigFilePath': $($_.Exception.Message)"
+        $techError = "Failed to load configuration file '$ConfigFilePath': $($_.Exception.Message)"
+        Write-Warning (Get-HumanReadableError -ErrorMessage $techError -Context "loading configuration file")
         return @{
             OldDomainFqdn = $OldDomainFqdn
             NewDomainFqdn = $NewDomainFqdn
@@ -580,6 +584,115 @@ function New-Logger {
   }
   return $logger
 }
+
+<#
+.SYNOPSIS
+    Converts technical error messages to human-readable format for console output.
+
+.DESCRIPTION
+    Takes a technical error message or exception and converts it to a simple,
+    layman-friendly message that explains what went wrong in plain language.
+    The full technical error should still be logged separately.
+
+.PARAMETER ErrorMessage
+    The technical error message or exception object to convert.
+
+.PARAMETER Context
+    Optional context about what operation was being performed when the error occurred.
+
+.OUTPUTS
+    A human-readable error message string.
+#>
+function Get-HumanReadableError {
+  param(
+    [Parameter(Mandatory=$false)]
+    [object]$ErrorMessage,
+    [Parameter(Mandatory=$false)]
+    [string]$Context = ""
+  )
+  
+  $msg = if ($ErrorMessage -is [System.Exception]) {
+    $ErrorMessage.Message
+  } else {
+    [string]$ErrorMessage
+  }
+  
+  if ([string]::IsNullOrWhiteSpace($msg)) {
+    return "An unexpected error occurred."
+  }
+  
+  $msgLower = $msg.ToLower()
+  
+  # Common error pattern matching for human-readable conversion
+  if ($msgLower -match "access is denied|unauthorizedaccessexception|permission denied") {
+    return "Access denied. The script doesn't have permission to perform this operation. You may need to run as Administrator."
+  }
+  elseif ($msgLower -match "cannot find path|path not found|does not exist|file not found") {
+    return "A required file or folder could not be found. The path may be incorrect or the item may have been moved or deleted."
+  }
+  elseif ($msgLower -match "cannot connect|connection refused|network path not found|remote procedure call failed") {
+    return "Unable to connect to the remote system. The computer may be offline, unreachable on the network, or the service may not be running."
+  }
+  elseif ($msgLower -match "timeout|timed out|operation timed out") {
+    return "The operation took too long and timed out. The system may be slow or unresponsive."
+  }
+  elseif ($msgLower -match "insufficient memory|out of memory") {
+    return "Not enough memory available to complete the operation. Try closing other applications."
+  }
+  elseif ($msgLower -match "disk space|no space left|disk full") {
+    return "Not enough disk space to complete the operation. Free up some space and try again."
+  }
+  elseif ($msgLower -match "registry|registry key") {
+    return "Unable to access registry information. This may require Administrator privileges."
+  }
+  elseif ($msgLower -match "service.*not found|cannot find service") {
+    return "A required Windows service was not found or is not running."
+  }
+  elseif ($msgLower -match "invalid operation|invalid parameter|invalid argument") {
+    return "An invalid operation was attempted. This may be due to incorrect configuration or system state."
+  }
+  elseif ($msgLower -match "json|convertto-json|serialization") {
+    return "Failed to process data format. The data may be corrupted or in an unexpected format."
+  }
+  elseif ($msgLower -match "powershell version|requires.*powershell") {
+    return "This script requires a newer version of PowerShell. Please upgrade to PowerShell 5.1 or higher."
+  }
+  elseif ($msgLower -match "configuration file|config file") {
+    return "There was a problem reading the configuration file. Check that the file exists and is formatted correctly."
+  }
+  elseif ($msgLower -match "cannot bind|parameter.*cannot be found") {
+    return "A required setting or parameter is missing. Check your configuration."
+  }
+  elseif ($msgLower -match "sql|database|connection string") {
+    return "Unable to connect to the database. The database server may be unavailable or the connection settings may be incorrect."
+  }
+  elseif ($msgLower -match "iis|web server|application pool") {
+    return "Unable to access web server configuration. IIS may not be installed or the service may not be running."
+  }
+  elseif ($msgLower -match "certificate|ssl|tls") {
+    return "There was a problem with a security certificate. The certificate may be expired or invalid."
+  }
+  elseif ($msgLower -match "firewall|windows firewall") {
+    return "Unable to access firewall settings. This may require Administrator privileges."
+  }
+  elseif ($msgLower -match "event log|eventlog") {
+    return "Unable to read Windows event logs. This may require Administrator privileges."
+  }
+  elseif ($msgLower -match "share|network share|unc path") {
+    return "Unable to access the network share. The share may not be available or you may not have permission."
+  }
+  elseif ($msgLower -match "wmi|cim|win32_") {
+    return "Unable to query system information. WMI service may not be running or may require Administrator privileges."
+  }
+  else {
+    # Generic fallback - try to extract the most relevant part
+    if ($Context) {
+      return "An error occurred while $Context. Check the error log for details."
+    } else {
+      return "An unexpected error occurred. Check the error log for technical details."
+    }
+  }
+}
 #endregion
 
 #region ============================================================================
@@ -608,8 +721,12 @@ function New-Logger {
 function Safe-Try([scriptblock]$sb, [string]$topic){
   try { & $sb }
   catch {
-    $msg = "$topic failed: $($_.Exception.Message)"
-    if ($script:log) { $script:log.Write($msg,'WARN') } else { Write-Warning $msg }
+    $techMsg = "$topic failed: $($_.Exception.Message)"
+    # Log full technical details to log file
+    if ($script:log) { $script:log.Write($techMsg,'WARN') }
+    # Show human-readable message on console
+    $humanMsg = Get-HumanReadableError -ErrorMessage $_.Exception -Context $topic
+    Write-Warning $humanMsg
     $null
   }
 }
@@ -4273,6 +4390,7 @@ catch {
   $errorStackTrace = if ($_.ScriptStackTrace) { $_.ScriptStackTrace } else { $null }
   $errorInnerException = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $null }
   
+  # Log full technical details to log file
   if ($script:log) {
     $script:log.Write("Fatal error: $errorMessage", 'ERROR')
     if ($errorStackTrace) {
@@ -4282,6 +4400,10 @@ catch {
       $script:log.Write("Inner exception: $errorInnerException", 'ERROR')
     }
   }
+  
+  # Show human-readable error on console
+  $humanError = Get-HumanReadableError -ErrorMessage $_.Exception -Context "running discovery"
+  Write-Error $humanError
   
   # Generate valid JSON error structure for PowerBI reporting
   try {
@@ -4500,7 +4622,8 @@ catch {
     if ($script:log) {
       $script:log.Write("Failed to write error JSON: $($_.Exception.Message)", 'ERROR')
     }
-    Write-Error "Fatal error occurred and could not write error JSON: $errorMessage"
+    $techError = "Fatal error occurred and could not write error JSON: $errorMessage"
+    Write-Error (Get-HumanReadableError -ErrorMessage $techError -Context "writing error information")
   }
   
   exit 1
