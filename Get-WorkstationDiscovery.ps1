@@ -611,86 +611,138 @@ function Get-HumanReadableError {
     [string]$Context = ""
   )
   
-  $msg = if ($ErrorMessage -is [System.Exception]) {
-    $ErrorMessage.Message
-  } else {
-    [string]$ErrorMessage
-  }
+  try {
+    $msg = if ($ErrorMessage -is [System.Exception]) {
+      if ($null -ne $ErrorMessage -and $null -ne $ErrorMessage.Message) {
+        $ErrorMessage.Message
+      } else {
+        "Unknown exception"
+      }
+    } else {
+      [string]$ErrorMessage
+    }
+    
+    if ([string]::IsNullOrWhiteSpace($msg)) {
+      return "Unexpected error"
+    }
+    
+    $msgLower = $msg.ToLower()
   
-  if ([string]::IsNullOrWhiteSpace($msg)) {
-    return "An unexpected error occurred."
-  }
-  
-  $msgLower = $msg.ToLower()
-  
-  # Common error pattern matching for human-readable conversion
-  if ($msgLower -match "access is denied|unauthorizedaccessexception|permission denied") {
-    return "Access denied. The script doesn't have permission to perform this operation. You may need to run as Administrator."
-  }
-  elseif ($msgLower -match "cannot find path|path not found|does not exist|file not found") {
-    return "A required file or folder could not be found. The path may be incorrect or the item may have been moved or deleted."
-  }
-  elseif ($msgLower -match "cannot connect|connection refused|network path not found|remote procedure call failed") {
-    return "Unable to connect to the remote system. The computer may be offline, unreachable on the network, or the service may not be running."
-  }
-  elseif ($msgLower -match "timeout|timed out|operation timed out") {
-    return "The operation took too long and timed out. The system may be slow or unresponsive."
-  }
-  elseif ($msgLower -match "insufficient memory|out of memory") {
-    return "Not enough memory available to complete the operation. Try closing other applications."
-  }
-  elseif ($msgLower -match "disk space|no space left|disk full") {
-    return "Not enough disk space to complete the operation. Free up some space and try again."
-  }
-  elseif ($msgLower -match "registry|registry key") {
-    return "Unable to access registry information. This may require Administrator privileges."
-  }
-  elseif ($msgLower -match "service.*not found|cannot find service") {
-    return "A required Windows service was not found or is not running."
-  }
-  elseif ($msgLower -match "invalid operation|invalid parameter|invalid argument") {
-    return "An invalid operation was attempted. This may be due to incorrect configuration or system state."
-  }
-  elseif ($msgLower -match "json|convertto-json|serialization") {
-    return "Failed to process data format. The data may be corrupted or in an unexpected format."
-  }
-  elseif ($msgLower -match "powershell version|requires.*powershell") {
-    return "This script requires a newer version of PowerShell. Please upgrade to PowerShell 5.1 or higher."
+  # Common error pattern matching for human-readable conversion - SHORT messages
+  if ($msgLower -match "powershell version|requires.*powershell") {
+    return "PowerShell 5.1+ required"
   }
   elseif ($msgLower -match "configuration file|config file") {
-    return "There was a problem reading the configuration file. Check that the file exists and is formatted correctly."
+    return "Config file error - check file exists and format"
+  }
+  elseif ($msgLower -match "json|convertto-json|serialization") {
+    return "Data format error - check output file"
   }
   elseif ($msgLower -match "cannot bind|parameter.*cannot be found") {
-    return "A required setting or parameter is missing. Check your configuration."
+    return "Missing required parameter - check configuration"
   }
-  elseif ($msgLower -match "sql|database|connection string") {
-    return "Unable to connect to the database. The database server may be unavailable or the connection settings may be incorrect."
+  elseif ($msgLower -match "disk space|no space left|disk full") {
+    return "Insufficient disk space"
   }
-  elseif ($msgLower -match "iis|web server|application pool") {
-    return "Unable to access web server configuration. IIS may not be installed or the service may not be running."
+  elseif ($msgLower -match "insufficient memory|out of memory") {
+    return "Insufficient memory"
   }
-  elseif ($msgLower -match "certificate|ssl|tls") {
-    return "There was a problem with a security certificate. The certificate may be expired or invalid."
+  elseif ($msgLower -match "timeout|timed out|operation timed out") {
+    return "Operation timed out"
   }
-  elseif ($msgLower -match "firewall|windows firewall") {
-    return "Unable to access firewall settings. This may require Administrator privileges."
+  elseif ($msgLower -match "cannot connect|connection refused|network path not found|remote procedure call failed") {
+    return "Connection failed"
   }
-  elseif ($msgLower -match "event log|eventlog") {
-    return "Unable to read Windows event logs. This may require Administrator privileges."
-  }
-  elseif ($msgLower -match "share|network share|unc path") {
-    return "Unable to access the network share. The share may not be available or you may not have permission."
-  }
-  elseif ($msgLower -match "wmi|cim|win32_") {
-    return "Unable to query system information. WMI service may not be running or may require Administrator privileges."
+  elseif ($msgLower -match "cannot find path|path not found|does not exist|file not found") {
+    return "Path not found"
   }
   else {
-    # Generic fallback - try to extract the most relevant part
+    # Generic fallback - very short
     if ($Context) {
-      return "An error occurred while $Context. Check the error log for details."
+      return "Error: $Context"
     } else {
-      return "An unexpected error occurred. Check the error log for technical details."
+      return "Unexpected error"
     }
+  }
+  } catch {
+    # If Get-HumanReadableError itself fails, return a safe fallback message
+    return "Error occurred"
+  }
+}
+
+<#
+.SYNOPSIS
+    Determines if an error is actionable (user can fix) vs expected (routine permission/access issues).
+
+.DESCRIPTION
+    Returns true if the error is something the user can act on (config issues, fatal errors),
+    false if it's an expected routine error (permission denied on individual files, etc.).
+
+.PARAMETER ErrorMessage
+    The error message or exception to check.
+
+.PARAMETER Context
+    The context/operation that failed.
+
+.OUTPUTS
+    Boolean - true if error is actionable, false if expected/routine.
+#>
+function Test-IsActionableError {
+  param(
+    [Parameter(Mandatory=$false)]
+    [object]$ErrorMessage,
+    [Parameter(Mandatory=$false)]
+    [string]$Context = ""
+  )
+  
+  try {
+    $msg = if ($ErrorMessage -is [System.Exception]) {
+      if ($null -ne $ErrorMessage -and $null -ne $ErrorMessage.Message) {
+        $ErrorMessage.Message
+      } else {
+        ""
+      }
+    } else {
+      [string]$ErrorMessage
+    }
+    
+    if ([string]::IsNullOrWhiteSpace($msg)) {
+      return $false
+    }
+    
+    $msgLower = $msg.ToLower()
+    $contextLower = $Context.ToLower()
+    
+    # Actionable errors - user can fix these
+    if ($msgLower -match "powershell version|requires.*powershell") { return $true }
+    if ($msgLower -match "configuration file|config file") { return $true }
+    if ($msgLower -match "json|convertto-json|serialization") { return $true }
+    if ($msgLower -match "cannot bind|parameter.*cannot be found") { return $true }
+    if ($msgLower -match "disk space|no space left|disk full") { return $true }
+    if ($msgLower -match "insufficient memory|out of memory") { return $true }
+    
+    # Expected/non-actionable errors - these are routine and expected
+    # Permission denied on individual files/directories is expected
+    if ($msgLower -match "access is denied|unauthorizedaccessexception|permission denied") {
+      # But if it's a critical operation, it's actionable
+      if ($contextLower -match "config|json|output|write") { return $true }
+      return $false  # Expected for individual file/registry access
+    }
+    
+    # Event log, registry, file access errors are usually expected
+    if ($msgLower -match "event log|eventlog|registry|registry key") { return $false }
+    if ($contextLower -match "credentialmanager|eventlog|applicationconfig|scanning|reading") { return $false }
+    
+    # File not found for individual items is expected
+    if ($msgLower -match "cannot find path|path not found|does not exist|file not found") {
+      if ($contextLower -match "config|output") { return $true }
+      return $false  # Expected for scanning operations
+    }
+    
+    # Default: show critical errors, hide routine ones
+    return $false
+  } catch {
+    return $false
   }
 }
 #endregion
@@ -722,11 +774,21 @@ function Safe-Try([scriptblock]$sb, [string]$topic){
   try { & $sb }
   catch {
     $techMsg = "$topic failed: $($_.Exception.Message)"
-    # Log full technical details to log file
+    # Always log full technical details to log file
     if ($script:log) { $script:log.Write($techMsg,'WARN') }
-    # Show human-readable message on console
-    $humanMsg = Get-HumanReadableError -ErrorMessage $_.Exception -Context $topic
-    Write-Warning $humanMsg
+    
+    # Only show actionable errors on console (not routine permission/access issues)
+    $isActionable = Test-IsActionableError -ErrorMessage $_.Exception -Context $topic
+    if ($isActionable) {
+      try {
+        $humanMsg = Get-HumanReadableError -ErrorMessage $_.Exception -Context $topic
+        Write-Warning $humanMsg
+      } catch {
+        # If Get-HumanReadableError fails, use a simple fallback
+        Write-Warning "Error: $topic"
+      }
+    }
+    # For non-actionable errors, silently continue (they're logged to file)
     $null
   }
 }
@@ -3343,21 +3405,30 @@ WHERE srv.is_linked = 1
         if (Test-Path $basePath) {
           try {
             # Look for common config files in first-level subdirectories (one level deep)
-            Get-ChildItem -Path $basePath -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-              $appDir = $_.FullName
+            $directories = $null
+            try {
+              $directories = Get-ChildItem -Path $basePath -Directory -ErrorAction Stop
+            } catch {
+              if ($Log) { $Log.Write("Error accessing directories in $basePath : $($_.Exception.Message)", 'WARN') }
+              continue
+            }
+            
+            foreach ($dir in $directories) {
+              $appDir = $dir.FullName
               foreach ($pattern in $configFilePatterns) {
                 try {
-                  $files = Get-ChildItem -Path $appDir -Filter $pattern -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 10
+                  $files = Get-ChildItem -Path $appDir -Filter $pattern -Recurse -Depth 2 -ErrorAction Stop | Select-Object -First 10
                   if ($files) {
                     $allConfigPaths += $files
                   }
                 } catch {
-                  # Skip directories we can't access
+                  # Skip directories we can't access (permissions, locked files, etc.)
+                  # This is expected and not an error
                 }
               }
             }
           } catch {
-            if ($Log) { $Log.Write("Error scanning $basePath : $($_.Exception.Message)", 'WARN') }
+            if ($Log) { $Log.Write("Error scanning $basePath : $($_.Exception.Message) (Type: $($_.Exception.GetType().Name))", 'WARN') }
           }
         }
       }
@@ -3365,21 +3436,32 @@ WHERE srv.is_linked = 1
       # Scan ProgramData - common location for application configs
       if (Test-Path $env:ProgramData) {
         try {
-          Get-ChildItem -Path $env:ProgramData -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-            $appDir = $_.FullName
-            foreach ($pattern in $configFilePatterns) {
-              try {
-                $files = Get-ChildItem -Path $appDir -Filter $pattern -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 10
-                if ($files) {
-                  $allConfigPaths += $files
+          $directories = $null
+          try {
+            $directories = Get-ChildItem -Path $env:ProgramData -Directory -ErrorAction Stop
+          } catch {
+            if ($Log) { $Log.Write("Error accessing directories in ProgramData: $($_.Exception.Message)", 'WARN') }
+            # Continue to next section instead of failing entirely
+          }
+          
+          if ($directories) {
+            foreach ($dir in $directories) {
+              $appDir = $dir.FullName
+              foreach ($pattern in $configFilePatterns) {
+                try {
+                  $files = Get-ChildItem -Path $appDir -Filter $pattern -Recurse -Depth 2 -ErrorAction Stop | Select-Object -First 10
+                  if ($files) {
+                    $allConfigPaths += $files
+                  }
+                } catch {
+                  # Skip directories we can't access (permissions, locked files, etc.)
+                  # This is expected and not an error
                 }
-              } catch {
-                # Skip directories we can't access
               }
             }
           }
         } catch {
-          if ($Log) { $Log.Write("Error scanning ProgramData: $($_.Exception.Message)", 'WARN') }
+          if ($Log) { $Log.Write("Error scanning ProgramData: $($_.Exception.Message) (Type: $($_.Exception.GetType().Name))", 'WARN') }
         }
       }
       
@@ -3387,28 +3469,43 @@ WHERE srv.is_linked = 1
       $userProfilesPath = "$env:SystemDrive\Users"
       if (Test-Path $userProfilesPath) {
         try {
-          Get-ChildItem -Path $userProfilesPath -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-            $userDir = $_.FullName
-            $appDataLocal = Join-Path $userDir 'AppData\Local'
-            $appDataRoaming = Join-Path $userDir 'AppData\Roaming'
-            
-            foreach ($userAppPath in @($appDataLocal, $appDataRoaming)) {
-              if (Test-Path $userAppPath) {
-                try {
-                  foreach ($pattern in $configFilePatterns) {
-                    $files = Get-ChildItem -Path $userAppPath -Filter $pattern -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 5
-                    if ($files) {
-                      $allConfigPaths += $files
+          $userDirs = $null
+          try {
+            $userDirs = Get-ChildItem -Path $userProfilesPath -Directory -ErrorAction Stop
+          } catch {
+            if ($Log) { $Log.Write("Error accessing user profile directories: $($_.Exception.Message)", 'WARN') }
+            # Continue - may not have permission to list all user directories
+          }
+          
+          if ($userDirs) {
+            foreach ($userDirObj in $userDirs) {
+              $userDir = $userDirObj.FullName
+              $appDataLocal = Join-Path $userDir 'AppData\Local'
+              $appDataRoaming = Join-Path $userDir 'AppData\Roaming'
+              
+              foreach ($userAppPath in @($appDataLocal, $appDataRoaming)) {
+                if (Test-Path $userAppPath) {
+                  try {
+                    foreach ($pattern in $configFilePatterns) {
+                      try {
+                        $files = Get-ChildItem -Path $userAppPath -Filter $pattern -Recurse -Depth 2 -ErrorAction Stop | Select-Object -First 5
+                        if ($files) {
+                          $allConfigPaths += $files
+                        }
+                      } catch {
+                        # Skip directories we can't access (permissions, locked files, etc.)
+                        # This is expected and not an error
+                      }
                     }
+                  } catch {
+                    # Skip this user's app data directory if we can't access it
                   }
-                } catch {
-                  # Skip directories we can't access
                 }
               }
             }
           }
         } catch {
-          if ($Log) { $Log.Write("Error scanning user profiles: $($_.Exception.Message)", 'WARN') }
+          if ($Log) { $Log.Write("Error scanning user profiles: $($_.Exception.Message) (Type: $($_.Exception.GetType().Name))", 'WARN') }
         }
       }
       
@@ -3431,7 +3528,14 @@ WHERE srv.is_linked = 1
           if (-not (Test-Path -LiteralPath $configFile.FullName)) { continue }
           
           # Skip very large files (> 5MB) to avoid memory issues
-          $fileInfo = Get-Item -LiteralPath $configFile.FullName -ErrorAction SilentlyContinue
+          $fileInfo = $null
+          try {
+            $fileInfo = Get-Item -LiteralPath $configFile.FullName -ErrorAction Stop
+          } catch {
+            # Can't access file info, skip this file
+            continue
+          }
+          
           if ($fileInfo -and $fileInfo.Length -gt 5MB) { continue }
           
           $content = $null
@@ -3441,14 +3545,15 @@ WHERE srv.is_linked = 1
           $credentialPatterns = @()
           
           try {
-            # Try to read as text
+            # Try to read as text with UTF8 encoding
             $content = Get-Content -Path $configFile.FullName -Raw -ErrorAction Stop -Encoding UTF8
           } catch {
             # Try alternative encoding
             try {
               $content = Get-Content -Path $configFile.FullName -Raw -ErrorAction Stop -Encoding Default
             } catch {
-              # Skip files we can't read
+              # Skip files we can't read (may be locked, binary, or permission denied)
+              # This is expected and not an error
               continue
             }
           }
@@ -3520,8 +3625,9 @@ WHERE srv.is_linked = 1
             }
           }
         } catch {
-          # Skip files that cause errors
-          if ($Log) { $Log.Write("Error scanning file $($configFile.FullName): $($_.Exception.Message)", 'WARN') }
+          # Skip files that cause errors (locked, corrupted, permission denied, etc.)
+          # Log with exception type for debugging
+          if ($Log) { $Log.Write("Error scanning file $($configFile.FullName): $($_.Exception.Message) (Type: $($_.Exception.GetType().Name))", 'WARN') }
         }
       }
       
@@ -3532,7 +3638,14 @@ WHERE srv.is_linked = 1
       }
       
     } catch {
-      if ($Log) { $Log.Write("Error in application config file scanning: $($_.Exception.Message)", 'ERROR') }
+      # Catch any unexpected errors in the overall scanning process
+      if ($Log) { 
+        $Log.Write("Error in application config file scanning: $($_.Exception.Message) (Type: $($_.Exception.GetType().Name))", 'ERROR') 
+        if ($_.Exception.InnerException) {
+          $Log.Write("Inner exception: $($_.Exception.InnerException.Message)", 'ERROR')
+        }
+      }
+      # Return partial results if available rather than failing completely
     }
     
     # Return results
@@ -3673,16 +3786,31 @@ WHERE srv.is_linked = 1
     foreach ($logName in $logNames) {
       try {
         # Check if log exists and is accessible
-        $logExists = Get-WinEvent -ListLog $logName -ErrorAction SilentlyContinue
+        $logExists = $null
+        try {
+          $logExists = Get-WinEvent -ListLog $logName -ErrorAction Stop
+        } catch {
+          # Log exists check failed - log may not exist, be inaccessible, or require special permissions
+          if ($Log) { $Log.Write("Event log '$logName' not accessible: $($_.Exception.Message)", 'WARN') }
+          continue
+        }
+        
         if (-not $logExists) {
-          if ($Log) { $Log.Write("Event log '$logName' not found or not accessible", 'WARN') }
+          if ($Log) { $Log.Write("Event log '$logName' not found", 'WARN') }
           continue
         }
         
         # Query events within time window (query more events since we'll filter many out)
-        $events = Get-WinEvent -LogName $logName -FilterHashtable @{
-          StartTime = $startTime
-        } -ErrorAction SilentlyContinue -MaxEvents ($maxEventsPerLog * 5)
+        $events = $null
+        try {
+          $events = Get-WinEvent -LogName $logName -FilterHashtable @{
+            StartTime = $startTime
+          } -ErrorAction Stop -MaxEvents ($maxEventsPerLog * 5)
+        } catch {
+          # Event query failed - may be due to permissions, log corruption, or service issues
+          if ($Log) { $Log.Write("Unable to query events from log '$logName': $($_.Exception.Message)", 'WARN') }
+          continue
+        }
         
         if (-not $events) { continue }
         
@@ -3737,7 +3865,14 @@ WHERE srv.is_linked = 1
           $Log.Write("Found $matchedCount domain reference(s) in $logName log") 
         }
       } catch {
-        if ($Log) { $Log.Write("Error accessing event log '$logName': $($_.Exception.Message)", 'WARN') }
+        # Catch any other errors accessing the event log (permissions, corruption, etc.)
+        # Note: Some event logs (especially Security) may require special audit permissions
+        # even for local administrators. This is expected behavior and not a script error.
+        if ($Log) { 
+          $Log.Write("Error accessing event log '$logName': $($_.Exception.Message) (Type: $($_.Exception.GetType().Name))", 'WARN') 
+        }
+        # Continue to next log instead of failing entirely
+        continue
       }
     }
     
