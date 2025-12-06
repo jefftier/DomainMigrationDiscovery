@@ -12,5 +12,10 @@
     "ACTIVATION_ID_GUID": "Qualys NewCo",
     "DEFAULT": "OldCo",
     "UNKNOWN": "Unknown"
-  }
+  },
+  "EncaseRegistryPaths": [
+    "Encase_NewDomain",
+    "Encase_OldDomain"
+  ]
 }
+

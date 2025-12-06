@@ -296,6 +296,7 @@ function Import-ConfigurationFile {
             OldDomainNetBIOS = $OldDomainNetBIOS
             CrowdStrikeTenantMap = $null
             QualysTenantMap = $null
+            EncaseRegistryPaths = $null
         }
     }
     
@@ -311,6 +312,7 @@ function Import-ConfigurationFile {
             OldDomainNetBIOS = $OldDomainNetBIOS
             CrowdStrikeTenantMap = $null
             QualysTenantMap = $null
+            EncaseRegistryPaths = $null
         }
         
         # Get domain settings from config file
@@ -344,6 +346,15 @@ function Import-ConfigurationFile {
             $result.QualysTenantMap = $qMap
         }
         
+        # Load Encase registry paths from config
+        if ($config.PSObject.Properties['EncaseRegistryPaths']) {
+            if ($config.EncaseRegistryPaths -is [System.Array]) {
+                $result.EncaseRegistryPaths = $config.EncaseRegistryPaths
+            } elseif ($config.EncaseRegistryPaths -is [string]) {
+                $result.EncaseRegistryPaths = @($config.EncaseRegistryPaths)
+            }
+        }
+        
         return $result
     }
     catch {
@@ -354,6 +365,7 @@ function Import-ConfigurationFile {
             OldDomainNetBIOS = $OldDomainNetBIOS
             CrowdStrikeTenantMap = $null
             QualysTenantMap = $null
+            EncaseRegistryPaths = $null
         }
     }
 }
@@ -417,6 +429,17 @@ $QualysTenantMap = @{
     'UNKNOWN' = 'Unknown'  # Used when ActivationID is not found
 }
 
+# SCCM Configuration
+# SCCM tenant detection searches for OldDomainFqdn and NewDomainFqdn in the registry
+# and reports which domain is found. No tenant map is needed as it uses the domain parameters.
+
+# Encase Configuration
+# Registry paths to check for Encase tenant identification
+# These can be overridden by -ConfigFile parameter (EncaseRegistryPaths)
+# Format: Array of registry paths relative to HKLM\SOFTWARE\Microsoft\
+# Example: @('Encase_NewDomain', 'Encase_OldDomain')
+$EncaseRegistryPaths = @()
+
 # Load configuration from file if provided
 # Command-line parameters take precedence over config file values
 if ($ConfigFile) {
@@ -440,6 +463,9 @@ if ($ConfigFile) {
     }
     if ($loadedConfig.QualysTenantMap) {
         $QualysTenantMap = $loadedConfig.QualysTenantMap
+    }
+    if ($loadedConfig.EncaseRegistryPaths) {
+        $EncaseRegistryPaths = $loadedConfig.EncaseRegistryPaths
     }
 }
 
@@ -843,22 +869,301 @@ function Test-IsMicrosoftTaskPath([string]$taskPath){ return $taskPath -match '(
 # ============================================================================
 <#
 .SYNOPSIS
+    Searches SCCM registry for domain references.
+
+.DESCRIPTION
+    Recursively searches the SCCM registry path (HKLM\SOFTWARE\Microsoft\CCM) for
+    any values containing OldDomainFqdn or NewDomainFqdn references.
+    Returns information about found domain references and determines tenant.
+
+.PARAMETER Log
+    Logger object for writing log messages.
+
+.PARAMETER OldDomainFqdn
+    The old domain FQDN to search for.
+
+.PARAMETER NewDomainFqdn
+    The new domain FQDN to search for.
+
+.OUTPUTS
+    PSCustomObject with SCCM tenant information including found domain references.
+#>
+function Get-SCCMTenantInfo {
+    [CmdletBinding()]
+    param(
+        $Log,
+        [string]$OldDomainFqdn,
+        [string]$NewDomainFqdn
+    )
+    
+    if ($Log) { $Log.Write('Detect: starting SCCM tenant check') }
+    
+    $sccmRegPath = 'SOFTWARE\Microsoft\CCM'
+    $domainReferences = @()
+    $foundDomains = @()
+    
+    # Domains to search for (OldDomain and NewDomain)
+    $searchDomains = @()
+    if (-not [string]::IsNullOrWhiteSpace($OldDomainFqdn)) {
+        $searchDomains += $OldDomainFqdn
+    }
+    if (-not [string]::IsNullOrWhiteSpace($NewDomainFqdn)) {
+        $searchDomains += $NewDomainFqdn
+    }
+    
+    if ($searchDomains.Count -eq 0) {
+        if ($Log) { $Log.Write('No domains provided for SCCM search', 'WARN') }
+        return [pscustomobject]@{
+            RegPath = "HKLM:\$sccmRegPath"
+            Found = $false
+            DomainReferences = @()
+            FoundDomains = @()
+            Tenant = 'Unknown'
+            HasDomainReference = $false
+        }
+    }
+    
+    try {
+        # Check if SCCM registry path exists
+        $baseKey = [Microsoft.Win32.Registry]::LocalMachine
+        $ccmKey = $baseKey.OpenSubKey($sccmRegPath)
+        
+        if ($null -eq $ccmKey) {
+            if ($Log) { $Log.Write("SCCM registry path not found: HKLM\$sccmRegPath", 'INFO') }
+            return [pscustomobject]@{
+                RegPath = "HKLM:\$sccmRegPath"
+                Found = $false
+                DomainReferences = @()
+                FoundDomains = @()
+                Tenant = 'Unknown'
+                HasDomainReference = $false
+            }
+        }
+        
+        # Recursively search registry values
+        function Search-RegistryRecursive {
+            param(
+                [Microsoft.Win32.RegistryKey]$key,
+                [string]$basePath,
+                [string[]]$domains,
+                [System.Collections.ArrayList]$results
+            )
+            
+            try {
+                # Search all value names in current key
+                $valueNames = $key.GetValueNames()
+                foreach ($valueName in $valueNames) {
+                    try {
+                        $value = $key.GetValue($valueName, $null, 'DoNotExpandEnvironmentNames')
+                        if ($null -ne $value) {
+                            $valueStr = [string]$value
+                            
+                            # Check each domain (case-insensitive)
+                            foreach ($domain in $domains) {
+                                $pattern = [regex]::new("(?i)" + [regex]::Escape($domain))
+                                if ($pattern.IsMatch($valueStr)) {
+                                    $null = $results.Add([pscustomobject]@{
+                                        Path = $basePath
+                                        ValueName = $valueName
+                                        Value = $valueStr
+                                        Domain = $domain
+                                    })
+                                    break  # Found a match, no need to check other domains for this value
+                                }
+                            }
+                        }
+                    } catch {
+                        # Skip values that can't be read
+                    }
+                }
+                
+                # Recursively search subkeys
+                $subKeyNames = $key.GetSubKeyNames()
+                foreach ($subKeyName in $subKeyNames) {
+                    try {
+                        $subKey = $key.OpenSubKey($subKeyName)
+                        if ($null -ne $subKey) {
+                            $newPath = if ($basePath) { "$basePath\$subKeyName" } else { $subKeyName }
+                            Search-RegistryRecursive -key $subKey -basePath $newPath -domains $domains -results $results
+                            $subKey.Close()
+                        }
+                    } catch {
+                        # Skip subkeys that can't be accessed
+                    }
+                }
+            } catch {
+                # Skip keys that can't be accessed
+            }
+        }
+        
+        $resultsList = [System.Collections.ArrayList]::new()
+        Search-RegistryRecursive -key $ccmKey -basePath $sccmRegPath -domains $searchDomains -results $resultsList
+        $domainReferences = $resultsList.ToArray()
+        $ccmKey.Close()
+        
+        # Extract unique found domains
+        $foundDomains = $domainReferences | Select-Object -ExpandProperty Domain -Unique
+        
+        # Determine tenant based on found domains
+        $sccmTenant = 'Unknown'
+        $hasDomainReference = $false
+        
+        if ($foundDomains.Count -gt 0) {
+            $hasDomainReference = $true
+            # Determine tenant: if OldDomain found, report as "OldDomain", if NewDomain found, report as "NewDomain"
+            # If both found, prioritize NewDomain
+            if ($foundDomains -contains $NewDomainFqdn) {
+                $sccmTenant = 'NewDomain'
+            } elseif ($foundDomains -contains $OldDomainFqdn) {
+                $sccmTenant = 'OldDomain'
+            } else {
+                # Found a domain but it's not one we're tracking - report the first found
+                $sccmTenant = $foundDomains[0]
+            }
+        }
+        
+        return [pscustomobject]@{
+            RegPath = "HKLM:\$sccmRegPath"
+            Found = $true
+            DomainReferences = $domainReferences
+            FoundDomains = $foundDomains
+            Tenant = $sccmTenant
+            HasDomainReference = $hasDomainReference
+        }
+        
+    } catch {
+        if ($Log) { $Log.Write("Error searching SCCM registry: $($_.Exception.Message)", 'WARN') }
+        return [pscustomobject]@{
+            RegPath = "HKLM:\$sccmRegPath"
+            Found = $false
+            DomainReferences = @()
+            FoundDomains = @()
+            Tenant = 'Unknown'
+            HasDomainReference = $false
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Checks for Encase installation and tenant information.
+
+.DESCRIPTION
+    Checks if Encase is installed by looking for the enstart64 service.
+    Also checks for tenant registry keys specified in EncaseRegistryPaths
+    to determine which tenant Encase is configured for.
+
+.PARAMETER Log
+    Logger object for writing log messages.
+
+.PARAMETER EncaseRegistryPaths
+    Array of registry paths (relative to HKLM\SOFTWARE\Microsoft\) to check for tenant identification.
+
+.OUTPUTS
+    PSCustomObject with Encase installation and tenant information.
+#>
+function Get-EncaseTenantInfo {
+    [CmdletBinding()]
+    param(
+        $Log,
+        [string[]]$EncaseRegistryPaths = @()
+    )
+    
+    if ($Log) { $Log.Write('Detect: starting Encase tenant check') }
+    
+    $serviceName = 'enstart64'
+    $installed = $false
+    $tenantKey = $null
+    $tenant = 'Unknown'
+    
+    try {
+        # Check if enstart64 service exists
+        $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        if ($null -ne $service) {
+            $installed = $true
+            if ($Log) { $Log.Write("Encase service '$serviceName' found", 'INFO') }
+        } else {
+            if ($Log) { $Log.Write("Encase service '$serviceName' not found", 'INFO') }
+        }
+    } catch {
+        if ($Log) { $Log.Write("Error checking for Encase service: $($_.Exception.Message)", 'WARN') }
+    }
+    
+    # Check for tenant registry keys
+    if ($EncaseRegistryPaths.Count -gt 0) {
+        try {
+            $baseKey = [Microsoft.Win32.Registry]::LocalMachine
+            $tenantKeys = @()
+            
+            # Check all configured registry paths
+            foreach ($keyName in $EncaseRegistryPaths) {
+                if (-not [string]::IsNullOrWhiteSpace($keyName)) {
+                    $testPath = "SOFTWARE\Microsoft\$keyName"
+                    try {
+                        $testKey = $baseKey.OpenSubKey($testPath)
+                        if ($null -ne $testKey) {
+                            $tenantKeys += $keyName
+                            $testKey.Close()
+                            if ($Log) { $Log.Write("Encase tenant registry key found: HKLM\$testPath", 'INFO') }
+                        }
+                    } catch {
+                        # Key doesn't exist or can't be accessed
+                    }
+                }
+            }
+            
+            # Determine tenant based on found registry keys
+            if ($tenantKeys.Count -gt 0) {
+                # Use the first found tenant key as the tenant identifier
+                $tenantKey = $tenantKeys[0]
+                $tenant = $tenantKey  # Use the registry key name as the tenant identifier
+            }
+        } catch {
+            if ($Log) { $Log.Write("Error checking Encase registry: $($_.Exception.Message)", 'WARN') }
+        }
+    }
+    
+    return [pscustomobject]@{
+        Installed = $installed
+        ServiceName = $serviceName
+        RegPath = if ($tenantKey) { "HKLM:\SOFTWARE\Microsoft\$tenantKey" } else { $null }
+        TenantKey = $tenantKey
+        Tenant = $tenant
+    }
+}
+
+<#
+.SYNOPSIS
     Retrieves security agent tenant information.
 
 .DESCRIPTION
-    Collects information about CrowdStrike and Qualys security agents, including
+    Collects information about CrowdStrike, Qualys, SCCM, and Encase security agents, including
     their tenant configuration. Uses the user-configurable tenant maps to identify
     which tenant each agent is configured for.
 
 .PARAMETER Log
     Logger object for writing log messages.
 
+.PARAMETER OldDomainFqdn
+    The old domain FQDN for SCCM search.
+
+.PARAMETER NewDomainFqdn
+    The new domain FQDN for SCCM search.
+
+.PARAMETER EncaseRegistryPaths
+    Array of registry paths to check for Encase tenant identification.
+
 .OUTPUTS
-    PSCustomObject with CrowdStrike and Qualys tenant information.
+    PSCustomObject with CrowdStrike, Qualys, SCCM, and Encase tenant information.
 #>
 function Get-SecurityAgentsTenantInfo {
     [CmdletBinding()]
-    param($Log)
+    param(
+        $Log,
+        [string]$OldDomainFqdn,
+        [string]$NewDomainFqdn,
+        [string[]]$EncaseRegistryPaths = @()
+    )
     if ($Log) { $Log.Write('Detect: starting security agent tenant checks') }
 
     # CrowdStrike (Falcon Sensor)
@@ -891,6 +1196,12 @@ function Get-SecurityAgentsTenantInfo {
         $qTenant = $QualysTenantMap['DEFAULT']
     }
 
+    # SCCM (Configuration Manager)
+    $sccmInfo = Get-SCCMTenantInfo -Log $Log -OldDomainFqdn $OldDomainFqdn -NewDomainFqdn $NewDomainFqdn
+
+    # Encase
+    $encaseInfo = Get-EncaseTenantInfo -Log $Log -EncaseRegistryPaths $EncaseRegistryPaths
+
     [pscustomobject]@{
         CrowdStrike = [pscustomobject]@{
             RegPath   = 'HKLM:\System\CurrentControlSet\Services\CSAgent\Sim'
@@ -907,6 +1218,21 @@ function Get-SecurityAgentsTenantInfo {
             Raw       = if ($q -and $q.PSObject.Properties['Raw']) { $q.Raw } else { $null }
             String    = $qStr
             Tenant    = $qTenant
+        }
+        SCCM = [pscustomobject]@{
+            RegPath           = $sccmInfo.RegPath
+            Found             = $sccmInfo.Found
+            DomainReferences  = $sccmInfo.DomainReferences
+            FoundDomains      = $sccmInfo.FoundDomains
+            Tenant            = $sccmInfo.Tenant
+            HasDomainReference = $sccmInfo.HasDomainReference
+        }
+        Encase = [pscustomobject]@{
+            Installed  = $encaseInfo.Installed
+            ServiceName = $encaseInfo.ServiceName
+            RegPath    = $encaseInfo.RegPath
+            TenantKey  = $encaseInfo.TenantKey
+            Tenant     = $encaseInfo.Tenant
         }
     }
 }
@@ -1189,7 +1515,7 @@ try {
   # --------------------------------------------------------------------------------
   # Collect basic system information: computer system, OS, network adapters
   $system = Safe-Try { Get-CimInstance Win32_ComputerSystem } 'Win32_ComputerSystem'
-  $securityAgents = Get-SecurityAgentsTenantInfo -Log $script:log
+  $securityAgents = Get-SecurityAgentsTenantInfo -Log $script:log -OldDomainFqdn $OldDomainFqdn -NewDomainFqdn $NewDomainFqdn -EncaseRegistryPaths $EncaseRegistryPaths
   $os     = Safe-Try { Get-CimInstance Win32_OperatingSystem } 'Win32_OperatingSystem'
   $netIPv4  = Safe-Try { Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue } 'Get-NetIPAddress'
   $adapters = Safe-Try { Get-NetAdapter -ErrorAction SilentlyContinue } 'Get-NetAdapter'
@@ -3808,6 +4134,7 @@ function Get-SharedFoldersWithACL {
       SecurityAgents = [pscustomobject]@{
         CrowdStrike = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }
         Qualys = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }
+        SCCM = [pscustomobject]@{ Tenant = $null; Found = $false; FoundDomains = @(); HasDomainReference = $false }
       }
       QuestConfig = @()
       References = [pscustomobject]@{ OldDomain = @(); ScriptAutomation = @() }
@@ -3876,6 +4203,7 @@ function Get-SharedFoldersWithACL {
       HasOldRefs        = $summary.HasOldDomainRefs
       CrowdStrikeTenant = $securityAgents.CrowdStrike.Tenant
       QualysTenant      = $securityAgents.Qualys.Tenant
+      SCCMTenant        = $securityAgents.SCCM.Tenant
       CountServices     = $summary.Counts.Services
       CountServicesPath = $summary.Counts.ServicesPath
       CountTaskPrincipals = $summary.Counts.TaskPrincipals
@@ -4024,6 +4352,7 @@ catch {
       SecurityAgents = [pscustomobject]@{
         CrowdStrike = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }
         Qualys = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }
+        SCCM = [pscustomobject]@{ Tenant = $null; Found = $false; FoundDomains = @(); HasDomainReference = $false }
       }
       QuestConfig = @()
       References = [pscustomobject]@{
