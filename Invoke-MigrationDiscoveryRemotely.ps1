@@ -258,8 +258,9 @@ $InvokeDiscoveryOnServerScriptBlock = {
         }
         
         # Add connection timeout to prevent hangs (PowerShell 5.1+)
+        # OperationTimeout expects seconds as integer, not TimeSpan
         if ($PSVersionTable.PSVersion.Major -ge 5) {
-            $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout (New-TimeSpan -Seconds 30)
+            $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30
         }
         
         $testResult = Invoke-Command @testParams
@@ -427,8 +428,9 @@ $InvokeDiscoveryOnServerScriptBlock = {
                 }
                 
                 # Add connection timeout to prevent hangs (PowerShell 5.1+)
+                # OperationTimeout expects seconds as integer, not TimeSpan
                 if ($PSVersionTable.PSVersion.Major -ge 5) {
-                    $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout (New-TimeSpan -Seconds 30)
+                    $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30
                 }
                 
                 $testResult = Invoke-Command @testParams
@@ -550,8 +552,9 @@ $InvokeDiscoveryOnServerScriptBlock = {
         }
         
         # Add connection timeout to prevent hangs (PowerShell 5.1+)
+        # OperationTimeout expects seconds as integer, not TimeSpan
         if ($PSVersionTable.PSVersion.Major -ge 5) {
-            $invokeParams['SessionOption'] = New-PSSessionOption -OperationTimeout (New-TimeSpan -Seconds 300)
+            $invokeParams['SessionOption'] = New-PSSessionOption -OperationTimeout 300
         }
         
         # Invoke your existing script remotely using ScriptBlock for proper parameter handling
