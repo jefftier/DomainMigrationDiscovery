@@ -156,22 +156,33 @@ def flatten_record(computer_name, record, sheet_rows):
     meta = record.get("Metadata", {}) or {}
     system = record.get("System", {}) or {}
 
+    # Base row - only include domain info in Metadata tab
+    # For other tabs, only include domain info if it's specific to that line
     base = {
         "ComputerName": meta.get("ComputerName", computer_name),
         "PlantId": meta.get("PlantId"),
-        "Domain": meta.get("Domain"),
         "CollectedAt": meta.get("CollectedAt"),
-        "OldDomainFqdn": meta.get("OldDomainFqdn"),
-        "OldDomainNetBIOS": meta.get("OldDomainNetBIOS"),
-        "NewDomainFqdn": meta.get("NewDomainFqdn"),
         "ScriptVersion": meta.get("Version"),
     }
+    
+    # Store domain info separately for use where needed
+    old_domain_fqdn = meta.get("OldDomainFqdn")
+    old_domain_netbios = meta.get("OldDomainNetBIOS")
+    new_domain_fqdn = meta.get("NewDomainFqdn")
+    current_domain = meta.get("Domain")
 
     # --- Detection Summary (create first for quick overview) ---
     detection = record.get("Detection") or {}
     detection_flags = detection.get("OldDomain") or {}
     summary = detection.get("Summary") or {}
     counts = summary.get("Counts") or {}
+    
+    # Get SecurityAgents info for summary
+    sec = record.get("SecurityAgents") or {}
+    crowdstrike = sec.get("CrowdStrike") or {}
+    qualys = sec.get("Qualys") or {}
+    sccm = sec.get("SCCM") or {}
+    encase = sec.get("Encase") or {}
 
     # Count potential service accounts from all sources (for summary)
     # This is a quick count - detailed extraction happens later in ServiceAccountCandidates
@@ -270,6 +281,21 @@ def flatten_record(computer_name, record, sheet_rows):
     row_det = base.copy()
     row_det["HasOldDomainRefs"] = summary.get("HasOldDomainRefs")
     row_det["PotentialServiceAccounts"] = potential_service_account_count
+    
+    # Add security agent status flags for quick issue identification
+    row_det["CrowdStrike_Tenant"] = crowdstrike.get("Tenant")
+    row_det["CrowdStrike_Issue"] = "Unknown Tenant" if not crowdstrike.get("Tenant") or crowdstrike.get("Tenant") == "UNKNOWN" else None
+    
+    row_det["Qualys_Tenant"] = qualys.get("Tenant")
+    row_det["Qualys_Issue"] = "Unknown Tenant" if not qualys.get("Tenant") or qualys.get("Tenant") == "UNKNOWN" else None
+    
+    row_det["SCCM_Tenant"] = sccm.get("Tenant")
+    row_det["SCCM_HasDomainReference"] = sccm.get("HasDomainReference", False)
+    row_det["SCCM_Issue"] = "Domain Reference Found" if sccm.get("HasDomainReference") else None
+    
+    row_det["Encase_Installed"] = encase.get("Installed", False)
+    row_det["Encase_Tenant"] = encase.get("Tenant")
+    row_det["Encase_Issue"] = "Installed but No Tenant" if encase.get("Installed") and not encase.get("Tenant") else None
 
     for k, v in counts.items():
         # Prefix with Count_ to make it obvious in Excel
@@ -279,7 +305,12 @@ def flatten_record(computer_name, record, sheet_rows):
     add_row(sheet_rows, "Summary", row_det)
 
     # --- Metadata (one row per computer) ---
+    # Metadata tab should include all domain info for reference
     row_meta = base.copy()
+    row_meta["Domain"] = current_domain
+    row_meta["OldDomainFqdn"] = old_domain_fqdn
+    row_meta["OldDomainNetBIOS"] = old_domain_netbios
+    row_meta["NewDomainFqdn"] = new_domain_fqdn
     # Include all metadata fields explicitly
     for k, v in meta.items():
         if k not in row_meta:
@@ -385,6 +416,36 @@ def flatten_record(computer_name, record, sheet_rows):
             row.update(share)
         else:
             row["Share"] = share
+        
+        # Check Identity field for domain references and accounts of interest
+        identity = share.get("Identity") if isinstance(share, dict) else None
+        if identity:
+            identity_str = str(identity)
+            # Check for domain references
+            has_domain_ref = False
+            is_old_domain = False
+            is_domain_account = False
+            
+            if "\\" in identity_str:
+                is_domain_account = True
+                parts = identity_str.split("\\", 1)
+                if len(parts) == 2:
+                    domain_part = parts[0].lower()
+                    old_fqdn_lower = (old_domain_fqdn or "").lower()
+                    old_netbios_lower = (old_domain_netbios or "").lower()
+                    new_fqdn_lower = (new_domain_fqdn or "").lower()
+                    
+                    if domain_part == old_fqdn_lower or domain_part == old_netbios_lower:
+                        has_domain_ref = True
+                        is_old_domain = True
+                    elif domain_part == new_fqdn_lower:
+                        has_domain_ref = True
+            
+            row["HasDomainReference"] = has_domain_ref
+            row["IsOldDomainAccount"] = is_old_domain
+            row["IsDomainAccount"] = is_domain_account
+            row["NeedsAttention"] = is_old_domain  # Flag old domain accounts for attention
+        
         add_row(sheet_rows, "SharedFolders_Shares", row)
 
     for err in errors:
@@ -432,14 +493,7 @@ def flatten_record(computer_name, record, sheet_rows):
     # --- DNS Configuration ---
     dns = record.get("DnsConfiguration") or {}
     if dns:
-        # Summary row
-        dns_summary = base.copy()
-        for k, v in dns.items():
-            if not isinstance(v, (list, dict)):
-                dns_summary[k] = v
-        add_row(sheet_rows, "DnsSummary", dns_summary)
-
-        # Suffix search list
+        # Suffix search list - simplified to only show suffix
         for suffix in dns.get("SuffixSearchList") or []:
             row = base.copy()
             row["Suffix"] = suffix
@@ -558,11 +612,8 @@ def flatten_record(computer_name, record, sheet_rows):
         if account_value and is_builtin_account(account_value):
             return
         
-        old_domain_fqdn = base.get("OldDomainFqdn", "")
-        old_domain_netbios = base.get("OldDomainNetBIOS", "")
-        
         account_info, parsed_account = extract_account_info(
-            account_value, account_identity, old_domain_fqdn, old_domain_netbios
+            account_value, account_identity, old_domain_fqdn or "", old_domain_netbios or ""
         )
         
         if not parsed_account and not account_info.get("AccountName"):
@@ -786,7 +837,7 @@ def flatten_record(computer_name, record, sheet_rows):
         if user_name or account_identity:
             # Only include if it's a domain account
             account_info, _ = extract_account_info(
-                user_name, account_identity, base.get("OldDomainFqdn"), base.get("OldDomainNetBIOS")
+                user_name, account_identity, old_domain_fqdn or "", old_domain_netbios or ""
             )
             if account_info.get("IsDomainAccount"):
                 needs_attention = target in cred_mgr_old if target else False
@@ -854,7 +905,6 @@ def write_excel(sheet_rows, output_path):
         "InstalledApps",
         "SharedFolders_Shares",
         "SharedFolders_Errors",
-        "DnsSummary",
         "DnsSuffixSearchList",
         "DnsAdapters",
         "AutoAdminLogon",
@@ -878,12 +928,20 @@ def write_excel(sheet_rows, output_path):
                 continue
             df = pd.DataFrame(rows)
 
-            # Core columns first if they exist
-            core_cols = ["ComputerName", "PlantId", "Domain", "CollectedAt"]
+            # Core columns first if they exist (no Domain in base, only in Metadata)
+            core_cols = ["ComputerName", "PlantId", "CollectedAt"]
             # For Summary sheet, put key metrics first
             if sheet_name == "Summary":
-                summary_cols = ["HasOldDomainRefs", "PotentialServiceAccounts"]
+                summary_cols = ["HasOldDomainRefs", "PotentialServiceAccounts", 
+                               "CrowdStrike_Tenant", "CrowdStrike_Issue",
+                               "Qualys_Tenant", "Qualys_Issue",
+                               "SCCM_Tenant", "SCCM_HasDomainReference", "SCCM_Issue",
+                               "Encase_Installed", "Encase_Tenant", "Encase_Issue"]
                 core_cols = core_cols + [c for c in summary_cols if c in df.columns]
+            # For Metadata sheet, include domain info
+            elif sheet_name == "Metadata":
+                core_cols = ["ComputerName", "PlantId", "Domain", "OldDomainFqdn", 
+                            "OldDomainNetBIOS", "NewDomainFqdn", "CollectedAt"]
             # For ServiceAccountCandidates, put actionable columns first
             elif sheet_name == "ServiceAccountCandidates":
                 action_cols = [
