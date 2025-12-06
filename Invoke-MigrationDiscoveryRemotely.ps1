@@ -23,7 +23,7 @@ param(
 
     [string]$PlantId,
     
-    [string]$ConfigFile,      # Path to JSON configuration file for domain settings and tenant maps
+    [string]$ConfigFile,      # Path to JSON configuration file for domain settings, tenant maps (CrowdStrike, Qualys), and EnCase registry paths
     
     [switch]$EmitStdOut,      # bubble up the summary object from each server
     [switch]$UseParallel,     # simple fan-out option
