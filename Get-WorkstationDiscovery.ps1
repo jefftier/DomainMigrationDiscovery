@@ -956,19 +956,36 @@ function Get-SCCMTenantInfo {
                     try {
                         $value = $key.GetValue($valueName, $null, 'DoNotExpandEnvironmentNames')
                         if ($null -ne $value) {
-                            $valueStr = [string]$value
+                            # Handle REG_MULTI_SZ (array) and single string values
+                            $valuesToCheck = @()
+                            if ($value -is [array]) {
+                                # REG_MULTI_SZ - check each element in the array
+                                $valuesToCheck = $value
+                            } else {
+                                # Single value - convert to string
+                                $valuesToCheck = @([string]$value)
+                            }
                             
-                            # Check each domain (case-insensitive)
-                            foreach ($domain in $domains) {
-                                $pattern = [regex]::new("(?i)" + [regex]::Escape($domain))
-                                if ($pattern.IsMatch($valueStr)) {
-                                    $null = $results.Add([pscustomobject]@{
-                                        Path = $basePath
-                                        ValueName = $valueName
-                                        Value = $valueStr
-                                        Domain = $domain
-                                    })
-                                    break  # Found a match, no need to check other domains for this value
+                            # Check each value (or array element) for domain matches
+                            foreach ($valueToCheck in $valuesToCheck) {
+                                if ($null -ne $valueToCheck) {
+                                    $valueStr = [string]$valueToCheck
+                                    
+                                    # Check each domain (case-insensitive)
+                                    foreach ($domain in $domains) {
+                                        $pattern = [regex]::new("(?i)" + [regex]::Escape($domain))
+                                        if ($pattern.IsMatch($valueStr)) {
+                                            # For arrays, show the full array in Value; for single values, show the string
+                                            $displayValue = if ($value -is [array]) { ($value -join ' | ') } else { $valueStr }
+                                            $null = $results.Add([pscustomobject]@{
+                                                Path = $basePath
+                                                ValueName = $valueName
+                                                Value = $displayValue
+                                                Domain = $domain
+                                            })
+                                            break  # Found a match, no need to check other domains for this value
+                                        }
+                                    }
                                 }
                             }
                         }
