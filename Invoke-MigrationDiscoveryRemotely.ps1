@@ -27,6 +27,7 @@ param(
     
     [switch]$EmitStdOut,      # bubble up the summary object from each server
     [switch]$UseParallel,     # simple fan-out option
+    [switch]$AttemptWinRmHeal, # Optional: attempt to start WinRM service if connection fails (default: false)
     [System.Management.Automation.PSCredential]$Credential  # Optional: if not provided, will prompt or use current user
 )
 
@@ -215,6 +216,33 @@ if ($ConfigFile) {
     }
 }
 
+# Helper function to categorize WinRM/Invoke-Command errors
+function Get-WinRmFailureCategory {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ErrorMessage
+    )
+    
+    # Returns one of: 'AuthError','NetworkError','Unknown'
+    if ($ErrorMessage -match 'access is denied' -or
+        $ErrorMessage -match '401' -or
+        $ErrorMessage -match 'Kerberos' -or
+        $ErrorMessage -match 'NTLM')
+    {
+        return 'AuthError'
+    }
+    
+    if ($ErrorMessage -match 'WinRM cannot complete the operation' -or
+        $ErrorMessage -match 'The WinRM client cannot process the request' -or
+        $ErrorMessage -match 'The network path was not found' -or
+        $ErrorMessage -match 'No connection could be made')
+    {
+        return 'NetworkError'
+    }
+    
+    return 'Unknown'
+}
+
 # Helper: run discovery on a single server
 # Converted to scriptblock for parallel execution compatibility
 $InvokeDiscoveryOnServerScriptBlock = {
@@ -226,9 +254,11 @@ $InvokeDiscoveryOnServerScriptBlock = {
         [string]$CollectorShare,
         [string]$RemoteOutputRoot,
         [scriptblock]$WriteErrorLogFunction,
+        [scriptblock]$GetWinRmFailureCategoryFunction,
         [string]$ConfigFile,
         [string]$RemoteConfigPath,
-        [string]$CompatibilityMode
+        [string]$CompatibilityMode,
+        [switch]$AttemptWinRmHeal
     )
 
     Write-Host "[$ComputerName] Testing WinRM connectivity and authentication..." -ForegroundColor Yellow
@@ -273,40 +303,36 @@ $InvokeDiscoveryOnServerScriptBlock = {
     }
     catch {
         $initialError = $_.Exception.Message
-        $errorCategory = $_.CategoryInfo.Category
-        $fullError = $_.Exception.ToString()
-        
         Write-Warning "[$ComputerName] Initial WinRM connection failed: $initialError"
-        Write-Warning "[$ComputerName] Error Category: $errorCategory"
         
-        # Provide more specific error information
-        if ($_.Exception.InnerException) {
-            Write-Warning "[$ComputerName] Inner Exception: $($_.Exception.InnerException.Message)"
-        }
+        # Categorize the error
+        $failureCategory = & $GetWinRmFailureCategoryFunction -ErrorMessage $initialError
         
-        # Check for common error patterns
-        if ($initialError -match "Access is denied" -or $initialError -match "authentication") {
-            Write-Warning "[$ComputerName] Authentication issue - verify credentials have admin rights on target"
-        }
-        elseif ($initialError -match "cannot connect" -or $initialError -match "network") {
-            Write-Warning "[$ComputerName] Network/connectivity issue - verify WinRM is enabled and firewall allows connections"
-        }
-        elseif ($initialError -match "timeout") {
-            Write-Warning "[$ComputerName] Connection timeout - verify WinRM service is running and network is accessible"
+        # If auto-heal is not requested, log and return immediately
+        if (-not $AttemptWinRmHeal) {
+            $errorMsg = "WinRM connection failed (no auto-heal requested). Category: $failureCategory. Error: $initialError"
+            Write-Warning "[$ComputerName] $errorMsg"
+            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
+            return
         }
         
-        # Attempt to start WinRM service remotely and retry
+        # If auto-heal is requested but error is authentication-related, don't attempt to start WinRM
+        if ($failureCategory -eq 'AuthError') {
+            $errorMsg = "WinRM connection failed due to authentication error; auto-heal will not help. Category: $failureCategory. Error: $initialError"
+            Write-Warning "[$ComputerName] $errorMsg"
+            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
+            return
+        }
+        
+        # For NetworkError or Unknown, attempt to start WinRM service (only if AttemptWinRmHeal is set)
         Write-Host "[$ComputerName] Attempting to start WinRM service and retry connection..." -ForegroundColor Yellow
         
         # Try to start WinRM service remotely
-        # Note: This will likely fail if WinRM isn't working, but we try anyway
         $serviceStarted = $false
         $cimSession = $null
         try {
             if ($CompatibilityMode -eq 'Full') {
-                # PowerShell 5.1+ - Use CIM
-                # Note: CIM also requires WinRM, so this will likely fail if WinRM isn't working
-                # But we try it anyway in case the service just needs to be started
+                # PowerShell 5.1+ - Use CIM with WMI fallback
                 try {
                     if ($Credential) {
                         # Create a CIM session with credentials
@@ -332,35 +358,67 @@ $InvokeDiscoveryOnServerScriptBlock = {
                     }
                     
                     $service = Get-CimInstance @cimParams
-                }
-                catch {
-                    Write-Warning "[$ComputerName] CIM connection failed (WinRM likely not available): $($_.Exception.Message)"
-                    # CIM failed, which means WinRM isn't working - skip service start attempt
-                    $service = $null
-                }
-                
-                if ($service) {
-                    if ($service.State -eq 'Running') {
-                        Write-Host "[$ComputerName] WinRM service is already running, retrying connection..." -ForegroundColor Yellow
-                        $serviceStarted = $true
-                    }
-                    else {
-                        # Start the service
-                        $startParams = @{
-                            InputObject = $service
-                            ErrorAction = 'Stop'
-                        }
-                        $result = Invoke-CimMethod @startParams -MethodName StartService
-                        
-                        if ($result.ReturnValue -eq 0) {
-                            Write-Host "[$ComputerName] WinRM service started successfully (ReturnValue: $($result.ReturnValue))" -ForegroundColor Green
-                            # Wait a moment for the service to fully start
-                            Start-Sleep -Seconds 3
+                    
+                    if ($service) {
+                        if ($service.State -eq 'Running') {
+                            Write-Host "[$ComputerName] WinRM service is already running (via CIM check)." -ForegroundColor Green
                             $serviceStarted = $true
                         }
                         else {
-                            Write-Warning "[$ComputerName] Failed to start WinRM service. ReturnValue: $($result.ReturnValue)"
+                            # Start the service
+                            $startParams = @{
+                                InputObject = $service
+                                ErrorAction = 'Stop'
+                            }
+                            $result = Invoke-CimMethod @startParams -MethodName StartService
+                            
+                            if ($result.ReturnValue -eq 0) {
+                                Write-Host "[$ComputerName] WinRM service started successfully via CIM." -ForegroundColor Green
+                                # Wait a moment for the service to fully start
+                                Start-Sleep -Seconds 3
+                                $serviceStarted = $true
+                            }
+                            else {
+                                Write-Warning "[$ComputerName] Failed to start WinRM service via CIM. ReturnValue: $($result.ReturnValue)"
+                            }
                         }
+                    }
+                }
+                catch {
+                    Write-Warning "[$ComputerName] CIM attempt to start WinRM failed: $($_.Exception.Message). Trying WMI fallback..."
+                    try {
+                        $wmiParams = @{
+                            ComputerName = $ComputerName
+                            Class        = 'Win32_Service'
+                            Filter       = "Name='WinRM'"
+                            ErrorAction  = 'Stop'
+                        }
+                        if ($Credential) { $wmiParams['Credential'] = $Credential }
+                        
+                        $service = Get-WmiObject @wmiParams
+                        if ($service) {
+                            if ($service.State -eq 'Running') {
+                                Write-Host "[$ComputerName] WinRM service is already running (via WMI check)." -ForegroundColor Green
+                                $serviceStarted = $true
+                            }
+                            else {
+                                $wmiResult = $service.StartService()
+                                if ($wmiResult.ReturnValue -eq 0) {
+                                    Write-Host "[$ComputerName] WinRM service started successfully via WMI." -ForegroundColor Green
+                                    Start-Sleep -Seconds 3
+                                    $serviceStarted = $true
+                                }
+                                else {
+                                    Write-Warning "[$ComputerName] Failed to start WinRM service via WMI. ReturnValue: $($wmiResult.ReturnValue)"
+                                }
+                            }
+                        }
+                        else {
+                            Write-Warning "[$ComputerName] Unable to locate WinRM service via WMI."
+                        }
+                    }
+                    catch {
+                        Write-Warning "[$ComputerName] WMI fallback to start WinRM also failed: $($_.Exception.Message)"
                     }
                 }
             }
@@ -440,7 +498,7 @@ $InvokeDiscoveryOnServerScriptBlock = {
             }
             catch {
                 $retryError = $_.Exception.Message
-                $errorMsg = "WinRM connection failed after attempting to start service. Initial error: $initialError. Retry error: $retryError"
+                $errorMsg = "WinRM connection failed after attempting to start service. Category: $failureCategory. Initial error: $initialError. Retry error: $retryError"
                 Write-Warning "[$ComputerName] $errorMsg"
                 & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
                 return
@@ -448,7 +506,7 @@ $InvokeDiscoveryOnServerScriptBlock = {
         }
         else {
             # Service couldn't be started, log detailed error and return
-            $errorMsg = "WinRM connection failed. Initial error: $initialError"
+            $errorMsg = "WinRM connection failed. Category: $failureCategory. Initial error: $initialError"
             Write-Warning "[$ComputerName] $errorMsg"
             Write-Warning "[$ComputerName] Troubleshooting tips:"
             Write-Warning "[$ComputerName]   1. Verify WinRM is enabled: Enable-PSRemoting -Force"
@@ -752,8 +810,9 @@ if (-not $script:ErrorLogPath) {
 
 Write-Host "`nStarting discovery on $($servers.Count) server(s)..." -ForegroundColor Cyan
 
-# Create a scriptblock for Write-ErrorLog to pass to parallel execution
+# Create scriptblocks for functions to pass to parallel execution
 $writeErrorLogScriptBlock = ${function:Write-ErrorLog}
+$getWinRmFailureCategoryScriptBlock = ${function:Get-WinRmFailureCategory}
 
 # Full (PS 5.1+) path
 if ($script:CompatibilityMode -eq 'Full' -and $UseParallel) {
@@ -779,9 +838,11 @@ if ($script:CompatibilityMode -eq 'Full' -and $UseParallel) {
                 -CollectorShare $using:CollectorShare `
                 -RemoteOutputRoot $using:RemoteOutputRoot `
                 -WriteErrorLogFunction $using:writeErrorLogScriptBlock `
+                -GetWinRmFailureCategoryFunction $using:getWinRmFailureCategoryScriptBlock `
                 -ConfigFile $using:ConfigFile `
                 -RemoteConfigPath $using:remoteConfigPath `
-                -CompatibilityMode $using:script:CompatibilityMode
+                -CompatibilityMode $using:script:CompatibilityMode `
+                -AttemptWinRmHeal:$using:AttemptWinRmHeal
         } -ThrottleLimit 10
     }
     else {
@@ -797,9 +858,11 @@ if ($script:CompatibilityMode -eq 'Full' -and $UseParallel) {
                     -CollectorShare $CollectorShare `
                     -RemoteOutputRoot $RemoteOutputRoot `
                     -WriteErrorLogFunction $writeErrorLogScriptBlock `
+                    -GetWinRmFailureCategoryFunction $getWinRmFailureCategoryScriptBlock `
                     -ConfigFile $ConfigFile `
                     -RemoteConfigPath $remoteConfigPath `
-                    -CompatibilityMode $script:CompatibilityMode
+                    -CompatibilityMode $script:CompatibilityMode `
+                    -AttemptWinRmHeal:$AttemptWinRmHeal
             }
             catch {
                 # Log any unexpected errors that escape the function
@@ -825,8 +888,10 @@ else {
                 -CollectorShare $CollectorShare `
                 -RemoteOutputRoot $RemoteOutputRoot `
                 -WriteErrorLogFunction $writeErrorLogScriptBlock `
+                -GetWinRmFailureCategoryFunction $getWinRmFailureCategoryScriptBlock `
                 -ConfigFile $ConfigFile `
-                -RemoteConfigPath $remoteConfigPath
+                -RemoteConfigPath $remoteConfigPath `
+                -AttemptWinRmHeal:$AttemptWinRmHeal
         }
         catch {
             # Log any unexpected errors that escape the function
