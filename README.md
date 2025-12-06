@@ -2,6 +2,38 @@
 
 A comprehensive PowerShell script for discovering domain migration readiness by scanning workstations for references to old domain configurations, credentials, certificates, and dependencies.
 
+## Quick Reference
+
+### Basic Discovery
+```powershell
+.\Get-WorkstationDiscovery.ps1 -OldDomainFqdn "olddomain.com" -NewDomainFqdn "newdomain.com"
+```
+
+### Using Configuration File
+```powershell
+.\Get-WorkstationDiscovery.ps1 -ConfigFile ".\migration-config.json"
+```
+
+### Remote Execution (Multiple Servers)
+```powershell
+.\Invoke-MigrationDiscoveryRemotely.ps1 `
+    -ServerListPath ".\servers.txt" `
+    -OldDomainFqdn "olddomain.com" `
+    -NewDomainFqdn "newdomain.com" `
+    -ConfigFile ".\migration-config.json"
+```
+
+### Build Excel Report from JSON Results
+```powershell
+python build_migration_workbook.py -i "Y:\results" -o "."
+```
+
+**Key Files:**
+- `Get-WorkstationDiscovery.ps1` - Main discovery script
+- `Invoke-MigrationDiscoveryRemotely.ps1` - Remote execution launcher
+- `build_migration_workbook.py` - Excel report builder
+- `migration-config.example.json` - Configuration file template
+
 ## Overview
 
 This script performs a deep discovery of Windows workstations to identify all references to an old domain that may need to be updated during a domain migration. It collects data about services, scheduled tasks, applications, printers, ODBC connections, local group memberships, credentials, certificates, firewall rules, DNS configuration, and more.
@@ -58,7 +90,7 @@ The script scans the following areas for old domain references:
 23. **Database Connection Strings** - Parsed connection strings from ODBC, registry, and config files
 24. **App-Specific Discovery** - Config-driven deep scanning of application-specific locations
 25. **Server Summary** - Aggregated file server and print server references
-26. **Security Agents** - CrowdStrike and Qualys agent tenant information
+26. **Security Agents** - CrowdStrike, Qualys, SCCM, and EnCase agent tenant information
 27. **Quest ODMAD** - Quest On Demand Migration for Active Directory configuration
 28. **Auto Admin Logon** - Registry-based auto-logon configuration
 29. **GPO Machine DN** - Group Policy Object machine distinguished name
@@ -110,7 +142,7 @@ The script scans the following areas for old domain references:
 | `EmitStdOut` | Switch | No | `$false` | Emit summary JSON to stdout |
 | `SelfTest` | Switch | No | `$false` | Run lightweight self-test validation mode |
 | `AppDiscoveryConfigPath` | String | No | - | Path to JSON config file for app-specific discovery |
-| `ConfigFile` | String | No | - | Path to JSON configuration file for domain settings and tenant maps |
+| `ConfigFile` | String | No | - | Path to JSON configuration file for domain settings, tenant maps (CrowdStrike, Qualys), and EnCase registry paths |
 
 ### Example: Full Discovery with Central Share
 
@@ -188,7 +220,7 @@ Run discovery with app-specific scanning:
 
 The script supports loading domain settings and tenant maps from a JSON configuration file. This is useful for:
 - Centralizing configuration across multiple workstations
-- Managing CrowdStrike and Qualys tenant mappings
+- Managing CrowdStrike, Qualys, and EnCase tenant mappings
 - Simplifying command-line usage
 
 **Important**: Command-line parameters take precedence over configuration file values. If a parameter is explicitly provided on the command line, the config file value for that parameter is ignored.
@@ -210,7 +242,11 @@ Create a JSON configuration file (`migration-config.json`):
     "ACTIVATION_ID_GUID": "Qualys NewCo",
     "DEFAULT": "OldCo",
     "UNKNOWN": "Unknown"
-  }
+  },
+  "EncaseRegistryPaths": [
+    "Encase_NewDomain",
+    "Encase_OldDomain"
+  ]
 }
 ```
 
@@ -223,6 +259,7 @@ Create a JSON configuration file (`migration-config.json`):
 | `OldDomainNetBIOS` | String | No | Old domain NetBIOS name (only used if not provided as parameter) |
 | `CrowdStrikeTenantMap` | Object | No | Hashtable mapping CU hex values to tenant names |
 | `QualysTenantMap` | Object | No | Hashtable mapping ActivationID GUIDs to tenant names |
+| `EncaseRegistryPaths` | Array | No | Array of registry paths (relative to `HKLM\SOFTWARE\Microsoft\`) to check for EnCase tenant identification |
 
 **Tenant Map Keys**:
 - Custom keys: Your specific CU hex values or ActivationID GUIDs
@@ -254,6 +291,7 @@ Use command-line parameters (config file ignored if all params provided):
 
 - **CrowdStrike CU Values**: Check registry `HKLM\SYSTEM\CurrentControlSet\Services\CSAgent\Sim` value `CU`, or check CrowdStrike Falcon console
 - **Qualys ActivationID**: Check registry `HKLM\SOFTWARE\Qualys` value `ActivationID`, or check Qualys Cloud Platform
+- **EnCase Registry Paths**: Configure registry paths relative to `HKLM\SOFTWARE\Microsoft\` that indicate tenant configuration (e.g., `Encase_NewDomain`, `Encase_OldDomain`)
 
 ## Remote Execution
 
@@ -699,11 +737,38 @@ Object containing:
   - `Printers` - Array of printer names
 
 ### Security Agents
-Array of security agent objects, each containing:
-- `AgentName` - Agent name (CrowdStrike, Qualys)
-- `TenantId` - Tenant ID
-- `TenantName` - Tenant name
-- `HasDomainReference` - Whether tenant information references old domain
+Object containing security agent information for CrowdStrike, Qualys, SCCM, and EnCase:
+
+- **CrowdStrike**: 
+  - `RegPath` - Registry path
+  - `ValueName` - Registry value name
+  - `Kind` - Registry value type
+  - `Raw` - Raw registry value
+  - `String` - CU hex value
+  - `Tenant` - Tenant name (from tenant map)
+  
+- **Qualys**:
+  - `RegPath` - Registry path
+  - `ValueName` - Registry value name
+  - `Kind` - Registry value type
+  - `Raw` - Raw registry value
+  - `String` - ActivationID GUID
+  - `Tenant` - Tenant name (from tenant map)
+  
+- **SCCM**:
+  - `RegPath` - Registry path searched
+  - `Found` - Whether SCCM registry path exists
+  - `DomainReferences` - Array of domain references found
+  - `FoundDomains` - Array of domains found
+  - `Tenant` - Tenant identifier (OldDomain, NewDomain, Unknown, or found domain)
+  - `HasDomainReference` - Whether any domain references were found
+  
+- **EnCase**:
+  - `Installed` - Whether EnCase is installed (based on service detection)
+  - `ServiceName` - EnCase service name if found
+  - `RegPath` - Registry path to tenant key (if found)
+  - `TenantKey` - Registry key name indicating tenant
+  - `Tenant` - Tenant identifier (from registry key)
 
 ### Quest ODMAD Configuration
 Array of Quest configuration objects, each containing:
@@ -919,9 +984,125 @@ The script includes comprehensive error handling:
 - The script does not modify any system configuration, only reads and reports
 - Script files are read for content scanning but not executed
 
+## Excel Report Builder
+
+The `build_migration_workbook.py` script generates a comprehensive Excel workbook from JSON discovery results.
+
+### Report Builder Usage
+
+```powershell
+python build_migration_workbook.py -i "Y:\results" -o "."
+```
+
+**Parameters:**
+- `-i, --input`: Folder containing discovery JSON files (default: `Y:\results`)
+- `-o, --output-dir`: Folder to write the Excel workbook (default: current directory)
+- `-p, --plant-id`: Optional PlantId to use for naming/filtering
+
+### Report Structure
+
+The Excel workbook includes the following sheets:
+
+1. **Summary** - Quick overview with:
+   - `HasOldDomainRefs` - Boolean flag for any old domain references
+   - `PotentialServiceAccounts` - Count of potential service accounts
+   - Security agent status flags:
+     - `CrowdStrike_Tenant` and `CrowdStrike_Issue`
+     - `Qualys_Tenant` and `Qualys_Issue`
+     - `SCCM_Tenant`, `SCCM_HasDomainReference`, and `SCCM_Issue`
+     - `Encase_Installed`, `Encase_Tenant`, and `Encase_Issue`
+   - Count columns for each discovery category
+
+2. **Metadata** - Complete metadata including domain information (OldDomainFqdn, OldDomainNetBIOS, NewDomainFqdn)
+
+3. **System** - System information
+
+4. **ServiceAccountCandidates** - Comprehensive list of all service accounts from all sources (Services, Scheduled Tasks, IIS App Pools, SQL Logins, Local Admins, Local Groups, Credential Manager, AutoAdminLogon)
+
+5. **Services** - Windows services with old domain detection flags
+
+6. **ScheduledTasks** - Scheduled tasks with old domain detection flags
+
+7. **LocalAdministrators** - Local administrators with domain account identification
+
+8. **LocalGroupMembers** - Local group members with domain account identification
+
+9. **MappedDrives** - Mapped network drives
+
+10. **Printers** - Printers with old domain reference detection
+
+11. **OdbcDsn** - ODBC data sources
+
+12. **CredentialManager** - Windows Credential Manager entries
+
+13. **Certificates** - Certificate stores with domain reference detection
+
+14. **FirewallRules** - Windows Firewall rules
+
+15. **Profiles** - User profiles
+
+16. **InstalledApps** - Installed applications
+
+17. **SharedFolders_Shares** - File shares with:
+    - Domain reference detection in Identity field
+    - `HasDomainReference`, `IsOldDomainAccount`, `IsDomainAccount` flags
+    - `NeedsAttention` flag for accounts requiring migration attention
+
+18. **SharedFolders_Errors** - Errors encountered during share enumeration
+
+19. **DnsSuffixSearchList** - DNS suffix search list (simplified to show only suffixes)
+
+20. **DnsAdapters** - Per-adapter DNS configuration
+
+21. **AutoAdminLogon** - Auto-admin logon configuration
+
+22. **EventLogDomainReferences** - Event log entries with domain references
+
+23. **ApplicationConfigFiles** - Application configuration files
+
+24. **SecurityAgents** - Security agent information (CrowdStrike, Qualys, SCCM, EnCase)
+
+25. **IIS** - IIS configuration (raw JSON)
+
+26. **SqlServer** - SQL Server configuration (raw JSON)
+
+### Report Builder Features
+
+- **Domain Column Management**: Domain information (OldDomainFqdn, OldDomainNetBIOS, NewDomainFqdn, Domain) is only shown in the Metadata tab to reduce redundancy. Other tabs only display domain information when it's specific to that line (e.g., `AccountDomain` in ServiceAccountCandidates).
+
+- **Security Agent Quick Reference**: The Summary tab includes quick-reference columns for all security agents (CrowdStrike, Qualys, SCCM, EnCase) with issue flags to quickly identify problems:
+  - CrowdStrike: Flags "Unknown Tenant" issues
+  - Qualys: Flags "Unknown Tenant" issues
+  - SCCM: Flags "Domain Reference Found" issues
+  - EnCase: Flags "Installed but No Tenant" issues
+
+- **Shared Folders Domain Detection**: The SharedFolders_Shares tab automatically detects domain references in the Identity field and flags accounts of interest for migration attention.
+
+- **Simplified DNS Tabs**: 
+  - DnsSummary tab removed (did not contain DNS information)
+  - DnsSuffixSearchList simplified to show only suffix information
+
 ## Version
 
 Current version: **2.0.0**
+
+### Recent Changes (Latest Update)
+
+- **Report Builder Enhancements**:
+  - Added security agent outputs (CrowdStrike, Qualys, SCCM, EnCase) to Summary tab with issue flags
+  - Removed redundant domain columns from all tabs except Metadata
+  - Enhanced SharedFolders_Shares with domain reference detection in Identity field
+  - Removed DnsSummary tab (did not contain DNS information)
+  - Simplified DnsSuffixSearchList to show only suffix information
+  
+- **EnCase Support**:
+  - Added EnCase registry path configuration support in config file
+  - EnCase tenant detection based on registry keys and service presence
+  - EnCase status reporting in Summary tab
+
+- **SCCM Support**:
+  - Enhanced SCCM domain reference detection
+  - SCCM status reporting in Summary tab with domain reference flags
 
 ## Contributing
 
