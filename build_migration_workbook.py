@@ -121,18 +121,37 @@ def add_row(sheet_rows, sheet_name, row_dict):
     sheet_rows[sheet_name].append(row_dict)
 
 
+def parse_account_identity(account_identity):
+    """
+    Parse AccountIdentity object to extract account information.
+    Returns dict with: Name, Domain, Type, IsOldDomain, IsDomainAccount
+    """
+    if not isinstance(account_identity, dict):
+        return {}
+    result = {}
+    result["AccountName"] = account_identity.get("Name") or account_identity.get("Raw")
+    result["AccountDomain"] = account_identity.get("Domain")
+    result["AccountType"] = account_identity.get("Type")
+    result["IsOldDomainAccount"] = account_identity.get("IsOldDomain", False)
+    # Determine if it's a domain account (has domain and not built-in)
+    domain = result.get("AccountDomain", "").strip()
+    account_type = result.get("AccountType", "").lower()
+    result["IsDomainAccount"] = bool(domain and account_type not in ("builtin", "wellknown"))
+    return result
+
+
 def flatten_record(computer_name, record, sheet_rows):
     """
     Flatten a single JSON record into multiple sheet rows.
 
     - Adds rows into sheet_rows[...] for sections:
-      Metadata, System, Profiles, SharedFolders_Shares, SharedFolders_Errors,
-      InstalledApps, Services, ScheduledTasks, LocalGroupMembers,
-      LocalAdministrators, MappedDrives, Printers, OdbcDsn, AutoAdminLogon,
-      CredentialManager, Certificates, FirewallRules, DnsSummary,
-      DnsSuffixSearchList, DnsAdapters, IIS, SqlServer, EventLogDomainReferences,
-      ApplicationConfigFiles, SecurityAgents, DetectionSummary,
-      ServiceAccountCandidates.
+      Summary (first for quick overview), Metadata, System, Profiles,
+      SharedFolders_Shares, SharedFolders_Errors, InstalledApps, Services,
+      ScheduledTasks, LocalGroupMembers, LocalAdministrators, MappedDrives,
+      Printers, OdbcDsn, AutoAdminLogon, CredentialManager, Certificates,
+      FirewallRules, DnsSummary, DnsSuffixSearchList, DnsAdapters, IIS,
+      SqlServer, EventLogDomainReferences, ApplicationConfigFiles,
+      SecurityAgents, ServiceAccountCandidates.
     """
     meta = record.get("Metadata", {}) or {}
     system = record.get("System", {}) or {}
@@ -147,6 +166,117 @@ def flatten_record(computer_name, record, sheet_rows):
         "NewDomainFqdn": meta.get("NewDomainFqdn"),
         "ScriptVersion": meta.get("Version"),
     }
+
+    # --- Detection Summary (create first for quick overview) ---
+    detection = record.get("Detection") or {}
+    detection_flags = detection.get("OldDomain") or {}
+    summary = detection.get("Summary") or {}
+    counts = summary.get("Counts") or {}
+
+    # Count potential service accounts from all sources (for summary)
+    # This is a quick count - detailed extraction happens later in ServiceAccountCandidates
+    def count_non_builtin_accounts(source_list, account_field, account_identity_field=None):
+        """Count non-built-in accounts from a source list."""
+        count = 0
+        if not source_list:
+            return count
+        if isinstance(source_list, dict):
+            source_list = [source_list]
+        if not isinstance(source_list, list):
+            return count
+        
+        for item in source_list:
+            if not isinstance(item, dict):
+                continue
+            account_value = item.get(account_field) or ""
+            account_identity = item.get(account_identity_field) if account_identity_field else None
+            
+            if account_identity and isinstance(account_identity, dict):
+                account_value = account_identity.get("Raw") or account_identity.get("Name") or account_value
+            
+            if not account_value or not isinstance(account_value, str):
+                continue
+            
+            account_lower = account_value.lower().strip()
+            if account_lower and not (
+                account_lower in ("localsystem", "localservice", "networkservice")
+                or account_lower.startswith("nt authority\\")
+                or account_lower.startswith("nt service\\")
+                or account_lower.startswith(".\\")
+            ):
+                count += 1
+        return count
+    
+    # Count from all sources
+    services = record.get("Services") or []
+    tasks = record.get("ScheduledTasks") or []
+    iis = record.get("IIS") or {}
+    sql_server = record.get("SqlServer")
+    local_admins = record.get("LocalAdministrators") or []
+    local_groups = record.get("LocalGroupMembers") or []
+    cred_mgr = record.get("CredentialManager") or []
+    
+    potential_service_account_count = (
+        count_non_builtin_accounts(services, "StartName", "AccountIdentity")
+        + count_non_builtin_accounts(services, "Account", "AccountIdentity")
+        + count_non_builtin_accounts(tasks, "UserId", "AccountIdentity")
+        + count_non_builtin_accounts(iis.get("AppPools") or [], "IdentityUser", "AccountIdentity")
+        + count_non_builtin_accounts(
+            [lg for lg in (local_admins if isinstance(local_admins, list) else [local_admins]) 
+             if isinstance(lg, dict) and lg.get("Type") == "Domain"],
+            "Name"
+        )
+    )
+    
+    # Count SQL Server domain logins
+    if sql_server:
+        sql_instances = sql_server if isinstance(sql_server, list) else [sql_server]
+        for instance in sql_instances:
+            if isinstance(instance, dict):
+                domain_logins = instance.get("DomainLogins") or []
+                for login in domain_logins:
+                    if isinstance(login, dict) and login.get("LoginType") in ("WindowsUser", "WindowsGroup"):
+                        potential_service_account_count += 1
+    
+    # Count local group members (domain accounts)
+    if isinstance(local_groups, dict):
+        local_groups = [local_groups]
+    for group in local_groups:
+        if isinstance(group, dict):
+            members = group.get("Members") or []
+            for member in members:
+                if isinstance(member, dict) and member.get("PrincipalSource") == "ActiveDirectory":
+                    potential_service_account_count += 1
+    
+    # Count credential manager entries (domain accounts)
+    # Use the same logic as extraction to ensure consistency
+    for cred in (cred_mgr if isinstance(cred_mgr, list) else [cred_mgr]):
+        if isinstance(cred, dict):
+            user_name = cred.get("UserName")
+            account_identity = cred.get("AccountIdentity")
+            # Use parse_account_identity to derive IsDomainAccount (same as extraction logic)
+            # This matches the logic in extract_account_info used during extraction
+            if isinstance(account_identity, dict):
+                account_info = parse_account_identity(account_identity)
+                if account_info.get("IsDomainAccount"):
+                    potential_service_account_count += 1
+            elif user_name and isinstance(user_name, str):
+                # Parse account value format: DOMAIN\User indicates domain account
+                user_name = user_name.strip()
+                if "\\" in user_name:
+                    # Has domain prefix, treat as domain account
+                    potential_service_account_count += 1
+
+    row_det = base.copy()
+    row_det["HasOldDomainRefs"] = summary.get("HasOldDomainRefs")
+    row_det["PotentialServiceAccounts"] = potential_service_account_count
+
+    for k, v in counts.items():
+        # Prefix with Count_ to make it obvious in Excel
+        col_name = f"Count_{k}"
+        row_det[col_name] = v
+
+    add_row(sheet_rows, "Summary", row_det)
 
     # --- Metadata (one row per computer) ---
     row_meta = base.copy()
@@ -176,14 +306,63 @@ def flatten_record(computer_name, record, sheet_rows):
                 entry = {"Value": entry}
             row = base.copy()
             row.update(entry)
+            # Add helper columns for sections that might have domain references
+            if section_name in ("MappedDrives", "OdbcDsn", "CredentialManager", 
+                               "Certificates", "LocalAdministrators", "LocalGroupMembers"):
+                # Check if entry has HasDomainReference or IsOldDomain flags
+                if "HasDomainReference" not in row and "HasOldDomainReference" not in row:
+                    # Try to infer from AccountIdentity if present
+                    account_identity = entry.get("AccountIdentity")
+                    if isinstance(account_identity, dict):
+                        row["IsOldDomainAccount"] = account_identity.get("IsOldDomain", False)
+                        row["NeedsAttention"] = row["IsOldDomainAccount"]
             add_row(sheet_rows, section_name, row)
 
-    # --- Simple list sections ---
+    # --- Simple list sections with enhanced processing ---
+    # Services: Add helper columns for old domain detection
+    services_list = record.get("Services") or []
+    if isinstance(services_list, dict):
+        services_list = [services_list]
+    services_run_as_old = set(detection_flags.get("ServicesRunAsOldDomain") or [])
+    services_path_old = set(detection_flags.get("ServicesOldPathRefs") or [])
+    
+    for svc in services_list:
+        if not isinstance(svc, dict):
+            continue
+        row = base.copy()
+        row.update(svc)
+        # Fix: Use State not Status
+        if "Status" in row and "State" not in row:
+            row["State"] = row.pop("Status")
+        # Add helper columns
+        service_name = svc.get("Name") or svc.get("ServiceName")
+        row["HasOldDomainAccount"] = service_name in services_run_as_old
+        row["HasOldDomainPath"] = service_name in services_path_old
+        row["NeedsAttention"] = row["HasOldDomainAccount"] or row["HasOldDomainPath"]
+        add_row(sheet_rows, "Services", row)
+    
+    # ScheduledTasks: Add helper columns
+    tasks_list = record.get("ScheduledTasks") or []
+    if isinstance(tasks_list, dict):
+        tasks_list = [tasks_list]
+    tasks_old_accounts = set(detection_flags.get("ScheduledTasksWithOldAccounts") or [])
+    tasks_old_actions = set(detection_flags.get("ScheduledTasksWithOldActionRefs") or [])
+    
+    for task in tasks_list:
+        if not isinstance(task, dict):
+            continue
+        row = base.copy()
+        row.update(task)
+        task_path = task.get("Path") or task.get("TaskName")
+        row["HasOldDomainAccount"] = task_path in tasks_old_accounts
+        row["HasOldDomainAction"] = task_path in tasks_old_actions
+        row["NeedsAttention"] = row["HasOldDomainAccount"] or row["HasOldDomainAction"]
+        add_row(sheet_rows, "ScheduledTasks", row)
+    
+    # Other simple list sections
     for section in [
         "Profiles",
         "InstalledApps",
-        "Services",
-        "ScheduledTasks",
         "LocalGroupMembers",
         "LocalAdministrators",
         "MappedDrives",
@@ -218,6 +397,8 @@ def flatten_record(computer_name, record, sheet_rows):
 
     # --- Printers: can be dict or list ---
     printers = record.get("Printers")
+    printers_to_old = set(detection_flags.get("PrintersToOldDomain") or [])
+    
     if printers:
         if isinstance(printers, list):
             for prn in printers:
@@ -226,10 +407,16 @@ def flatten_record(computer_name, record, sheet_rows):
                     row.update(prn)
                 else:
                     row["Printer"] = prn
+                printer_name = row.get("Name")
+                row["HasOldDomainReference"] = printer_name in printers_to_old
+                row["NeedsAttention"] = row["HasOldDomainReference"]
                 add_row(sheet_rows, "Printers", row)
         elif isinstance(printers, dict):
             row = base.copy()
             row.update(printers)
+            printer_name = row.get("Name")
+            row["HasOldDomainReference"] = printer_name in printers_to_old
+            row["NeedsAttention"] = row["HasOldDomainReference"]
             add_row(sheet_rows, "Printers", row)
 
     # --- AutoAdminLogon: single object ---
@@ -309,63 +496,333 @@ def flatten_record(computer_name, record, sheet_rows):
                 row[agent_name] = agent_obj
         add_row(sheet_rows, "SecurityAgents", row)
 
-    # --- Service Account Candidates & Detection Summary ---
-    # We compute candidate service accounts by inspecting Services list.
-    potential_service_account_count = 0
-    services = record.get("Services") or []
-    if isinstance(services, dict):
-        services = [services]
-
-    for svc in services:
-        if not isinstance(svc, dict):
-            continue
-        start_name = svc.get("StartName") or svc.get("StartNameRaw") or ""
-        if not isinstance(start_name, str):
-            continue
-        s = start_name.strip()
-        if not s:
-            continue
-
-        lower = s.lower()
-        # Filter out the usual built-ins
-        is_builtin = (
+    # --- Service Account Candidates ---
+    # Comprehensive extraction of ALL service accounts and domain accounts from all sources
+    # This provides a unified view of all accounts that may need migration attention
+    # Sources: Services, Scheduled Tasks, IIS App Pools, SQL Logins, Local Admins,
+    #         Local Group Members, Credential Manager, AutoAdminLogon
+    
+    def extract_account_info(account_value, account_identity=None, old_domain_fqdn=None, old_domain_netbios=None):
+        """Extract account information from value and/or AccountIdentity object."""
+        account_info = {}
+        
+        # Start with AccountIdentity if available (most reliable)
+        if isinstance(account_identity, dict):
+            account_info = parse_account_identity(account_identity)
+            account_value = account_info.get("AccountName") or account_value or ""
+        elif account_value:
+            # Parse account value (format: DOMAIN\User or just User)
+            if isinstance(account_value, str):
+                account_value = account_value.strip()
+                if "\\" in account_value:
+                    parts = account_value.split("\\", 1)
+                    if len(parts) == 2:
+                        account_info["AccountDomain"] = parts[0]
+                        account_info["AccountName"] = parts[1]
+                        account_info["IsDomainAccount"] = True
+                        # Check if it's old domain
+                        if old_domain_fqdn or old_domain_netbios:
+                            domain_lower = parts[0].lower()
+                            old_fqdn_lower = (old_domain_fqdn or "").lower()
+                            old_netbios_lower = (old_domain_netbios or "").lower()
+                            account_info["IsOldDomainAccount"] = (
+                                domain_lower == old_fqdn_lower
+                                or domain_lower == old_netbios_lower
+                            )
+                else:
+                    account_info["AccountName"] = account_value
+                    account_info["IsDomainAccount"] = False
+                    account_info["IsOldDomainAccount"] = False
+        
+        return account_info, account_value
+    
+    def is_builtin_account(account_value):
+        """Check if account is a built-in Windows account."""
+        if not isinstance(account_value, str):
+            return False
+        lower = account_value.lower()
+        return (
             lower in ("localsystem", "localservice", "networkservice")
             or lower.startswith("nt authority\\")
             or lower.startswith("nt service\\")
+            or lower.startswith(".\\")
         )
-        if is_builtin:
-            continue
-
-        # At this point, it's likely a domain/local service account we care about
-        potential_service_account_count += 1
+    
+    def add_service_account_row(source_type, account_value, account_identity, context_info, 
+                                needs_attention_flag=False):
+        """Add a service account candidate row."""
+        if not account_value and not account_identity:
+            return
+        
+        # Skip built-in accounts
+        if account_value and is_builtin_account(account_value):
+            return
+        
+        old_domain_fqdn = base.get("OldDomainFqdn", "")
+        old_domain_netbios = base.get("OldDomainNetBIOS", "")
+        
+        account_info, parsed_account = extract_account_info(
+            account_value, account_identity, old_domain_fqdn, old_domain_netbios
+        )
+        
+        if not parsed_account and not account_info.get("AccountName"):
+            return
+        
         row = base.copy()
-        row["ServiceName"] = svc.get("Name") or svc.get("ServiceName")
-        row["DisplayName"] = svc.get("DisplayName")
-        row["StartName"] = s
-        row["Status"] = svc.get("Status")
-        row["StartMode"] = svc.get("StartMode")
-        row["PathName"] = (
-            svc.get("Path")
-            or svc.get("BinaryPathName")
-            or svc.get("ImagePath")
-        )
+        row["SourceType"] = source_type
+        row.update(context_info)
+        row.update(account_info)
+        row["AccountValue"] = parsed_account  # Original account value
+        row["NeedsAttention"] = needs_attention_flag or account_info.get("IsOldDomainAccount", False)
+        
         add_row(sheet_rows, "ServiceAccountCandidates", row)
-
-    # Detection Summary
-    detection = record.get("Detection") or {}
-    summary = detection.get("Summary") or {}
-    counts = summary.get("Counts") or {}
-
-    row_det = base.copy()
-    row_det["HasOldDomainRefs"] = summary.get("HasOldDomainRefs")
-    row_det["PotentialServiceAccounts"] = potential_service_account_count
-
-    for k, v in counts.items():
-        # Prefix with Count_ to make it obvious in Excel
-        col_name = f"Count_{k}"
-        row_det[col_name] = v
-
-    add_row(sheet_rows, "Summary", row_det)
+    
+    # Get detection flags for flagging
+    services_run_as_old_domain = set(detection_flags.get("ServicesRunAsOldDomain") or [])
+    services_old_path_refs = set(detection_flags.get("ServicesOldPathRefs") or [])
+    tasks_old_accounts = set(detection_flags.get("ScheduledTasksWithOldAccounts") or [])
+    iis_apppools_old = set(detection_flags.get("IISAppPoolsOldDomain") or [])
+    sql_old_domain = set(detection_flags.get("SqlServerOldDomain") or [])
+    local_admins_old = set(detection_flags.get("LocalAdministratorsOldDomain") or [])
+    local_groups_old = set(detection_flags.get("LocalGroupsOldDomainMembers") or [])
+    cred_mgr_old = set(detection_flags.get("CredentialManagerOldDomain") or [])
+    
+    # 1. Windows Services
+    services = record.get("Services") or []
+    if isinstance(services, dict):
+        services = [services]
+    for svc in services:
+        if not isinstance(svc, dict):
+            continue
+        service_name = svc.get("Name") or svc.get("ServiceName")
+        start_name = svc.get("StartName") or svc.get("StartNameRaw") or svc.get("Account") or ""
+        account_identity = svc.get("AccountIdentity")
+        
+        if start_name or account_identity:
+            needs_attention = (
+                service_name in services_run_as_old_domain
+                or service_name in services_old_path_refs
+            )
+            add_service_account_row(
+                "Service",
+                start_name,
+                account_identity,
+                {
+                    "ServiceName": service_name,
+                    "DisplayName": svc.get("DisplayName"),
+                    "State": svc.get("State") or svc.get("Status"),
+                    "StartMode": svc.get("StartMode"),
+                    "PathName": svc.get("PathName") or svc.get("Path") or svc.get("BinaryPathName"),
+                },
+                needs_attention
+            )
+    
+    # 2. Scheduled Tasks
+    tasks = record.get("ScheduledTasks") or []
+    if isinstance(tasks, dict):
+        tasks = [tasks]
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        task_path = task.get("Path") or task.get("TaskName")
+        user_id = task.get("UserId") or task.get("Principal")
+        account_identity = task.get("AccountIdentity")
+        
+        if user_id or account_identity:
+            needs_attention = task_path in tasks_old_accounts
+            add_service_account_row(
+                "ScheduledTask",
+                user_id,
+                account_identity,
+                {
+                    "TaskPath": task_path,
+                    "TaskEnabled": task.get("Enabled"),
+                    "LogonType": task.get("LogonType"),
+                },
+                needs_attention
+            )
+    
+    # 3. IIS Application Pools
+    iis = record.get("IIS")
+    if iis and isinstance(iis, dict):
+        app_pools = iis.get("AppPools") or []
+        # Handle both list and dict formats (consistent with count logic)
+        if isinstance(app_pools, dict):
+            app_pools = [app_pools]
+        if isinstance(app_pools, list):
+            for pool in app_pools:
+                if not isinstance(pool, dict):
+                    continue
+                pool_name = pool.get("Name")
+                identity_type = pool.get("Identity") or pool.get("IdentityType")
+                identity_user = pool.get("IdentityUser")
+                account_identity = pool.get("AccountIdentity")
+                
+                # Only include custom identities (not ApplicationPoolIdentity, NetworkService, etc.)
+                if identity_type and identity_type.lower() not in ("applicationpoolidentity", "networkservice", "localservice"):
+                    if identity_user or account_identity:
+                        needs_attention = pool_name in iis_apppools_old if pool_name else False
+                        add_service_account_row(
+                            "IISAppPool",
+                            identity_user,
+                            account_identity,
+                            {
+                                "AppPoolName": pool_name,
+                                "IdentityType": identity_type,
+                                "AppPoolState": pool.get("State"),
+                            },
+                            needs_attention
+                        )
+    
+    # 4. SQL Server Domain Logins
+    sql_server = record.get("SqlServer")
+    if sql_server:
+        if isinstance(sql_server, list):
+            sql_instances = sql_server
+        elif isinstance(sql_server, dict):
+            sql_instances = [sql_server]
+        else:
+            sql_instances = []
+        
+        for instance in sql_instances:
+            if not isinstance(instance, dict):
+                continue
+            instance_name = instance.get("InstanceName")
+            domain_logins = instance.get("DomainLogins") or []
+            
+            for login in domain_logins:
+                if not isinstance(login, dict):
+                    continue
+                login_name = login.get("LoginName")
+                login_type = login.get("LoginType")
+                account_identity = login.get("AccountIdentity")
+                
+                # Only include Windows logins (not SQL logins)
+                if login_type in ("WindowsUser", "WindowsGroup"):
+                    if login_name or account_identity:
+                        # Check if this login is flagged
+                        login_key = f"{instance_name}: Login {login_name}" if instance_name else login_name
+                        needs_attention = login_key in sql_old_domain
+                        add_service_account_row(
+                            "SqlServerLogin",
+                            login_name,
+                            account_identity,
+                            {
+                                "InstanceName": instance_name,
+                                "ServiceName": instance.get("ServiceName"),
+                                "LoginType": login_type,
+                            },
+                            needs_attention
+                        )
+    
+    # 5. Local Administrators (domain accounts only)
+    local_admins = record.get("LocalAdministrators") or []
+    if isinstance(local_admins, dict):
+        local_admins = [local_admins]
+    for admin in local_admins:
+        if not isinstance(admin, dict):
+            continue
+        admin_name = admin.get("Name")
+        admin_type = admin.get("Type")
+        is_old_domain = admin.get("IsOldDomain", False)
+        
+        # Only include domain accounts
+        if admin_type == "Domain" and admin_name:
+            needs_attention = is_old_domain or admin_name in local_admins_old
+            add_service_account_row(
+                "LocalAdministrator",
+                admin_name,
+                None,  # Local admins may not have AccountIdentity
+                {
+                    "AdminSid": admin.get("Sid"),
+                    "Source": admin.get("Source"),
+                },
+                needs_attention
+            )
+    
+    # 6. Local Group Members (domain accounts only)
+    local_groups = record.get("LocalGroupMembers") or []
+    if isinstance(local_groups, dict):
+        local_groups = [local_groups]
+    for group in local_groups:
+        if not isinstance(group, dict):
+            continue
+        group_name = group.get("GroupName")
+        members = group.get("Members") or []
+        
+        for member in members:
+            if not isinstance(member, dict):
+                continue
+            account_identity = member.get("AccountIdentity")
+            member_name = member.get("Name")
+            principal_source = member.get("PrincipalSource", "")
+            
+            # Only include domain accounts (ActiveDirectory source)
+            if principal_source == "ActiveDirectory" and (member_name or account_identity):
+                needs_attention = group_name in local_groups_old if group_name else False
+                add_service_account_row(
+                    "LocalGroupMember",
+                    member_name,
+                    account_identity,
+                    {
+                        "GroupName": group_name,
+                        "MemberSid": member.get("SID"),
+                        "ObjectClass": member.get("ObjectClass"),
+                    },
+                    needs_attention
+                )
+    
+    # 7. Credential Manager (domain accounts only)
+    cred_mgr = record.get("CredentialManager") or []
+    if isinstance(cred_mgr, dict):
+        cred_mgr = [cred_mgr]
+    for cred in cred_mgr:
+        if not isinstance(cred, dict):
+            continue
+        user_name = cred.get("UserName")
+        account_identity = cred.get("AccountIdentity")
+        target = cred.get("Target")
+        
+        if user_name or account_identity:
+            # Only include if it's a domain account
+            account_info, _ = extract_account_info(
+                user_name, account_identity, base.get("OldDomainFqdn"), base.get("OldDomainNetBIOS")
+            )
+            if account_info.get("IsDomainAccount"):
+                needs_attention = target in cred_mgr_old if target else False
+                add_service_account_row(
+                    "CredentialManager",
+                    user_name,
+                    account_identity,
+                    {
+                        "Target": target,
+                        "Profile": cred.get("Profile"),
+                        "CredentialType": cred.get("Type"),
+                        "Source": cred.get("Source"),
+                    },
+                    needs_attention
+                )
+    
+    # 8. AutoAdminLogon (system logon account)
+    auto_logon = record.get("AutoAdminLogon")
+    if auto_logon and isinstance(auto_logon, dict):
+        if auto_logon.get("Enabled"):
+            user_name = auto_logon.get("DefaultUserName")
+            domain_name = auto_logon.get("DefaultDomainName")
+            
+            if user_name:
+                # Combine domain and username if domain is present
+                full_account = f"{domain_name}\\{user_name}" if domain_name else user_name
+                needs_attention = auto_logon.get("HasDomainReference", False)
+                add_service_account_row(
+                    "AutoAdminLogon",
+                    full_account,
+                    None,
+                    {
+                        "ForceAutoLogon": auto_logon.get("ForceAutoLogon"),
+                    },
+                    needs_attention
+                )
 
 
 def write_excel(sheet_rows, output_path):
@@ -373,16 +830,81 @@ def write_excel(sheet_rows, output_path):
     Write sheet_rows (dict of sheet_name -> list[dict]) to an XLSX file.
     """
     # Ensure output directory exists
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    output_dir = os.path.dirname(output_path)
+    if output_dir:  # Only create if there's actually a directory path
+        os.makedirs(output_dir, exist_ok=True)
+
+    # Define sheet order - Summary first for quick overview
+    preferred_order = [
+        "Summary",
+        "Metadata",
+        "System",
+        "ServiceAccountCandidates",
+        "Services",
+        "ScheduledTasks",
+        "LocalAdministrators",
+        "LocalGroupMembers",
+        "MappedDrives",
+        "Printers",
+        "OdbcDsn",
+        "CredentialManager",
+        "Certificates",
+        "FirewallRules",
+        "Profiles",
+        "InstalledApps",
+        "SharedFolders_Shares",
+        "SharedFolders_Errors",
+        "DnsSummary",
+        "DnsSuffixSearchList",
+        "DnsAdapters",
+        "AutoAdminLogon",
+        "EventLogDomainReferences",
+        "ApplicationConfigFiles",
+        "SecurityAgents",
+        "IIS",
+        "SqlServer",
+    ]
+
+    # Get all sheet names, prioritizing preferred order
+    all_sheets = set(sheet_rows.keys())
+    ordered_sheets = [s for s in preferred_order if s in all_sheets]
+    remaining_sheets = sorted(all_sheets - set(preferred_order))
+    final_sheet_order = ordered_sheets + remaining_sheets
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        for sheet_name, rows in sheet_rows.items():
+        for sheet_name in final_sheet_order:
+            rows = sheet_rows.get(sheet_name, [])
             if not rows:
                 continue
             df = pd.DataFrame(rows)
 
             # Core columns first if they exist
             core_cols = ["ComputerName", "PlantId", "Domain", "CollectedAt"]
+            # For Summary sheet, put key metrics first
+            if sheet_name == "Summary":
+                summary_cols = ["HasOldDomainRefs", "PotentialServiceAccounts"]
+                core_cols = core_cols + [c for c in summary_cols if c in df.columns]
+            # For ServiceAccountCandidates, put actionable columns first
+            elif sheet_name == "ServiceAccountCandidates":
+                action_cols = [
+                    "SourceType",
+                    "NeedsAttention",
+                    "IsOldDomainAccount",
+                    "IsDomainAccount",
+                    "AccountName",
+                    "AccountDomain",
+                    "AccountValue",
+                    # Context columns vary by source type
+                    "ServiceName",
+                    "DisplayName",
+                    "TaskPath",
+                    "AppPoolName",
+                    "InstanceName",
+                    "GroupName",
+                    "Target",
+                ]
+                core_cols = core_cols + [c for c in action_cols if c in df.columns]
+
             cols = list(df.columns)
             ordered = []
             for c in core_cols:
