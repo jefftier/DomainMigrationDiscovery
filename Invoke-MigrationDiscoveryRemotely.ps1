@@ -418,7 +418,56 @@ $InvokeDiscoveryOnServerScriptBlock = {
                         }
                     }
                     catch {
-                        Write-Warning "[$ComputerName] WMI fallback to start WinRM also failed: $($_.Exception.Message)"
+                        Write-Warning "[$ComputerName] WMI fallback to start WinRM also failed: $($_.Exception.Message). Trying sc.exe fallback..."
+                        # sc.exe uses SCM (Service Control Manager) via RPC/SMB, which works even when WinRM is stopped
+                        try {
+                            if ($Credential) {
+                                # Use Start-Process with credentials to run sc.exe as the specified user
+                                $processParams = @{
+                                    FilePath         = "sc.exe"
+                                    ArgumentList     = @("\\$ComputerName", "start", "winrm")
+                                    Credential       = $Credential
+                                    NoNewWindow      = $true
+                                    Wait             = $true
+                                    PassThru         = $true
+                                    ErrorAction      = 'Stop'
+                                }
+                                $process = Start-Process @processParams
+                                
+                                if ($process.ExitCode -eq 0) {
+                                    Write-Host "[$ComputerName] WinRM service started successfully via sc.exe (Service Control Manager)." -ForegroundColor Green
+                                    Start-Sleep -Seconds 3
+                                    $serviceStarted = $true
+                                }
+                                else {
+                                    Write-Warning "[$ComputerName] sc.exe failed to start WinRM service. ExitCode: $($process.ExitCode)"
+                                }
+                            }
+                            else {
+                                # No credentials - run sc.exe directly with current user context
+                                $processParams = @{
+                                    FilePath         = "sc.exe"
+                                    ArgumentList     = @("\\$ComputerName", "start", "winrm")
+                                    NoNewWindow      = $true
+                                    Wait             = $true
+                                    PassThru         = $true
+                                    ErrorAction      = 'Stop'
+                                }
+                                $process = Start-Process @processParams
+                                
+                                if ($process.ExitCode -eq 0) {
+                                    Write-Host "[$ComputerName] WinRM service started successfully via sc.exe (Service Control Manager)." -ForegroundColor Green
+                                    Start-Sleep -Seconds 3
+                                    $serviceStarted = $true
+                                }
+                                else {
+                                    Write-Warning "[$ComputerName] sc.exe failed to start WinRM service. ExitCode: $($process.ExitCode)"
+                                }
+                            }
+                        }
+                        catch {
+                            Write-Warning "[$ComputerName] sc.exe fallback to start WinRM also failed: $($_.Exception.Message)"
+                        }
                     }
                 }
             }
@@ -434,31 +483,228 @@ $InvokeDiscoveryOnServerScriptBlock = {
                     $wmiParams['Credential'] = $Credential
                 }
                 
-                $service = Get-WmiObject @wmiParams
-                if ($service) {
-                    if ($service.State -eq 'Running') {
-                        Write-Host "[$ComputerName] WinRM service is already running, retrying connection..." -ForegroundColor Yellow
-                        $serviceStarted = $true
+                try {
+                    $service = Get-WmiObject @wmiParams
+                    if ($service) {
+                        if ($service.State -eq 'Running') {
+                            Write-Host "[$ComputerName] WinRM service is already running, retrying connection..." -ForegroundColor Yellow
+                            $serviceStarted = $true
+                        }
+                        else {
+                            # Start the service
+                            $result = $service.StartService()
+                            
+                            if ($result.ReturnValue -eq 0) {
+                                Write-Host "[$ComputerName] WinRM service started successfully (ReturnValue: $($result.ReturnValue))" -ForegroundColor Green
+                                # Wait a moment for the service to fully start
+                                Start-Sleep -Seconds 3
+                                $serviceStarted = $true
+                            }
+                            else {
+                                Write-Warning "[$ComputerName] Failed to start WinRM service. ReturnValue: $($result.ReturnValue). Trying sc.exe fallback..."
+                                # Try sc.exe as fallback
+                                try {
+                                    if ($Credential) {
+                                        $processParams = @{
+                                            FilePath         = "sc.exe"
+                                            ArgumentList     = @("\\$ComputerName", "start", "winrm")
+                                            Credential       = $Credential
+                                            NoNewWindow      = $true
+                                            Wait             = $true
+                                            PassThru         = $true
+                                            ErrorAction      = 'Stop'
+                                        }
+                                        $process = Start-Process @processParams
+                                        
+                                        if ($process.ExitCode -eq 0) {
+                                            Write-Host "[$ComputerName] WinRM service started successfully via sc.exe (Service Control Manager)." -ForegroundColor Green
+                                            Start-Sleep -Seconds 3
+                                            $serviceStarted = $true
+                                        }
+                                        else {
+                                            Write-Warning "[$ComputerName] sc.exe failed to start WinRM service. ExitCode: $($process.ExitCode)"
+                                        }
+                                    }
+                                    else {
+                                        $processParams = @{
+                                            FilePath         = "sc.exe"
+                                            ArgumentList     = @("\\$ComputerName", "start", "winrm")
+                                            NoNewWindow      = $true
+                                            Wait             = $true
+                                            PassThru         = $true
+                                            ErrorAction      = 'Stop'
+                                        }
+                                        $process = Start-Process @processParams
+                                        
+                                        if ($process.ExitCode -eq 0) {
+                                            Write-Host "[$ComputerName] WinRM service started successfully via sc.exe (Service Control Manager)." -ForegroundColor Green
+                                            Start-Sleep -Seconds 3
+                                            $serviceStarted = $true
+                                        }
+                                        else {
+                                            Write-Warning "[$ComputerName] sc.exe failed to start WinRM service. ExitCode: $($process.ExitCode)"
+                                        }
+                                    }
+                                }
+                                catch {
+                                    Write-Warning "[$ComputerName] sc.exe fallback to start WinRM failed: $($_.Exception.Message)"
+                                }
+                            }
+                        }
                     }
-                    else {
-                        # Start the service
-                        $result = $service.StartService()
+                }
+                catch {
+                    Write-Warning "[$ComputerName] WMI attempt to start WinRM failed: $($_.Exception.Message). Trying sc.exe fallback..."
+                    # Try sc.exe as fallback
+                    try {
+                        if ($Credential) {
+                            $processParams = @{
+                                FilePath         = "sc.exe"
+                                ArgumentList     = @("\\$ComputerName", "start", "winrm")
+                                Credential       = $Credential
+                                NoNewWindow      = $true
+                                Wait             = $true
+                                PassThru         = $true
+                                ErrorAction      = 'Stop'
+                            }
+                            $process = Start-Process @processParams
+                            
+                            if ($process.ExitCode -eq 0) {
+                                Write-Host "[$ComputerName] WinRM service started successfully via sc.exe (Service Control Manager)." -ForegroundColor Green
+                                Start-Sleep -Seconds 3
+                                $serviceStarted = $true
+                            }
+                            else {
+                                Write-Warning "[$ComputerName] sc.exe failed to start WinRM service. ExitCode: $($process.ExitCode)"
+                            }
+                        }
+                        else {
+                            $processParams = @{
+                                FilePath         = "sc.exe"
+                                ArgumentList     = @("\\$ComputerName", "start", "winrm")
+                                NoNewWindow      = $true
+                                Wait             = $true
+                                PassThru         = $true
+                                ErrorAction      = 'Stop'
+                            }
+                            $process = Start-Process @processParams
+                            
+                            if ($process.ExitCode -eq 0) {
+                                Write-Host "[$ComputerName] WinRM service started successfully via sc.exe (Service Control Manager)." -ForegroundColor Green
+                                Start-Sleep -Seconds 3
+                                $serviceStarted = $true
+                            }
+                            else {
+                                Write-Warning "[$ComputerName] sc.exe failed to start WinRM service. ExitCode: $($process.ExitCode)"
+                            }
+                        }
+                    }
+                    catch {
+                        Write-Warning "[$ComputerName] sc.exe fallback to start WinRM also failed: $($_.Exception.Message)"
+                    }
+                }
+            }
+            
+            # If CIM/WMI succeeded but we haven't marked service as started, try sc.exe as final fallback
+            if (-not $serviceStarted) {
+                Write-Host "[$ComputerName] CIM/WMI methods did not start service. Trying sc.exe (Service Control Manager) as final fallback..." -ForegroundColor Yellow
+                try {
+                    if ($Credential) {
+                        $processParams = @{
+                            FilePath         = "sc.exe"
+                            ArgumentList     = @("\\$ComputerName", "start", "winrm")
+                            Credential       = $Credential
+                            NoNewWindow      = $true
+                            Wait             = $true
+                            PassThru         = $true
+                            ErrorAction      = 'Stop'
+                        }
+                        $process = Start-Process @processParams
                         
-                        if ($result.ReturnValue -eq 0) {
-                            Write-Host "[$ComputerName] WinRM service started successfully (ReturnValue: $($result.ReturnValue))" -ForegroundColor Green
-                            # Wait a moment for the service to fully start
+                        if ($process.ExitCode -eq 0) {
+                            Write-Host "[$ComputerName] WinRM service started successfully via sc.exe (Service Control Manager)." -ForegroundColor Green
                             Start-Sleep -Seconds 3
                             $serviceStarted = $true
                         }
                         else {
-                            Write-Warning "[$ComputerName] Failed to start WinRM service. ReturnValue: $($result.ReturnValue)"
+                            Write-Warning "[$ComputerName] sc.exe failed to start WinRM service. ExitCode: $($process.ExitCode)"
                         }
                     }
+                    else {
+                        $processParams = @{
+                            FilePath         = "sc.exe"
+                            ArgumentList     = @("\\$ComputerName", "start", "winrm")
+                            NoNewWindow      = $true
+                            Wait             = $true
+                            PassThru         = $true
+                            ErrorAction      = 'Stop'
+                        }
+                        $process = Start-Process @processParams
+                        
+                        if ($process.ExitCode -eq 0) {
+                            Write-Host "[$ComputerName] WinRM service started successfully via sc.exe (Service Control Manager)." -ForegroundColor Green
+                            Start-Sleep -Seconds 3
+                            $serviceStarted = $true
+                        }
+                        else {
+                            Write-Warning "[$ComputerName] sc.exe failed to start WinRM service. ExitCode: $($process.ExitCode)"
+                        }
+                    }
+                }
+                catch {
+                    Write-Warning "[$ComputerName] Final sc.exe fallback to start WinRM failed: $($_.Exception.Message)"
                 }
             }
         }
         catch {
-            Write-Warning "[$ComputerName] Failed to start WinRM service remotely: $($_.Exception.Message)"
+            Write-Warning "[$ComputerName] Failed to start WinRM service remotely: $($_.Exception.Message). Trying sc.exe as final fallback..."
+            # Last resort: try sc.exe even if all other methods failed
+            try {
+                if ($Credential) {
+                    $processParams = @{
+                        FilePath         = "sc.exe"
+                        ArgumentList     = @("\\$ComputerName", "start", "winrm")
+                        Credential       = $Credential
+                        NoNewWindow      = $true
+                        Wait             = $true
+                        PassThru         = $true
+                        ErrorAction      = 'Stop'
+                    }
+                    $process = Start-Process @processParams
+                    
+                    if ($process.ExitCode -eq 0) {
+                        Write-Host "[$ComputerName] WinRM service started successfully via sc.exe (Service Control Manager)." -ForegroundColor Green
+                        Start-Sleep -Seconds 3
+                        $serviceStarted = $true
+                    }
+                    else {
+                        Write-Warning "[$ComputerName] sc.exe failed to start WinRM service. ExitCode: $($process.ExitCode)"
+                    }
+                }
+                else {
+                    $processParams = @{
+                        FilePath         = "sc.exe"
+                        ArgumentList     = @("\\$ComputerName", "start", "winrm")
+                        NoNewWindow      = $true
+                        Wait             = $true
+                        PassThru         = $true
+                        ErrorAction      = 'Stop'
+                    }
+                    $process = Start-Process @processParams
+                    
+                    if ($process.ExitCode -eq 0) {
+                        Write-Host "[$ComputerName] WinRM service started successfully via sc.exe (Service Control Manager)." -ForegroundColor Green
+                        Start-Sleep -Seconds 3
+                        $serviceStarted = $true
+                    }
+                    else {
+                        Write-Warning "[$ComputerName] sc.exe failed to start WinRM service. ExitCode: $($process.ExitCode)"
+                    }
+                }
+            }
+            catch {
+                Write-Warning "[$ComputerName] Final sc.exe fallback to start WinRM failed: $($_.Exception.Message)"
+            }
         }
         finally {
             # Clean up CIM session if created
