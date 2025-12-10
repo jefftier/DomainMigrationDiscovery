@@ -989,12 +989,7 @@ if (`$null -eq `$QualysTenantMap) {
 }
 
 # Execute security check
-Get-SecurityAgentsTenantInfo `
-    -OldDomainFqdn `$OldDomainFqdn `
-    -NewDomainFqdn `$NewDomainFqdn `
-    -EncaseRegistryPaths `$EncaseRegistryPaths `
-    -CrowdStrikeTenantMap `$CrowdStrikeTenantMap `
-    -QualysTenantMap `$QualysTenantMap
+Get-SecurityAgentsTenantInfo -OldDomainFqdn `$OldDomainFqdn -NewDomainFqdn `$NewDomainFqdn -EncaseRegistryPaths `$EncaseRegistryPaths -CrowdStrikeTenantMap `$CrowdStrikeTenantMap -QualysTenantMap `$QualysTenantMap
 "@)
 
 # Execute remote security check
