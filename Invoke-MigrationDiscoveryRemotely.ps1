@@ -328,14 +328,50 @@ $InvokeDiscoveryOnServerScriptBlock = {
         Write-Host "[$ComputerName] Attempting to start WinRM service and retry connection..." -ForegroundColor Yellow
         
         # Try to start WinRM service remotely
-        # We'll use CIM/WMI with DCOM protocol (RPC) which works without WinRM and supports credentials
+        # sc.exe is the most reliable method - it uses RPC/SMB (Service Control Manager) and doesn't require WinRM
+        # sc.exe uses the current user's security context automatically
         $serviceStarted = $false
         $cimSession = $null
         
+        # Method 1: Try sc.exe FIRST (most reliable - uses RPC/SMB, doesn't require WinRM)
+        # sc.exe uses the current PowerShell session's user context for authentication
+        Write-Host "[$ComputerName] Method 1: Attempting to start WinRM service via sc.exe (Service Control Manager via RPC/SMB)..." -ForegroundColor Cyan
         try {
-            if ($CompatibilityMode -eq 'Full') {
-                # PowerShell 5.1+ - Use CIM with DCOM protocol (doesn't require WinRM), then WMI fallback
-                Write-Host "[$ComputerName] Method 1: Attempting to start WinRM service via CIM with DCOM protocol (RPC)..." -ForegroundColor Cyan
+            # sc.exe uses the current PowerShell session's user security context automatically
+            # It communicates via RPC/SMB (ports 135, 445) to the remote Service Control Manager
+            # Note: sc.exe doesn't accept credentials as command-line parameters
+            # If the script is run with a user account that has rights, sc.exe will use those credentials
+            # Format: sc.exe \\ComputerName start ServiceName
+            $processParams = @{
+                FilePath         = "sc.exe"
+                ArgumentList     = @("\\$ComputerName", "start", "winrm")
+                NoNewWindow      = $true
+                Wait             = $true
+                PassThru         = $true
+                ErrorAction      = 'Stop'
+            }
+            
+            $process = Start-Process @processParams
+            
+            if ($process.ExitCode -eq 0) {
+                Write-Host "[$ComputerName] SUCCESS: WinRM service started via sc.exe (Service Control Manager)." -ForegroundColor Green
+                Start-Sleep -Seconds 3
+                $serviceStarted = $true
+            }
+            else {
+                Write-Warning "[$ComputerName] sc.exe method failed. ExitCode: $($process.ExitCode). Trying CIM/WMI methods..."
+            }
+        }
+        catch {
+            Write-Warning "[$ComputerName] sc.exe method failed with exception: $($_.Exception.Message). Trying CIM/WMI methods..."
+        }
+        
+        # Method 2 & 3: Fallback to CIM/WMI if sc.exe didn't work
+        if (-not $serviceStarted) {
+            try {
+                if ($CompatibilityMode -eq 'Full') {
+                    # PowerShell 5.1+ - Use CIM with DCOM protocol (doesn't require WinRM), then WMI fallback
+                    Write-Host "[$ComputerName] Method 2: Attempting to start WinRM service via CIM with DCOM protocol (RPC)..." -ForegroundColor Cyan
                 try {
                     # Use DCOM protocol instead of Wsman - DCOM uses RPC and doesn't require WinRM
                     $sessionOption = New-CimSessionOption -Protocol DCOM
@@ -396,7 +432,7 @@ $InvokeDiscoveryOnServerScriptBlock = {
                 }
                 catch {
                     Write-Warning "[$ComputerName] CIM DCOM method failed: $($_.Exception.Message). Trying WMI fallback..."
-                    Write-Host "[$ComputerName] Method 2: Attempting to start WinRM service via WMI (DCOM/RPC)..." -ForegroundColor Cyan
+                    Write-Host "[$ComputerName] Method 3: Attempting to start WinRM service via WMI (DCOM/RPC)..." -ForegroundColor Cyan
                     try {
                         # WMI uses DCOM by default, which doesn't require WinRM
                         $wmiParams = @{
@@ -436,7 +472,7 @@ $InvokeDiscoveryOnServerScriptBlock = {
             }
             else {
                     # PowerShell 3.0-4.0 - Use WMI (WMI uses DCOM by default, which doesn't require WinRM)
-                    Write-Host "[$ComputerName] Method 1: Attempting to start WinRM service via WMI (DCOM/RPC)..." -ForegroundColor Cyan
+                    Write-Host "[$ComputerName] Method 2: Attempting to start WinRM service via WMI (DCOM/RPC)..." -ForegroundColor Cyan
                     $wmiParams = @{
                         ComputerName = $ComputerName
                         Class        = 'Win32_Service'
@@ -472,35 +508,6 @@ $InvokeDiscoveryOnServerScriptBlock = {
                     catch {
                         Write-Warning "[$ComputerName] WMI DCOM method failed: $($_.Exception.Message)"
                     }
-            }
-            
-            # If all DCOM methods failed and no credentials provided, try sc.exe as last resort
-            # (sc.exe only works without credentials, using current user context)
-            if (-not $serviceStarted -and -not $Credential) {
-                Write-Host "[$ComputerName] Method 3: Attempting to start WinRM service via sc.exe (Service Control Manager)..." -ForegroundColor Cyan
-                try {
-                    $processParams = @{
-                        FilePath         = "sc.exe"
-                        ArgumentList     = @("\\$ComputerName", "start", "winrm")
-                        NoNewWindow      = $true
-                        Wait             = $true
-                        PassThru         = $true
-                        ErrorAction      = 'Stop'
-                    }
-                    $process = Start-Process @processParams
-                    
-                    if ($process.ExitCode -eq 0) {
-                        Write-Host "[$ComputerName] SUCCESS: WinRM service started via sc.exe (Service Control Manager)." -ForegroundColor Green
-                        Start-Sleep -Seconds 3
-                        $serviceStarted = $true
-                    }
-                    else {
-                        Write-Warning "[$ComputerName] sc.exe method failed. ExitCode: $($process.ExitCode)"
-                    }
-                }
-                catch {
-                    Write-Warning "[$ComputerName] sc.exe method failed: $($_.Exception.Message)"
-                }
             }
         }
         finally {
