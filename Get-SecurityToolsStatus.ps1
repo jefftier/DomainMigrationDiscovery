@@ -340,15 +340,17 @@ function Get-SecurityAgentsTenantInfo {
     $csHex = if ($cs) { $cs.String } else { $null }
     
     $csTenant = 'Unknown'
-    if ($null -eq $csHex) {
-        if ($CrowdStrikeTenantMap.ContainsKey('UNKNOWN')) {
-            $csTenant = $CrowdStrikeTenantMap['UNKNOWN']
-        }
-    } elseif ($CrowdStrikeTenantMap.ContainsKey($csHex)) {
-        $csTenant = $CrowdStrikeTenantMap[$csHex]
-    } else {
-        if ($CrowdStrikeTenantMap.ContainsKey('DEFAULT')) {
-            $csTenant = $CrowdStrikeTenantMap['DEFAULT']
+    if ($null -ne $CrowdStrikeTenantMap) {
+        if ($null -eq $csHex) {
+            if ($CrowdStrikeTenantMap.ContainsKey('UNKNOWN')) {
+                $csTenant = $CrowdStrikeTenantMap['UNKNOWN']
+            }
+        } elseif ($CrowdStrikeTenantMap.ContainsKey($csHex)) {
+            $csTenant = $CrowdStrikeTenantMap[$csHex]
+        } else {
+            if ($CrowdStrikeTenantMap.ContainsKey('DEFAULT')) {
+                $csTenant = $CrowdStrikeTenantMap['DEFAULT']
+            }
         }
     }
 
@@ -359,15 +361,17 @@ function Get-SecurityAgentsTenantInfo {
     $qStr = if ($q) { $q.String } else { $null }
     
     $qTenant = 'Unknown'
-    if ($null -eq $qStr) {
-        if ($QualysTenantMap.ContainsKey('UNKNOWN')) {
-            $qTenant = $QualysTenantMap['UNKNOWN']
-        }
-    } elseif ($QualysTenantMap.ContainsKey($qStr)) {
-        $qTenant = $QualysTenantMap[$qStr]
-    } else {
-        if ($QualysTenantMap.ContainsKey('DEFAULT')) {
-            $qTenant = $QualysTenantMap['DEFAULT']
+    if ($null -ne $QualysTenantMap) {
+        if ($null -eq $qStr) {
+            if ($QualysTenantMap.ContainsKey('UNKNOWN')) {
+                $qTenant = $QualysTenantMap['UNKNOWN']
+            }
+        } elseif ($QualysTenantMap.ContainsKey($qStr)) {
+            $qTenant = $QualysTenantMap[$qStr]
+        } else {
+            if ($QualysTenantMap.ContainsKey('DEFAULT')) {
+                $qTenant = $QualysTenantMap['DEFAULT']
+            }
         }
     }
 
@@ -884,15 +888,17 @@ function Get-SecurityAgentsTenantInfo {
     $csHex = if ($cs) { $cs.String } else { $null }
     
     $csTenant = 'Unknown'
-    if ($null -eq $csHex) {
-        if ($CrowdStrikeTenantMap.ContainsKey('UNKNOWN')) {
-            $csTenant = $CrowdStrikeTenantMap['UNKNOWN']
-        }
-    } elseif ($CrowdStrikeTenantMap.ContainsKey($csHex)) {
-        $csTenant = $CrowdStrikeTenantMap[$csHex]
-    } else {
-        if ($CrowdStrikeTenantMap.ContainsKey('DEFAULT')) {
-            $csTenant = $CrowdStrikeTenantMap['DEFAULT']
+    if ($null -ne $CrowdStrikeTenantMap) {
+        if ($null -eq $csHex) {
+            if ($CrowdStrikeTenantMap.ContainsKey('UNKNOWN')) {
+                $csTenant = $CrowdStrikeTenantMap['UNKNOWN']
+            }
+        } elseif ($CrowdStrikeTenantMap.ContainsKey($csHex)) {
+            $csTenant = $CrowdStrikeTenantMap[$csHex]
+        } else {
+            if ($CrowdStrikeTenantMap.ContainsKey('DEFAULT')) {
+                $csTenant = $CrowdStrikeTenantMap['DEFAULT']
+            }
         }
     }
 
@@ -903,15 +909,17 @@ function Get-SecurityAgentsTenantInfo {
     $qStr = if ($q) { $q.String } else { $null }
     
     $qTenant = 'Unknown'
-    if ($null -eq $qStr) {
-        if ($QualysTenantMap.ContainsKey('UNKNOWN')) {
-            $qTenant = $QualysTenantMap['UNKNOWN']
-        }
-    } elseif ($QualysTenantMap.ContainsKey($qStr)) {
-        $qTenant = $QualysTenantMap[$qStr]
-    } else {
-        if ($QualysTenantMap.ContainsKey('DEFAULT')) {
-            $qTenant = $QualysTenantMap['DEFAULT']
+    if ($null -ne $QualysTenantMap) {
+        if ($null -eq $qStr) {
+            if ($QualysTenantMap.ContainsKey('UNKNOWN')) {
+                $qTenant = $QualysTenantMap['UNKNOWN']
+            }
+        } elseif ($QualysTenantMap.ContainsKey($qStr)) {
+            $qTenant = $QualysTenantMap[$qStr]
+        } else {
+            if ($QualysTenantMap.ContainsKey('DEFAULT')) {
+                $qTenant = $QualysTenantMap['DEFAULT']
+            }
         }
     }
 
@@ -963,6 +971,22 @@ $functionDefinitions
 `$EncaseRegistryPaths = `$args[2]
 `$CrowdStrikeTenantMap = `$args[3]
 `$QualysTenantMap = `$args[4]
+
+# Ensure hashtables are properly converted (Invoke-Command may deserialize them as PSCustomObjects)
+if (`$null -eq `$CrowdStrikeTenantMap) {
+    `$CrowdStrikeTenantMap = @{}
+} elseif (`$CrowdStrikeTenantMap -isnot [hashtable]) {
+    `$temp = @{}
+    `$CrowdStrikeTenantMap.PSObject.Properties | ForEach-Object { `$temp[`$_.Name] = `$_.Value }
+    `$CrowdStrikeTenantMap = `$temp
+}
+if (`$null -eq `$QualysTenantMap) {
+    `$QualysTenantMap = @{}
+} elseif (`$QualysTenantMap -isnot [hashtable]) {
+    `$temp = @{}
+    `$QualysTenantMap.PSObject.Properties | ForEach-Object { `$temp[`$_.Name] = `$_.Value }
+    `$QualysTenantMap = `$temp
+}
 
 # Execute security check
 Get-SecurityAgentsTenantInfo `
