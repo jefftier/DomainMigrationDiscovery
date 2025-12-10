@@ -957,13 +957,12 @@ function Get-SecurityAgentsTenantInfo {
 $securityCheckScriptBlock = [scriptblock]::Create(@"
 $functionDefinitions
 
-param(
-    [string]`$OldDomainFqdn,
-    [string]`$NewDomainFqdn,
-    [string[]]`$EncaseRegistryPaths,
-    [hashtable]`$CrowdStrikeTenantMap,
-    [hashtable]`$QualysTenantMap
-)
+# Access arguments via $args array
+`$OldDomainFqdn = `$args[0]
+`$NewDomainFqdn = `$args[1]
+`$EncaseRegistryPaths = `$args[2]
+`$CrowdStrikeTenantMap = `$args[3]
+`$QualysTenantMap = `$args[4]
 
 # Execute security check
 Get-SecurityAgentsTenantInfo `
@@ -984,7 +983,7 @@ try {
         ArgumentList = @(
             $OldDomainFqdn,
             $NewDomainFqdn,
-            ,$config.EncaseRegistryPaths,
+            ,@($config.EncaseRegistryPaths),
             $config.CrowdStrikeTenantMap,
             $config.QualysTenantMap
         )
