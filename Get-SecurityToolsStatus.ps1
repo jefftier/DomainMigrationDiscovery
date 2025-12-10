@@ -47,10 +47,10 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ComputerName,
     
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $false)]
     [string]$OldDomainFqdn,
     
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $false)]
     [string]$NewDomainFqdn,
     
     [string]$ConfigFile,
@@ -339,18 +339,16 @@ function Get-SecurityAgentsTenantInfo {
     $cs = Get-RegistryValueMultiView -Hive LocalMachine -Path $csRegPath -Name $csValName
     $csHex = if ($cs) { $cs.String } else { $null }
     
-    $csTenant = 'Unknown'
-    if ($null -ne $CrowdStrikeTenantMap) {
-        if ($null -eq $csHex) {
-            if ($CrowdStrikeTenantMap.ContainsKey('UNKNOWN')) {
-                $csTenant = $CrowdStrikeTenantMap['UNKNOWN']
-            }
-        } elseif ($CrowdStrikeTenantMap.ContainsKey($csHex)) {
-            $csTenant = $CrowdStrikeTenantMap[$csHex]
-        } else {
-            if ($CrowdStrikeTenantMap.ContainsKey('DEFAULT')) {
-                $csTenant = $CrowdStrikeTenantMap['DEFAULT']
-            }
+    # Determine tenant name using user-configurable mapping (matches original script logic)
+    if ($null -eq $csHex) {
+        if ($null -ne $CrowdStrikeTenantMap -and $CrowdStrikeTenantMap.ContainsKey('UNKNOWN')) {
+            $csTenant = $CrowdStrikeTenantMap['UNKNOWN']
+        }
+    } elseif ($null -ne $CrowdStrikeTenantMap -and $CrowdStrikeTenantMap.ContainsKey($csHex)) {
+        $csTenant = $CrowdStrikeTenantMap[$csHex]
+    } else {
+        if ($null -ne $CrowdStrikeTenantMap -and $CrowdStrikeTenantMap.ContainsKey('DEFAULT')) {
+            $csTenant = $CrowdStrikeTenantMap['DEFAULT']
         }
     }
 
@@ -360,18 +358,16 @@ function Get-SecurityAgentsTenantInfo {
     $q = Get-RegistryValueMultiView -Hive LocalMachine -Path $qRegPath -Name $qValName
     $qStr = if ($q) { $q.String } else { $null }
     
-    $qTenant = 'Unknown'
-    if ($null -ne $QualysTenantMap) {
-        if ($null -eq $qStr) {
-            if ($QualysTenantMap.ContainsKey('UNKNOWN')) {
-                $qTenant = $QualysTenantMap['UNKNOWN']
-            }
-        } elseif ($QualysTenantMap.ContainsKey($qStr)) {
-            $qTenant = $QualysTenantMap[$qStr]
-        } else {
-            if ($QualysTenantMap.ContainsKey('DEFAULT')) {
-                $qTenant = $QualysTenantMap['DEFAULT']
-            }
+    # Determine tenant name using user-configurable mapping (matches original script logic)
+    if ($null -eq $qStr) {
+        if ($null -ne $QualysTenantMap -and $QualysTenantMap.ContainsKey('UNKNOWN')) {
+            $qTenant = $QualysTenantMap['UNKNOWN']
+        }
+    } elseif ($null -ne $QualysTenantMap -and $QualysTenantMap.ContainsKey($qStr)) {
+        $qTenant = $QualysTenantMap[$qStr]
+    } else {
+        if ($null -ne $QualysTenantMap -and $QualysTenantMap.ContainsKey('DEFAULT')) {
+            $qTenant = $QualysTenantMap['DEFAULT']
         }
     }
 
@@ -426,9 +422,11 @@ function Import-ConfigurationFile {
     
     if (-not (Test-Path -LiteralPath $ConfigFilePath)) {
         return @{
-            CrowdStrikeTenantMap = $CrowdStrikeTenantMap
-            QualysTenantMap = $QualysTenantMap
-            EncaseRegistryPaths = @()
+            OldDomainFqdn = $null
+            NewDomainFqdn = $null
+            CrowdStrikeTenantMap = $null
+            QualysTenantMap = $null
+            EncaseRegistryPaths = $null
         }
     }
     
@@ -437,11 +435,22 @@ function Import-ConfigurationFile {
         $config = $configContent | ConvertFrom-Json -ErrorAction Stop
         
         $result = @{
-            CrowdStrikeTenantMap = $CrowdStrikeTenantMap
-            QualysTenantMap = $QualysTenantMap
-            EncaseRegistryPaths = @()
+            OldDomainFqdn = $null
+            NewDomainFqdn = $null
+            CrowdStrikeTenantMap = $null
+            QualysTenantMap = $null
+            EncaseRegistryPaths = $null
         }
         
+        # Load domain settings from config file
+        if ($config.PSObject.Properties['OldDomainFqdn']) {
+            $result.OldDomainFqdn = $config.OldDomainFqdn
+        }
+        if ($config.PSObject.Properties['NewDomainFqdn']) {
+            $result.NewDomainFqdn = $config.NewDomainFqdn
+        }
+        
+        # Load CrowdStrike tenant map from config (if present, replaces defaults)
         if ($config.PSObject.Properties['CrowdStrikeTenantMap']) {
             $csMap = @{}
             $config.CrowdStrikeTenantMap.PSObject.Properties | ForEach-Object {
@@ -450,6 +459,7 @@ function Import-ConfigurationFile {
             $result.CrowdStrikeTenantMap = $csMap
         }
         
+        # Load Qualys tenant map from config (if present, replaces defaults)
         if ($config.PSObject.Properties['QualysTenantMap']) {
             $qMap = @{}
             $config.QualysTenantMap.PSObject.Properties | ForEach-Object {
@@ -458,6 +468,7 @@ function Import-ConfigurationFile {
             $result.QualysTenantMap = $qMap
         }
         
+        # Load Encase registry paths from config (if present, replaces defaults)
         if ($config.PSObject.Properties['EncaseRegistryPaths']) {
             if ($config.EncaseRegistryPaths -is [System.Array]) {
                 $result.EncaseRegistryPaths = $config.EncaseRegistryPaths
@@ -471,9 +482,11 @@ function Import-ConfigurationFile {
     catch {
         Write-Warning "Failed to load configuration file '$ConfigFilePath': $($_.Exception.Message)"
         return @{
-            CrowdStrikeTenantMap = $CrowdStrikeTenantMap
-            QualysTenantMap = $QualysTenantMap
-            EncaseRegistryPaths = @()
+            OldDomainFqdn = $null
+            NewDomainFqdn = $null
+            CrowdStrikeTenantMap = $null
+            QualysTenantMap = $null
+            EncaseRegistryPaths = $null
         }
     }
 }
@@ -582,16 +595,68 @@ $defaultQualysTenantMap = @{
 
 $defaultEncaseRegistryPaths = @()
 
-# Load configuration from file if provided
-$config = @{
-    CrowdStrikeTenantMap = $defaultCrowdStrikeTenantMap
-    QualysTenantMap = $defaultQualysTenantMap
-    EncaseRegistryPaths = $defaultEncaseRegistryPaths
-}
-
+# Load configuration from file if provided (load domain settings early)
 if ($ConfigFile) {
     $loadedConfig = Import-ConfigurationFile -ConfigFilePath $ConfigFile -CrowdStrikeTenantMap $defaultCrowdStrikeTenantMap -QualysTenantMap $defaultQualysTenantMap
-    $config = $loadedConfig
+    
+    # Load domain settings from config file if not provided as parameters
+    if ([string]::IsNullOrWhiteSpace($OldDomainFqdn) -and $loadedConfig.OldDomainFqdn) {
+        $OldDomainFqdn = $loadedConfig.OldDomainFqdn
+        Write-Host "Loaded OldDomainFqdn from config file: $OldDomainFqdn" -ForegroundColor Cyan
+    }
+    
+    if ([string]::IsNullOrWhiteSpace($NewDomainFqdn) -and $loadedConfig.NewDomainFqdn) {
+        $NewDomainFqdn = $loadedConfig.NewDomainFqdn
+        Write-Host "Loaded NewDomainFqdn from config file: $NewDomainFqdn" -ForegroundColor Cyan
+    }
+    
+    # Use config file tenant maps if provided, otherwise use defaults
+    # This matches the behavior of Get-WorkstationDiscovery.ps1
+    if ($loadedConfig.CrowdStrikeTenantMap) {
+        Write-Host "Loaded CrowdStrikeTenantMap from config file" -ForegroundColor Cyan
+        $configCrowdStrikeTenantMap = $loadedConfig.CrowdStrikeTenantMap
+    } else {
+        $configCrowdStrikeTenantMap = $defaultCrowdStrikeTenantMap
+    }
+    
+    if ($loadedConfig.QualysTenantMap) {
+        Write-Host "Loaded QualysTenantMap from config file" -ForegroundColor Cyan
+        $configQualysTenantMap = $loadedConfig.QualysTenantMap
+    } else {
+        $configQualysTenantMap = $defaultQualysTenantMap
+    }
+    
+    if ($loadedConfig.EncaseRegistryPaths) {
+        Write-Host "Loaded EncaseRegistryPaths from config file" -ForegroundColor Cyan
+        $configEncaseRegistryPaths = $loadedConfig.EncaseRegistryPaths
+    } else {
+        $configEncaseRegistryPaths = $defaultEncaseRegistryPaths
+    }
+    
+    $config = @{
+        CrowdStrikeTenantMap = $configCrowdStrikeTenantMap
+        QualysTenantMap = $configQualysTenantMap
+        EncaseRegistryPaths = $configEncaseRegistryPaths
+    }
+} else {
+    $config = @{
+        CrowdStrikeTenantMap = $defaultCrowdStrikeTenantMap
+        QualysTenantMap = $defaultQualysTenantMap
+        EncaseRegistryPaths = $defaultEncaseRegistryPaths
+    }
+}
+
+# Validate that required domain parameters are available (either from command line or config file)
+if ([string]::IsNullOrWhiteSpace($OldDomainFqdn)) {
+    $errorMsg = "OldDomainFqdn is required. Please provide it as a parameter (-OldDomainFqdn) or in the configuration file (ConfigFile parameter)."
+    Write-Error $errorMsg
+    throw $errorMsg
+}
+
+if ([string]::IsNullOrWhiteSpace($NewDomainFqdn)) {
+    $errorMsg = "NewDomainFqdn is required. Please provide it as a parameter (-NewDomainFqdn) or in the configuration file (ConfigFile parameter)."
+    Write-Error $errorMsg
+    throw $errorMsg
 }
 
 # Get credentials if not provided
@@ -887,18 +952,16 @@ function Get-SecurityAgentsTenantInfo {
     $cs = Get-RegistryValueMultiView -Hive LocalMachine -Path $csRegPath -Name $csValName
     $csHex = if ($cs) { $cs.String } else { $null }
     
-    $csTenant = 'Unknown'
-    if ($null -ne $CrowdStrikeTenantMap) {
-        if ($null -eq $csHex) {
-            if ($CrowdStrikeTenantMap.ContainsKey('UNKNOWN')) {
-                $csTenant = $CrowdStrikeTenantMap['UNKNOWN']
-            }
-        } elseif ($CrowdStrikeTenantMap.ContainsKey($csHex)) {
-            $csTenant = $CrowdStrikeTenantMap[$csHex]
-        } else {
-            if ($CrowdStrikeTenantMap.ContainsKey('DEFAULT')) {
-                $csTenant = $CrowdStrikeTenantMap['DEFAULT']
-            }
+    # Determine tenant name using user-configurable mapping (matches original script logic)
+    if ($null -eq $csHex) {
+        if ($null -ne $CrowdStrikeTenantMap -and $CrowdStrikeTenantMap.ContainsKey('UNKNOWN')) {
+            $csTenant = $CrowdStrikeTenantMap['UNKNOWN']
+        }
+    } elseif ($null -ne $CrowdStrikeTenantMap -and $CrowdStrikeTenantMap.ContainsKey($csHex)) {
+        $csTenant = $CrowdStrikeTenantMap[$csHex]
+    } else {
+        if ($null -ne $CrowdStrikeTenantMap -and $CrowdStrikeTenantMap.ContainsKey('DEFAULT')) {
+            $csTenant = $CrowdStrikeTenantMap['DEFAULT']
         }
     }
 
@@ -908,18 +971,16 @@ function Get-SecurityAgentsTenantInfo {
     $q = Get-RegistryValueMultiView -Hive LocalMachine -Path $qRegPath -Name $qValName
     $qStr = if ($q) { $q.String } else { $null }
     
-    $qTenant = 'Unknown'
-    if ($null -ne $QualysTenantMap) {
-        if ($null -eq $qStr) {
-            if ($QualysTenantMap.ContainsKey('UNKNOWN')) {
-                $qTenant = $QualysTenantMap['UNKNOWN']
-            }
-        } elseif ($QualysTenantMap.ContainsKey($qStr)) {
-            $qTenant = $QualysTenantMap[$qStr]
-        } else {
-            if ($QualysTenantMap.ContainsKey('DEFAULT')) {
-                $qTenant = $QualysTenantMap['DEFAULT']
-            }
+    # Determine tenant name using user-configurable mapping (matches original script logic)
+    if ($null -eq $qStr) {
+        if ($null -ne $QualysTenantMap -and $QualysTenantMap.ContainsKey('UNKNOWN')) {
+            $qTenant = $QualysTenantMap['UNKNOWN']
+        }
+    } elseif ($null -ne $QualysTenantMap -and $QualysTenantMap.ContainsKey($qStr)) {
+        $qTenant = $QualysTenantMap[$qStr]
+    } else {
+        if ($null -ne $QualysTenantMap -and $QualysTenantMap.ContainsKey('DEFAULT')) {
+            $qTenant = $QualysTenantMap['DEFAULT']
         }
     }
 
