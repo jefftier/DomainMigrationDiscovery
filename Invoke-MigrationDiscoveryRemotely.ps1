@@ -220,64 +220,104 @@ if ($ConfigFile) {
 function Get-WinRmFailureCategory {
     param(
         [Parameter(Mandatory)]
-        [string]$ErrorMessage
+        [string]$ErrorMessage,
+        
+        [Parameter(Mandatory)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
     )
     
-    # Returns one of: 'AuthError','NetworkError','Unknown'
+    # Returns one of: 'AuthError','NetworkError','WinRmServiceError','Unknown'
+    
+    # Authentication errors - do not attempt to heal
     if ($ErrorMessage -match 'access is denied' -or
         $ErrorMessage -match '401' -or
+        $ErrorMessage -match '403' -or
+        $ErrorMessage -match 'unauthorized' -or
+        $ErrorMessage -match 'authentication failed' -or
         $ErrorMessage -match 'Kerberos' -or
-        $ErrorMessage -match 'NTLM')
+        $ErrorMessage -match 'NTLM' -or
+        $ErrorMessage -match 'credential' -or
+        $ErrorRecord.CategoryInfo.Category -eq 'AuthenticationError' -or
+        $ErrorRecord.CategoryInfo.Category -eq 'SecurityError')
     {
         return 'AuthError'
     }
     
+    # Network/name resolution errors - do not attempt to heal
     if ($ErrorMessage -match 'WinRM cannot complete the operation' -or
-        $ErrorMessage -match 'The WinRM client cannot process the request' -or
         $ErrorMessage -match 'The network path was not found' -or
-        $ErrorMessage -match 'No connection could be made')
+        $ErrorMessage -match 'No connection could be made' -or
+        $ErrorMessage -match 'cannot resolve' -or
+        $ErrorMessage -match 'host.*not found' -or
+        $ErrorMessage -match 'RPC server is unavailable' -or
+        $ErrorMessage -match 'network is unreachable' -or
+        $ErrorRecord.CategoryInfo.Category -eq 'InvalidOperation' -and $ErrorMessage -match 'network')
     {
         return 'NetworkError'
+    }
+    
+    # WinRM service errors - these are candidates for healing
+    if ($ErrorMessage -match 'WinRM service' -or
+        $ErrorMessage -match 'The WinRM client cannot process the request' -or
+        $ErrorMessage -match 'WS-Management service' -or
+        $ErrorMessage -match 'service.*not running' -or
+        ($ErrorMessage -match 'cannot connect' -and $ErrorMessage -match 'WinRM') -or
+        $ErrorRecord.Exception -is [System.Management.Automation.Remoting.PSRemotingTransportException] -or
+        $ErrorRecord.FullyQualifiedErrorId -match 'WinRM')
+    {
+        return 'WinRmServiceError'
     }
     
     return 'Unknown'
 }
 
-# Helper: run discovery on a single server
-# Converted to scriptblock for parallel execution compatibility
-$InvokeDiscoveryOnServerScriptBlock = {
+# Centralized WinRM connectivity helper
+# This function handles all WinRM connectivity testing, error classification, optional healing, and remote script execution
+#
+# WinRM Auto-Heal Behavior:
+# - When -AttemptWinRmHeal is NOT provided: Tests WinRM connectivity once. If it fails, logs the error and returns.
+# - When -AttemptWinRmHeal IS provided: Tests WinRM connectivity. If it fails with a WinRM service error (not auth/network),
+#   attempts to start the WinRM service on the remote system using: Get-Service -Name winrm -ComputerName $ComputerName | Set-Service -Status Running
+#   After starting the service, waits 5 seconds, verifies the service is running, then retries the connectivity test once.
+#   Authentication errors and network errors are never healed - only WinRM service errors are candidates for healing.
+#
+# Error Classification:
+# - AuthError: Authentication/authorization failures (access denied, 401, credentials, etc.) - never healed
+# - NetworkError: Network/name resolution failures (host unreachable, DNS failure, etc.) - never healed  
+# - WinRmServiceError: WinRM service not running, listener unavailable, WinRM-specific faults - can be healed if -AttemptWinRmHeal is set
+# - Unknown: Unclassified errors - can be healed if -AttemptWinRmHeal is set (treated as potential WinRM service issues)
+function Ensure-WinRmAndConnect {
     param(
+        [Parameter(Mandatory)]
         [string]$ComputerName,
+        
+        [Parameter(Mandatory)]
+        [scriptblock]$RemoteScriptBlock,
+        
+        [hashtable]$RemoteScriptArguments = @{},
+        
+        [switch]$AttemptWinRmHeal,
+        
         [System.Management.Automation.PSCredential]$Credential,
-        [string]$ScriptContent,
-        [hashtable]$ScriptParams,
-        [string]$CollectorShare,
-        [string]$RemoteOutputRoot,
-        [scriptblock]$WriteErrorLogFunction,
-        [scriptblock]$GetWinRmFailureCategoryFunction,
-        [string]$ConfigFile,
-        [string]$RemoteConfigPath,
-        [string]$CompatibilityMode,
-        [switch]$AttemptWinRmHeal
+        
+        [scriptblock]$WriteErrorLogFunction
     )
-
-    Write-Host "[$ComputerName] Testing WinRM connectivity and authentication..." -ForegroundColor Yellow
-    $connectionSuccessful = $false
-    $actualComputerName = $null
     
-    # Determine compatibility mode locally (don't rely on script-level variables)
-    if (-not $CompatibilityMode) {
-        if ($PSVersionTable.PSVersion.Major -ge 5) {
-            $CompatibilityMode = 'Full'
-        } else {
-            $CompatibilityMode = 'Legacy3to4'
-        }
+    # Result object to return
+    $result = @{
+        Success = $false
+        ErrorCategory = $null
+        ErrorMessage = $null
+        Output = $null
+        ActualComputerName = $null
     }
     
-    # First attempt to connect
+    # Step 1: Initial WinRM connectivity check
+    Write-Host "[$ComputerName] Testing WinRM connectivity..." -ForegroundColor Yellow
+    $connectivityTestPassed = $false
+    $actualComputerName = $null
+    
     try {
-        # Test connectivity and authentication with a simple Invoke-Command
-        # This is more reliable than Test-WSMan when credentials are involved
         $testParams = @{
             ComputerName = $ComputerName
             ScriptBlock  = { $env:COMPUTERNAME }
@@ -288,175 +328,249 @@ $InvokeDiscoveryOnServerScriptBlock = {
         }
         
         # Add connection timeout to prevent hangs (PowerShell 5.1+)
-        # OperationTimeout expects seconds as integer, not TimeSpan
         if ($PSVersionTable.PSVersion.Major -ge 5) {
             $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30
         }
         
         $testResult = Invoke-Command @testParams
-        Write-Host "[$ComputerName] Successfully connected (remote computer: $testResult)" -ForegroundColor Green
-        
-        # Store the actual computer name from the remote system for filename matching
-        # The discovery script uses $env:COMPUTERNAME which may not match the provided ComputerName case
         $actualComputerName = $testResult
-        $connectionSuccessful = $true
+        $connectivityTestPassed = $true
+        Write-Host "[$ComputerName] WinRM connectivity successful (remote computer: $testResult)" -ForegroundColor Green
     }
     catch {
         $initialError = $_.Exception.Message
-        Write-Warning "[$ComputerName] Initial WinRM connection failed: $initialError"
+        $errorRecord = $_
+        Write-Warning "[$ComputerName] WinRM connectivity failed: $initialError"
         
-        # Categorize the error
-        $failureCategory = & $GetWinRmFailureCategoryFunction -ErrorMessage $initialError
+        # Step 2: Classify the error
+        $failureCategory = Get-WinRmFailureCategory -ErrorMessage $initialError -ErrorRecord $errorRecord
         
-        # If auto-heal is not requested, log and return immediately
-        if (-not $AttemptWinRmHeal) {
-            $errorMsg = "WinRM connection failed (no auto-heal requested). Category: $failureCategory. Error: $initialError"
-            Write-Warning "[$ComputerName] $errorMsg"
+        # Log the categorized error
+        $errorMsg = "WinRM connectivity failed - categorized as $failureCategory. Error: $initialError"
+        Write-Warning "[$ComputerName] $errorMsg"
+        if ($WriteErrorLogFunction) {
             & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
-            return
         }
         
-        # If auto-heal is requested but error is authentication-related, don't attempt to start WinRM
+        # Step 3: Handle based on error category
+        
+        # Authentication errors - do not attempt to heal
         if ($failureCategory -eq 'AuthError') {
-            $errorMsg = "WinRM connection failed due to authentication error; auto-heal will not help. Category: $failureCategory. Error: $initialError"
-            Write-Warning "[$ComputerName] $errorMsg"
-            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
-            return
+            $result.ErrorCategory = 'AuthError'
+            $result.ErrorMessage = $errorMsg
+            return $result
         }
         
-        # For NetworkError or Unknown, attempt to start WinRM service (only if AttemptWinRmHeal is set)
-        Write-Host "[$ComputerName] Attempting to start WinRM service and retry connection..." -ForegroundColor Yellow
+        # Network/name resolution errors - do not attempt to heal
+        if ($failureCategory -eq 'NetworkError') {
+            $result.ErrorCategory = 'NetworkError'
+            $result.ErrorMessage = $errorMsg
+            return $result
+        }
         
-        # Use Get-Service/Start-Service pipeline as the primary method to start WinRM service
-        # This method uses RPC/DCOM and doesn't require WinRM to be running
-        # Command: Get-Service -Name winrm -ComputerName <PC> | Start-Service
-        $serviceStarted = $false
-        
-        try {
-            Write-Host "[$ComputerName] Attempting to start WinRM service via Get-Service/Start-Service pipeline..." -ForegroundColor Cyan
-            
-            # Execute the exact pipeline command that works manually
-            # Get-Service -Name winrm -ComputerName $ComputerName | Start-Service
-            # Note: This uses the current session's authentication context
-            # If credentials are needed, they should be established at the session level
-            
-            $serviceParams = @{
-                Name         = 'winrm'
-                ComputerName = $ComputerName
+        # WinRM service errors (or Unknown) - attempt heal only if requested
+        if ($failureCategory -eq 'WinRmServiceError' -or $failureCategory -eq 'Unknown') {
+            if (-not $AttemptWinRmHeal) {
+                $errorMsg = "WinRM is not available and healing is disabled. Category: $failureCategory. Error: $initialError"
+                Write-Warning "[$ComputerName] $errorMsg"
+                if ($WriteErrorLogFunction) {
+                    & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
+                }
+                $result.ErrorCategory = $failureCategory
+                $result.ErrorMessage = $errorMsg
+                return $result
             }
             
-            # First, check if service is already running
-            $serviceCheck = Get-Service @serviceParams -ErrorAction SilentlyContinue
+            # Step 4: Attempt to start WinRM service
+            Write-Host "[$ComputerName] Attempting to start WinRM service via Get-Service -Name winrm -ComputerName $ComputerName | Set-Service -Status Running..." -ForegroundColor Yellow
+            $serviceStarted = $false
             
-            if ($serviceCheck -and $serviceCheck.Status -eq 'Running') {
-                Write-Host "[$ComputerName] WinRM service is already running." -ForegroundColor Green
-                $serviceStarted = $true
-            }
-            else {
-                # Get the service object first, then start it using the object's Start() method
-                # This preserves the remote computer context better than piping to Start-Service
-                # The equivalent of: Get-Service -Name winrm -ComputerName $ComputerName | Start-Service
-                Write-Host "[$ComputerName] Executing: Get-Service -Name winrm -ComputerName $ComputerName | Start-Service" -ForegroundColor Gray
+            try {
+                # Use the exact command that works manually
+                # Get-Service -Name winrm -ComputerName $ComputerName | Set-Service -Status Running
+                $service = Get-Service -Name winrm -ComputerName $ComputerName -ErrorAction Stop
                 
-                # Get the service object (this maintains the remote ComputerName context)
-                $service = Get-Service @serviceParams -ErrorAction Stop
-                
-                # Start the service using the service object's Start() method
-                # This preserves the remote computer context
-                $service.Start()
-                
-                # Wait a moment for the service to start
-                Start-Sleep -Seconds 3
-                
-                # Refresh the service object to get updated status
-                $service.Refresh()
-                
-                # Verify the service is running
                 if ($service.Status -eq 'Running') {
-                    Write-Host "[$ComputerName] SUCCESS: WinRM service started via Get-Service/Start-Service." -ForegroundColor Green
+                    Write-Host "[$ComputerName] WinRM service is already running." -ForegroundColor Green
                     $serviceStarted = $true
                 }
                 else {
-                    Write-Warning "[$ComputerName] WinRM service start command completed but service status is: $($service.Status)"
-                    # Don't set $serviceStarted = false here - let the retry logic handle it
+                    # Execute the exact pipeline command
+                    Get-Service -Name winrm -ComputerName $ComputerName | Set-Service -Status Running -ErrorAction Stop
+                    
+                    # Wait a short period for the service to start
+                    Start-Sleep -Seconds 5
+                    
+                    # Re-check the service status
+                    $serviceCheck = Get-Service -Name winrm -ComputerName $ComputerName -ErrorAction Stop
+                    if ($serviceCheck.Status -eq 'Running') {
+                        Write-Host "[$ComputerName] WinRM service successfully started; retrying WinRM connectivity..." -ForegroundColor Green
+                        $serviceStarted = $true
+                    }
+                    else {
+                        $errorMsg = "WinRM heal failed; service not running after attempt. Status: $($serviceCheck.Status)"
+                        Write-Warning "[$ComputerName] $errorMsg"
+                        if ($WriteErrorLogFunction) {
+                            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "WINRM_HEAL_ERROR"
+                        }
+                        $result.ErrorCategory = $failureCategory
+                        $result.ErrorMessage = $errorMsg
+                        return $result
+                    }
                 }
-            }
-        }
-        catch {
-            $serviceError = $_.Exception.Message
-            $errorDetails = $_.Exception.GetType().FullName
-            
-            Write-Warning "[$ComputerName] Failed to start WinRM service via Get-Service/Start-Service pipeline: $serviceError"
-            Write-Warning "[$ComputerName] Error type: $errorDetails"
-            
-            # Log additional context for debugging
-            if ($_.Exception.InnerException) {
-                Write-Warning "[$ComputerName] Inner exception: $($_.Exception.InnerException.Message)"
-            }
-            
-            # If the error is credential-related and credentials were provided, log a note
-            if ($Credential -and ($serviceError -match 'access|credential|unauthorized|denied' -or $serviceError -match '401|403')) {
-                Write-Warning "[$ComputerName] Note: Get-Service doesn't support -Credential parameter. The command uses the current session's authentication context."
-                Write-Warning "[$ComputerName] If credentials are required, ensure they are established at the PowerShell session level before running this script."
-            }
-        }
-        
-        # Retry connection if service was started or was already running
-        if ($serviceStarted) {
-            Write-Host "[$ComputerName] Retrying WinRM connection..." -ForegroundColor Yellow
-            try {
-                $testParams = @{
-                    ComputerName = $ComputerName
-                    ScriptBlock  = { $env:COMPUTERNAME }
-                    ErrorAction  = 'Stop'
-                }
-                if ($Credential) {
-                    $testParams['Credential'] = $Credential
-                }
-                
-                # Add connection timeout to prevent hangs (PowerShell 5.1+)
-                # OperationTimeout expects seconds as integer, not TimeSpan
-                if ($PSVersionTable.PSVersion.Major -ge 5) {
-                    $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30
-                }
-                
-                $testResult = Invoke-Command @testParams
-                Write-Host "[$ComputerName] Successfully connected after starting WinRM service (remote computer: $testResult)" -ForegroundColor Green
-                $actualComputerName = $testResult
-                $connectionSuccessful = $true
             }
             catch {
-                $retryError = $_.Exception.Message
-                $errorMsg = "WinRM connection failed after attempting to start service. Category: $failureCategory. Initial error: $initialError. Retry error: $retryError"
+                $serviceError = $_.Exception.Message
+                $errorMsg = "Failed to start WinRM service: $serviceError"
                 Write-Warning "[$ComputerName] $errorMsg"
-                & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
-                return
+                if ($WriteErrorLogFunction) {
+                    & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "WINRM_HEAL_ERROR"
+                }
+                $result.ErrorCategory = $failureCategory
+                $result.ErrorMessage = $errorMsg
+                return $result
             }
-        }
-        else {
-            # Service couldn't be started, log detailed error and return
-            $errorMsg = "WinRM connection failed. Category: $failureCategory. Initial error: $initialError"
-            Write-Warning "[$ComputerName] $errorMsg"
-            Write-Warning "[$ComputerName] Troubleshooting tips:"
-            Write-Warning "[$ComputerName]   1. Verify WinRM is enabled: Enable-PSRemoting -Force"
-            Write-Warning "[$ComputerName]   2. Check WinRM service status: Get-Service WinRM"
-            Write-Warning "[$ComputerName]   3. Test connectivity: Test-WSMan -ComputerName $ComputerName"
-            Write-Warning "[$ComputerName]   4. Verify firewall rules allow WinRM"
-            Write-Warning "[$ComputerName]   5. Check credentials have admin rights on target"
-            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
-            return
+            
+            # Step 5: Retry WinRM connectivity after healing
+            if ($serviceStarted) {
+                Write-Host "[$ComputerName] Retrying WinRM connectivity test..." -ForegroundColor Yellow
+                try {
+                    $testParams = @{
+                        ComputerName = $ComputerName
+                        ScriptBlock  = { $env:COMPUTERNAME }
+                        ErrorAction  = 'Stop'
+                    }
+                    if ($Credential) {
+                        $testParams['Credential'] = $Credential
+                    }
+                    
+                    if ($PSVersionTable.PSVersion.Major -ge 5) {
+                        $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30
+                    }
+                    
+                    $testResult = Invoke-Command @testParams
+                    $actualComputerName = $testResult
+                    $connectivityTestPassed = $true
+                    Write-Host "[$ComputerName] WinRM connectivity successful after heal (remote computer: $testResult)" -ForegroundColor Green
+                }
+                catch {
+                    $retryError = $_.Exception.Message
+                    $errorMsg = "WinRM connection failed after attempting to start service. Initial error: $initialError. Retry error: $retryError"
+                    Write-Warning "[$ComputerName] $errorMsg"
+                    if ($WriteErrorLogFunction) {
+                        & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
+                    }
+                    $result.ErrorCategory = $failureCategory
+                    $result.ErrorMessage = $errorMsg
+                    return $result
+                }
+            }
         }
     }
     
-    # If connection failed for any reason, exit
-    if (-not $connectionSuccessful) {
-        $errorMsg = "WinRM connection failed: Unable to establish connection"
+    # Step 6: If connectivity test passed, run the main remote script
+    if (-not $connectivityTestPassed) {
+        $errorMsg = "WinRM connectivity failed: Unable to establish connection"
         Write-Warning "[$ComputerName] $errorMsg"
-        & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
+        if ($WriteErrorLogFunction) {
+            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
+        }
+        $result.ErrorCategory = 'Unknown'
+        $result.ErrorMessage = $errorMsg
+        return $result
+    }
+    
+    # Execute the remote script block
+    try {
+        $invokeParams = @{
+            ComputerName = $ComputerName
+            ScriptBlock  = $RemoteScriptBlock
+            ErrorAction  = 'Stop'
+        }
+        
+        if ($Credential) {
+            $invokeParams['Credential'] = $Credential
+        }
+        
+        # Add connection timeout (PowerShell 5.1+)
+        if ($PSVersionTable.PSVersion.Major -ge 5) {
+            $invokeParams['SessionOption'] = New-PSSessionOption -OperationTimeout 300
+        }
+        
+        # Add arguments if provided
+        if ($RemoteScriptArguments -and $RemoteScriptArguments.Count -gt 0) {
+            $invokeParams['ArgumentList'] = @($RemoteScriptArguments)
+        }
+        
+        $output = Invoke-Command @invokeParams
+        
+        $result.Success = $true
+        $result.Output = $output
+        $result.ActualComputerName = $actualComputerName
+        
+        return $result
+    }
+    catch {
+        $execError = $_.Exception.Message
+        $errorMsg = "Failed to execute remote script: $execError"
+        Write-Warning "[$ComputerName] $errorMsg"
+        if ($WriteErrorLogFunction) {
+            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "SCRIPT_EXECUTION_ERROR"
+        }
+        $result.ErrorCategory = 'Unknown'
+        $result.ErrorMessage = $errorMsg
+        return $result
+    }
+}
+
+# Helper: run discovery on a single server
+# Converted to scriptblock for parallel execution compatibility
+# This scriptblock now uses the centralized Ensure-WinRmAndConnect helper for all WinRM operations
+$InvokeDiscoveryOnServerScriptBlock = {
+    param(
+        [string]$ComputerName,
+        [System.Management.Automation.PSCredential]$Credential,
+        [string]$ScriptContent,
+        [hashtable]$ScriptParams,
+        [string]$CollectorShare,
+        [string]$RemoteOutputRoot,
+        [scriptblock]$WriteErrorLogFunction,
+        [scriptblock]$EnsureWinRmAndConnectFunction,
+        [string]$ConfigFile,
+        [string]$RemoteConfigPath,
+        [string]$CompatibilityMode,
+        [switch]$AttemptWinRmHeal
+    )
+
+    # Determine compatibility mode locally (don't rely on script-level variables)
+    if (-not $CompatibilityMode) {
+        if ($PSVersionTable.PSVersion.Major -ge 5) {
+            $CompatibilityMode = 'Full'
+        } else {
+            $CompatibilityMode = 'Legacy3to4'
+        }
+    }
+    
+    # Step 1: Establish WinRM connectivity using the centralized helper
+    # First, test connectivity with a simple scriptblock to get the actual computer name
+    $testScriptBlock = { $env:COMPUTERNAME }
+    $testResult = & $EnsureWinRmAndConnectFunction `
+        -ComputerName $ComputerName `
+        -RemoteScriptBlock $testScriptBlock `
+        -RemoteScriptArguments @{} `
+        -AttemptWinRmHeal:$AttemptWinRmHeal `
+        -Credential $Credential `
+        -WriteErrorLogFunction $WriteErrorLogFunction
+    
+    # Check if WinRM connectivity succeeded
+    if (-not $testResult.Success) {
+        # Error already logged by Ensure-WinRmAndConnect
         return
     }
+    
+    $actualComputerName = $testResult.ActualComputerName
 
-    # Copy config file to remote server if provided
+    # Step 2: Copy config file to remote server if provided (requires WinRM connectivity)
     if ($ConfigFile -and $RemoteConfigPath) {
         Write-Host "[$ComputerName] Copying configuration file to remote server..." -ForegroundColor Yellow
         try {
@@ -518,205 +632,193 @@ $InvokeDiscoveryOnServerScriptBlock = {
         }
     }
 
+    # Step 3: Run the discovery script using the centralized helper
+    # WinRM connectivity is already established, so this should succeed
     Write-Host "[$ComputerName] Starting discovery..." -ForegroundColor Cyan
 
-    try {
-        # Build parameters for Invoke-Command using ScriptBlock with proper parameter passing
-        $invokeParams = @{
+    $remoteScriptBlock = {
+        param($ScriptContent, $Params)
+        # Execute the script with the provided parameters using splatting
+        & ([scriptblock]::Create($ScriptContent)) @Params
+    }
+    
+    $remoteScriptArguments = @{
+        ScriptContent = $ScriptContent
+        Params = $ScriptParams
+    }
+    
+    $discoveryResult = & $EnsureWinRmAndConnectFunction `
+        -ComputerName $ComputerName `
+        -RemoteScriptBlock $remoteScriptBlock `
+        -RemoteScriptArguments $remoteScriptArguments `
+        -AttemptWinRmHeal:$false `
+        -Credential $Credential `
+        -WriteErrorLogFunction $WriteErrorLogFunction
+    
+    # Check if discovery script execution succeeded
+    if (-not $discoveryResult.Success) {
+        # Error already logged by Ensure-WinRmAndConnect
+        return
+    }
+    
+    $summary = $discoveryResult.Output
+
+    # Note: $EmitStdOut is passed via $ScriptParams, so we check it from there for parallel execution compatibility
+    $shouldEmitStdOut = $ScriptParams.ContainsKey('EmitStdOut') -and $ScriptParams['EmitStdOut'] -eq $true
+    if ($summary -and $shouldEmitStdOut) {
+        # $summary is the small summary object your script writes when -EmitStdOut is set
+        # You can write it or collect it into an array for reporting.
+        Write-Host "[$ComputerName] Summary:" -ForegroundColor Green
+        $summary | ConvertTo-Json -Depth 4
+    }
+
+    # Collect JSON file from remote server
+    # Use the exact computer name from the remote system to match the filename pattern
+    # The discovery script uses $env:COMPUTERNAME which we captured as $actualComputerName
+    # This ensures exact matching regardless of case, since we use the actual value from the remote system
+    $today = Get-Date
+    $pattern = "{0}_{1}.json" -f $actualComputerName, $today.ToString('MM-dd-yyyy')
+    $remotePath = Join-Path $RemoteOutputRoot $pattern
+
+    if ($CollectorShare) {
+        # Copy to specified collector share
+        Write-Host "[$ComputerName] Collecting JSON from remote OutputRoot ($RemoteOutputRoot)..." -ForegroundColor Yellow
+
+        # Create a session so we can copy files
+        $sessionParams = @{
             ComputerName = $ComputerName
-            ScriptBlock  = {
-                param($ScriptContent, $Params)
-                # Execute the script with the provided parameters using splatting
-                & ([scriptblock]::Create($ScriptContent)) @Params
-            }
-            ArgumentList = @($ScriptContent, $ScriptParams)
-            ErrorAction  = 'Stop'
         }
-        
-        # Add credentials only if provided
         if ($Credential) {
-            $invokeParams['Credential'] = $Credential
+            $sessionParams['Credential'] = $Credential
         }
-        
-        # Add connection timeout to prevent hangs (PowerShell 5.1+)
-        # OperationTimeout expects seconds as integer, not TimeSpan
-        if ($PSVersionTable.PSVersion.Major -ge 5) {
-            $invokeParams['SessionOption'] = New-PSSessionOption -OperationTimeout 300
-        }
-        
-        # Invoke your existing script remotely using ScriptBlock for proper parameter handling
-        $summary = Invoke-Command @invokeParams
+        $session = New-PSSession @sessionParams
 
-        # Note: $EmitStdOut is passed via $ScriptParams, so we check it from there for parallel execution compatibility
-        $shouldEmitStdOut = $ScriptParams.ContainsKey('EmitStdOut') -and $ScriptParams['EmitStdOut'] -eq $true
-        if ($summary -and $shouldEmitStdOut) {
-            # $summary is the small summary object your script writes when -EmitStdOut is set
-            # You can write it or collect it into an array for reporting.
-            Write-Host "[$ComputerName] Summary:" -ForegroundColor Green
-            $summary | ConvertTo-Json -Depth 4
-        }
-
-        # Collect JSON file from remote server
-        # Use the exact computer name from the remote system to match the filename pattern
-        # The discovery script uses $env:COMPUTERNAME which we captured as $actualComputerName
-        # This ensures exact matching regardless of case, since we use the actual value from the remote system
-        $today = Get-Date
-        $pattern = "{0}_{1}.json" -f $actualComputerName, $today.ToString('MM-dd-yyyy')
-        $remotePath = Join-Path $RemoteOutputRoot $pattern
-
-        if ($CollectorShare) {
-            # Copy to specified collector share
-            Write-Host "[$ComputerName] Collecting JSON from remote OutputRoot ($RemoteOutputRoot)..." -ForegroundColor Yellow
-
-            # Create a session so we can copy files
-            $sessionParams = @{
-                ComputerName = $ComputerName
+        try {
+            if (-not (Test-Path -Path $CollectorShare)) {
+                New-Item -Path $CollectorShare -ItemType Directory -Force | Out-Null
             }
+
+            $destPath = Join-Path $CollectorShare $pattern
+
+            Copy-Item -Path $remotePath -Destination $destPath -FromSession $session -Force -ErrorAction Stop
+
+            Write-Host "[$ComputerName] Copied $remotePath -> $destPath" -ForegroundColor Green
+        }
+        catch {
+            $errorMsg = "Failed to collect JSON from CollectorShare: $($_.Exception.Message)"
+            Write-Warning "[$ComputerName] $errorMsg"
+            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
+        }
+        finally {
+            if ($session) { 
+                try {
+                    Remove-PSSession $session -ErrorAction SilentlyContinue
+                }
+                catch {
+                    & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "Failed to remove PSSession: $($_.Exception.Message)" -ErrorType "WARNING"
+                }
+            }
+        }
+    }
+    else {
+        # Copy to local directory structure mirroring remote path
+        Write-Host "[$ComputerName] Collecting JSON from remote C$ admin share..." -ForegroundColor Yellow
+
+        try {
+            # Get the directory where this script is located
+            if ($MyInvocation.PSCommandPath) {
+                $scriptDir = Split-Path -Parent $MyInvocation.PSCommandPath
+            }
+            elseif ($PSScriptRoot) {
+                $scriptDir = $PSScriptRoot
+            }
+            else {
+                $scriptDir = (Get-Location).Path
+            }
+
+            # Create local directory structure: {ScriptDir}\results\out
+            $localOutputRoot = Join-Path $scriptDir "results\out"
+            if (-not (Test-Path -Path $localOutputRoot)) {
+                New-Item -Path $localOutputRoot -ItemType Directory -Force | Out-Null
+            }
+
+            # Build UNC path to remote admin share
+            # Extract drive letter and convert to UNC path (e.g., C:\temp\... -> \\ComputerName\c$\temp\...)
+            if ($RemoteOutputRoot -match '^([A-Z]):\\(.*)$') {
+                $driveLetter = $matches[1].ToLower()
+                $relativePath = $matches[2]
+                $remoteUncPath = "\\$ComputerName\${driveLetter}$\$relativePath"
+            }
+            else {
+                # Fallback: assume C: drive
+                $remoteUncPath = $RemoteOutputRoot -replace '^C:', "\\$ComputerName\c$"
+            }
+            $remoteUncFile = Join-Path $remoteUncPath $pattern
+            $localDestPath = Join-Path $localOutputRoot $pattern
+
+            # Copy file using UNC path with credentials if provided
             if ($Credential) {
-                $sessionParams['Credential'] = $Credential
-            }
-            $session = New-PSSession @sessionParams
-
-            try {
-                if (-not (Test-Path -Path $CollectorShare)) {
-                    New-Item -Path $CollectorShare -ItemType Directory -Force | Out-Null
-                }
-
-                $destPath = Join-Path $CollectorShare $pattern
-
-                Copy-Item -Path $remotePath -Destination $destPath -FromSession $session -Force -ErrorAction Stop
-
-                Write-Host "[$ComputerName] Copied $remotePath -> $destPath" -ForegroundColor Green
-            }
-            catch {
-                $errorMsg = "Failed to collect JSON from CollectorShare: $($_.Exception.Message)"
-                Write-Warning "[$ComputerName] $errorMsg"
-                & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
-            }
-            finally {
-                if ($session) { 
-                    try {
-                        Remove-PSSession $session -ErrorAction SilentlyContinue
-                    }
-                    catch {
-                        & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "Failed to remove PSSession: $($_.Exception.Message)" -ErrorType "WARNING"
-                    }
-                }
-            }
-        }
-        else {
-            # Copy to local directory structure mirroring remote path
-            Write-Host "[$ComputerName] Collecting JSON from remote C$ admin share..." -ForegroundColor Yellow
-
-            try {
-                # Get the directory where this script is located
-                if ($MyInvocation.PSCommandPath) {
-                    $scriptDir = Split-Path -Parent $MyInvocation.PSCommandPath
-                }
-                elseif ($PSScriptRoot) {
-                    $scriptDir = $PSScriptRoot
-                }
-                else {
-                    $scriptDir = (Get-Location).Path
-                }
-
-                # Create local directory structure: {ScriptDir}\results\out
-                $localOutputRoot = Join-Path $scriptDir "results\out"
-                if (-not (Test-Path -Path $localOutputRoot)) {
-                    New-Item -Path $localOutputRoot -ItemType Directory -Force | Out-Null
-                }
-
-                # Build UNC path to remote admin share
-                # Extract drive letter and convert to UNC path (e.g., C:\temp\... -> \\ComputerName\c$\temp\...)
+                # Extract drive letter to determine which admin share to use
                 if ($RemoteOutputRoot -match '^([A-Z]):\\(.*)$') {
                     $driveLetter = $matches[1].ToLower()
                     $relativePath = $matches[2]
-                    $remoteUncPath = "\\$ComputerName\${driveLetter}$\$relativePath"
                 }
                 else {
                     # Fallback: assume C: drive
-                    $remoteUncPath = $RemoteOutputRoot -replace '^C:', "\\$ComputerName\c$"
+                    $driveLetter = "c"
+                    $relativePath = $RemoteOutputRoot -replace '^C:\\', ''
                 }
-                $remoteUncFile = Join-Path $remoteUncPath $pattern
-                $localDestPath = Join-Path $localOutputRoot $pattern
-
-                # Copy file using UNC path with credentials if provided
-                if ($Credential) {
-                    # Extract drive letter to determine which admin share to use
-                    if ($RemoteOutputRoot -match '^([A-Z]):\\(.*)$') {
-                        $driveLetter = $matches[1].ToLower()
-                        $relativePath = $matches[2]
+                
+                # Use New-PSDrive to map the remote admin share with credentials
+                $driveName = "TempDrive_$($ComputerName -replace '[^a-zA-Z0-9]', '')"
+                try {
+                    $psDriveParams = @{
+                        Name = $driveName
+                        PSProvider = "FileSystem"
+                        Root = "\\$ComputerName\$driveLetter`$"
+                        Credential = $Credential
+                        Scope = "Script"
                     }
-                    else {
-                        # Fallback: assume C: drive
-                        $driveLetter = "c"
-                        $relativePath = $RemoteOutputRoot -replace '^C:\\', ''
-                    }
+                    $null = New-PSDrive @psDriveParams -ErrorAction Stop
                     
-                    # Use New-PSDrive to map the remote admin share with credentials
-                    $driveName = "TempDrive_$($ComputerName -replace '[^a-zA-Z0-9]', '')"
                     try {
-                        $psDriveParams = @{
-                            Name = $driveName
-                            PSProvider = "FileSystem"
-                            Root = "\\$ComputerName\$driveLetter`$"
-                            Credential = $Credential
-                            Scope = "Script"
-                        }
-                        $null = New-PSDrive @psDriveParams -ErrorAction Stop
-                        
+                        # Map the remote path using the temporary drive
+                        $mappedRemotePath = "${driveName}:$relativePath"
+                        $mappedRemoteFile = Join-Path $mappedRemotePath $pattern
+                        Copy-Item -Path $mappedRemoteFile -Destination $localDestPath -Force -ErrorAction Stop
+                    }
+                    finally {
                         try {
-                            # Map the remote path using the temporary drive
-                            $mappedRemotePath = "${driveName}:$relativePath"
-                            $mappedRemoteFile = Join-Path $mappedRemotePath $pattern
-                            Copy-Item -Path $mappedRemoteFile -Destination $localDestPath -Force -ErrorAction Stop
+                            Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
                         }
-                        finally {
-                            try {
-                                Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
-                            }
-                            catch {
-                                $errorMsg = "Failed to remove PSDrive $driveName`: $($_.Exception.Message)"
-                                & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "WARNING"
-                            }
+                        catch {
+                            $errorMsg = "Failed to remove PSDrive $driveName`: $($_.Exception.Message)"
+                            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "WARNING"
                         }
                     }
-                    catch {
-                        $errorMsg = "Failed to access remote ${driveLetter}`$ share: $($_.Exception.Message)"
-                        & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
-                        throw
-                    }
                 }
-                else {
-                    # No credentials - try direct UNC copy (uses current user context)
-                    Copy-Item -Path $remoteUncFile -Destination $localDestPath -Force -ErrorAction Stop
+                catch {
+                    $errorMsg = "Failed to access remote ${driveLetter}`$ share: $($_.Exception.Message)"
+                    & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
+                    throw
                 }
+            }
+            else {
+                # No credentials - try direct UNC copy (uses current user context)
+                Copy-Item -Path $remoteUncFile -Destination $localDestPath -Force -ErrorAction Stop
+            }
 
-                Write-Host "[$ComputerName] Copied $remoteUncFile -> $localDestPath" -ForegroundColor Green
-            }
-            catch {
-                $errorMsg = "Failed to collect JSON from C$ share: $($_.Exception.Message)"
-                Write-Warning "[$ComputerName] $errorMsg"
-                & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
-                Write-Host "[$ComputerName] JSON file is available on the remote server at: $remotePath" -ForegroundColor Cyan
-            }
+            Write-Host "[$ComputerName] Copied $remoteUncFile -> $localDestPath" -ForegroundColor Green
         }
-        
-        Write-Host "[$ComputerName] Discovery completed." -ForegroundColor Green
-    }
-    catch {
-        $errorMsg = "Discovery FAILED: $($_.Exception.Message)"
-        Write-Warning "[$ComputerName] $errorMsg"
-        & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "DISCOVERY_ERROR"
-        
-        # Log full exception details if available
-        if ($_.Exception.InnerException) {
-            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "Inner Exception: $($_.Exception.InnerException.Message)" -ErrorType "DISCOVERY_ERROR"
-        }
-        if ($_.ScriptStackTrace) {
-            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "Stack Trace: $($_.ScriptStackTrace)" -ErrorType "DISCOVERY_ERROR"
+        catch {
+            $errorMsg = "Failed to collect JSON from C$ share: $($_.Exception.Message)"
+            Write-Warning "[$ComputerName] $errorMsg"
+            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
+            Write-Host "[$ComputerName] JSON file is available on the remote server at: $remotePath" -ForegroundColor Cyan
         }
     }
+    
+    Write-Host "[$ComputerName] Discovery completed." -ForegroundColor Green
 }
 
 # Initialize error log path early so it's available for summary
@@ -741,7 +843,7 @@ Write-Host "`nStarting discovery on $($servers.Count) server(s)..." -ForegroundC
 
 # Create scriptblocks for functions to pass to parallel execution
 $writeErrorLogScriptBlock = ${function:Write-ErrorLog}
-$getWinRmFailureCategoryScriptBlock = ${function:Get-WinRmFailureCategory}
+$ensureWinRmAndConnectScriptBlock = ${function:Ensure-WinRmAndConnect}
 
 # Full (PS 5.1+) path
 if ($script:CompatibilityMode -eq 'Full' -and $UseParallel) {
@@ -767,7 +869,7 @@ if ($script:CompatibilityMode -eq 'Full' -and $UseParallel) {
                 -CollectorShare $using:CollectorShare `
                 -RemoteOutputRoot $using:RemoteOutputRoot `
                 -WriteErrorLogFunction $using:writeErrorLogScriptBlock `
-                -GetWinRmFailureCategoryFunction $using:getWinRmFailureCategoryScriptBlock `
+                -EnsureWinRmAndConnectFunction $using:ensureWinRmAndConnectScriptBlock `
                 -ConfigFile $using:ConfigFile `
                 -RemoteConfigPath $using:remoteConfigPath `
                 -CompatibilityMode $using:script:CompatibilityMode `
@@ -787,7 +889,7 @@ if ($script:CompatibilityMode -eq 'Full' -and $UseParallel) {
                     -CollectorShare $CollectorShare `
                     -RemoteOutputRoot $RemoteOutputRoot `
                     -WriteErrorLogFunction $writeErrorLogScriptBlock `
-                    -GetWinRmFailureCategoryFunction $getWinRmFailureCategoryScriptBlock `
+                    -EnsureWinRmAndConnectFunction $ensureWinRmAndConnectScriptBlock `
                     -ConfigFile $ConfigFile `
                     -RemoteConfigPath $remoteConfigPath `
                     -CompatibilityMode $script:CompatibilityMode `
