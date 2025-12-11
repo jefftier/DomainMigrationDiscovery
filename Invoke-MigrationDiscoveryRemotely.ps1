@@ -343,7 +343,6 @@ $InvokeDiscoveryOnServerScriptBlock = {
             $serviceParams = @{
                 Name         = 'winrm'
                 ComputerName = $ComputerName
-                ErrorAction  = 'Stop'
             }
             
             # First, check if service is already running
@@ -357,9 +356,12 @@ $InvokeDiscoveryOnServerScriptBlock = {
                 # Execute the pipeline command exactly as specified
                 # The service object from Get-Service maintains the ComputerName context
                 # and Start-Service will operate on the remote service
+                # Note: Don't specify ErrorAction on Start-Service when piping - it causes parameter binding conflicts
                 Write-Host "[$ComputerName] Executing: Get-Service -Name winrm -ComputerName $ComputerName | Start-Service" -ForegroundColor Gray
                 
-                Get-Service @serviceParams | Start-Service -ErrorAction Stop
+                # Execute the pipeline - use ErrorAction Stop only on Get-Service
+                # Start-Service will inherit error handling from the pipeline context
+                Get-Service @serviceParams -ErrorAction Stop | Start-Service
                 
                 # Wait a moment for the service to start
                 Start-Sleep -Seconds 3
