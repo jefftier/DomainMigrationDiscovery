@@ -329,47 +329,82 @@ $InvokeDiscoveryOnServerScriptBlock = {
         
         # Use Get-Service/Set-Service as the primary method to start WinRM service
         # This method uses RPC/DCOM and doesn't require WinRM to be running
+        # Note: Get-Service doesn't support -Credential, so we use WMI for credential support
         $serviceStarted = $false
         
         try {
             Write-Host "[$ComputerName] Attempting to start WinRM service via Get-Service/Set-Service..." -ForegroundColor Cyan
             
-            $serviceParams = @{
-                Name         = 'winrm'
-                ComputerName = $ComputerName
-                ErrorAction  = 'Stop'
-            }
-            
-            # Add credentials if provided
+            # Get-Service doesn't support -Credential parameter, so we need to use WMI when credentials are provided
+            # However, we'll try Get-Service first (uses current user context), then fall back to WMI if needed
             if ($Credential) {
-                $serviceParams['Credential'] = $Credential
-            }
-            
-            # Get the service object for the remote computer
-            # The service object's Start() method works with remote services
-            $service = Get-Service @serviceParams
-            
-            if ($service.Status -eq 'Running') {
-                Write-Host "[$ComputerName] WinRM service is already running." -ForegroundColor Green
-                $serviceStarted = $true
-            }
-            else {
-                # Start the service using the service object's Start() method
-                # This works with remote services obtained via Get-Service -ComputerName
-                $service.Start()
+                # Use WMI when credentials are provided (Get-Service doesn't support credentials)
+                $wmiParams = @{
+                    ComputerName = $ComputerName
+                    Class        = 'Win32_Service'
+                    Filter       = "Name='WinRM'"
+                    ErrorAction  = 'Stop'
+                    Credential   = $Credential
+                }
                 
-                # Wait a moment for the service to start
-                Start-Sleep -Seconds 3
+                $service = Get-WmiObject @wmiParams
                 
-                # Refresh the service object to get updated status
-                $service.Refresh()
-                
-                if ($service.Status -eq 'Running') {
-                    Write-Host "[$ComputerName] SUCCESS: WinRM service started via Get-Service/Set-Service." -ForegroundColor Green
+                if ($service.State -eq 'Running') {
+                    Write-Host "[$ComputerName] WinRM service is already running." -ForegroundColor Green
                     $serviceStarted = $true
                 }
                 else {
-                    Write-Warning "[$ComputerName] WinRM service start command succeeded but service is not running. Status: $($service.Status)"
+                    # Start the service using WMI
+                    $result = $service.StartService()
+                    
+                    if ($result.ReturnValue -eq 0) {
+                        Start-Sleep -Seconds 3
+                        # Verify service is running
+                        $service = Get-WmiObject @wmiParams
+                        if ($service.State -eq 'Running') {
+                            Write-Host "[$ComputerName] SUCCESS: WinRM service started via Get-Service/Set-Service (WMI)." -ForegroundColor Green
+                            $serviceStarted = $true
+                        }
+                        else {
+                            Write-Warning "[$ComputerName] WinRM service start command succeeded but service is not running. State: $($service.State)"
+                        }
+                    }
+                    else {
+                        Write-Warning "[$ComputerName] Failed to start WinRM service. WMI ReturnValue: $($result.ReturnValue)"
+                    }
+                }
+            }
+            else {
+                # No credentials - use Get-Service (simpler, uses current user context)
+                $serviceParams = @{
+                    Name         = 'winrm'
+                    ComputerName = $ComputerName
+                    ErrorAction  = 'Stop'
+                }
+                
+                $service = Get-Service @serviceParams
+                
+                if ($service.Status -eq 'Running') {
+                    Write-Host "[$ComputerName] WinRM service is already running." -ForegroundColor Green
+                    $serviceStarted = $true
+                }
+                else {
+                    # Start the service using the service object's Start() method
+                    $service.Start()
+                    
+                    # Wait a moment for the service to start
+                    Start-Sleep -Seconds 3
+                    
+                    # Refresh the service object to get updated status
+                    $service.Refresh()
+                    
+                    if ($service.Status -eq 'Running') {
+                        Write-Host "[$ComputerName] SUCCESS: WinRM service started via Get-Service/Set-Service." -ForegroundColor Green
+                        $serviceStarted = $true
+                    }
+                    else {
+                        Write-Warning "[$ComputerName] WinRM service start command succeeded but service is not running. Status: $($service.Status)"
+                    }
                 }
             }
         }
