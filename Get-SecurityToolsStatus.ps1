@@ -160,7 +160,20 @@ function Get-SCCMTenantInfo {
         $searchDomains += $NewDomainFqdn
     }
     
-    if ($searchDomains.Count -eq 0) {
+    # Safely check array count (handles deserialized arrays)
+    $searchDomainsArray = @($searchDomains)
+    $searchDomainsCount = 0
+    try {
+        $searchDomainsCount = $searchDomainsArray.Count
+    } catch {
+        try {
+            $searchDomainsCount = ($searchDomainsArray | Measure-Object).Count
+        } catch {
+            $searchDomainsCount = 0
+        }
+    }
+    
+    if ($searchDomainsCount -eq 0) {
         return [pscustomobject]@{
             RegPath = "HKLM:\$sccmRegPath"
             Found = $false
@@ -250,18 +263,33 @@ function Get-SCCMTenantInfo {
         $ccmKey.Close()
         
         $foundDomains = $domainReferences | Select-Object -ExpandProperty Domain -Unique
+        # Ensure foundDomains is always an array (Select-Object -ExpandProperty can return a scalar)
+        $foundDomains = @($foundDomains)
         
         $sccmTenant = 'Unknown'
         $hasDomainReference = $false
         
-        if ($foundDomains.Count -gt 0) {
+        # Safely check array count
+        $foundDomainsCount = 0
+        try {
+            $foundDomainsCount = $foundDomains.Count
+        } catch {
+            try {
+                $foundDomainsCount = ($foundDomains | Measure-Object).Count
+            } catch {
+                $foundDomainsCount = 0
+            }
+        }
+        
+        if ($foundDomainsCount -gt 0) {
             $hasDomainReference = $true
             if ($foundDomains -contains $NewDomainFqdn) {
                 $sccmTenant = 'NewDomain'
             } elseif ($foundDomains -contains $OldDomainFqdn) {
                 $sccmTenant = 'OldDomain'
             } else {
-                $sccmTenant = $foundDomains[0]
+                # Safe array access - we know foundDomains is an array and has at least one element
+                $sccmTenant = if ($foundDomainsCount -gt 0) { $foundDomains[0] } else { 'Unknown' }
             }
         }
         
@@ -339,7 +367,19 @@ function Get-EncaseTenantInfo {
                 }
             }
             
-            if ($tenantKeys.Count -gt 0) {
+            # Safely check array count
+            $tenantKeysCount = 0
+            try {
+                $tenantKeysCount = $tenantKeys.Count
+            } catch {
+                try {
+                    $tenantKeysCount = ($tenantKeys | Measure-Object).Count
+                } catch {
+                    $tenantKeysCount = 0
+                }
+            }
+            
+            if ($tenantKeysCount -gt 0) {
                 $tenantKey = $tenantKeys[0]
                 $tenant = $tenantKey
             }
@@ -553,8 +593,19 @@ function Format-SecurityToolsTableRow {
     
     # SCCM: Domains (comma-separated) or "Not Installed"
     $sccmStatus = if ($SecurityAgents.SCCM.Installed) {
-        if ($SecurityAgents.SCCM.FoundDomains -and $SecurityAgents.SCCM.FoundDomains.Count -gt 0) {
-            $SecurityAgents.SCCM.FoundDomains -join ', '
+        $foundDomainsArray = @($SecurityAgents.SCCM.FoundDomains)
+        $foundDomainsCount = 0
+        try {
+            $foundDomainsCount = $foundDomainsArray.Count
+        } catch {
+            try {
+                $foundDomainsCount = ($foundDomainsArray | Measure-Object).Count
+            } catch {
+                $foundDomainsCount = 0
+            }
+        }
+        if ($SecurityAgents.SCCM.FoundDomains -and $foundDomainsCount -gt 0) {
+            $foundDomainsArray -join ', '
         } else {
             "Installed (No Domains Found)"
         }
@@ -765,7 +816,20 @@ function Get-SCCMTenantInfo {
         $searchDomains += $NewDomainFqdn
     }
     
-    if ($searchDomains.Count -eq 0) {
+    # Safely check array count (handles deserialized arrays)
+    $searchDomainsArray = @($searchDomains)
+    $searchDomainsCount = 0
+    try {
+        $searchDomainsCount = $searchDomainsArray.Count
+    } catch {
+        try {
+            $searchDomainsCount = ($searchDomainsArray | Measure-Object).Count
+        } catch {
+            $searchDomainsCount = 0
+        }
+    }
+    
+    if ($searchDomainsCount -eq 0) {
         return [pscustomobject]@{
             RegPath = "HKLM:\$sccmRegPath"
             Found = $false
@@ -855,18 +919,33 @@ function Get-SCCMTenantInfo {
         $ccmKey.Close()
         
         $foundDomains = $domainReferences | Select-Object -ExpandProperty Domain -Unique
+        # Ensure foundDomains is always an array (Select-Object -ExpandProperty can return a scalar)
+        $foundDomains = @($foundDomains)
         
         $sccmTenant = 'Unknown'
         $hasDomainReference = $false
         
-        if ($foundDomains.Count -gt 0) {
+        # Safely check array count
+        $foundDomainsCount = 0
+        try {
+            $foundDomainsCount = $foundDomains.Count
+        } catch {
+            try {
+                $foundDomainsCount = ($foundDomains | Measure-Object).Count
+            } catch {
+                $foundDomainsCount = 0
+            }
+        }
+        
+        if ($foundDomainsCount -gt 0) {
             $hasDomainReference = $true
             if ($foundDomains -contains $NewDomainFqdn) {
                 $sccmTenant = 'NewDomain'
             } elseif ($foundDomains -contains $OldDomainFqdn) {
                 $sccmTenant = 'OldDomain'
             } else {
-                $sccmTenant = $foundDomains[0]
+                # Safe array access - we know foundDomains is an array and has at least one element
+                $sccmTenant = if ($foundDomainsCount -gt 0) { $foundDomains[0] } else { 'Unknown' }
             }
         }
         
@@ -940,7 +1019,19 @@ function Get-EncaseTenantInfo {
                 }
             }
             
-            if ($tenantKeys.Count -gt 0) {
+            # Safely check array count
+            $tenantKeysCount = 0
+            try {
+                $tenantKeysCount = $tenantKeys.Count
+            } catch {
+                try {
+                    $tenantKeysCount = ($tenantKeys | Measure-Object).Count
+                } catch {
+                    $tenantKeysCount = 0
+                }
+            }
+            
+            if ($tenantKeysCount -gt 0) {
                 $tenantKey = $tenantKeys[0]
                 $tenant = $tenantKey
             }
@@ -1269,8 +1360,19 @@ if ($UseParallel -and $PSVersionTable.PSVersion.Major -ge 7) {
                     $qualysStatus = if ($securityAgents.Qualys.Installed) { $securityAgents.Qualys.Tenant } else { "Not Installed" }
                     $crowdStrikeStatus = if ($securityAgents.CrowdStrike.Installed) { $securityAgents.CrowdStrike.Tenant } else { "Not Installed" }
                     $sccmStatus = if ($securityAgents.SCCM.Installed) {
-                        if ($securityAgents.SCCM.FoundDomains -and $securityAgents.SCCM.FoundDomains.Count -gt 0) {
-                            $securityAgents.SCCM.FoundDomains -join ', '
+                        $foundDomainsArray = @($securityAgents.SCCM.FoundDomains)
+                        $foundDomainsCount = 0
+                        try {
+                            $foundDomainsCount = $foundDomainsArray.Count
+                        } catch {
+                            try {
+                                $foundDomainsCount = ($foundDomainsArray | Measure-Object).Count
+                            } catch {
+                                $foundDomainsCount = 0
+                            }
+                        }
+                        if ($securityAgents.SCCM.FoundDomains -and $foundDomainsCount -gt 0) {
+                            $foundDomainsArray -join ', '
                         } else {
                             "Installed (No Domains Found)"
                         }
