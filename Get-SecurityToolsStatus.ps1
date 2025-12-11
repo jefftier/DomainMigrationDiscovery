@@ -308,12 +308,25 @@ function Get-EncaseTenantInfo {
         }
     } catch {}
     
-    if ($EncaseRegistryPaths.Count -gt 0) {
+    # Safely check if array has items (handles deserialized arrays that might not have .Count)
+    $encasePathsArray = @($EncaseRegistryPaths)
+    $hasItems = $false
+    try {
+        $hasItems = $null -ne $encasePathsArray -and $encasePathsArray.Count -gt 0
+    } catch {
+        # If .Count fails, try to enumerate to check if it has items
+        try {
+            $hasItems = ($encasePathsArray | Measure-Object).Count -gt 0
+        } catch {
+            $hasItems = $false
+        }
+    }
+    if ($hasItems) {
         try {
             $baseKey = [Microsoft.Win32.Registry]::LocalMachine
             $tenantKeys = @()
             
-            foreach ($keyName in $EncaseRegistryPaths) {
+            foreach ($keyName in $encasePathsArray) {
                 if (-not [string]::IsNullOrWhiteSpace($keyName)) {
                     $testPath = "SOFTWARE\Microsoft\$keyName"
                     try {
@@ -896,12 +909,25 @@ function Get-EncaseTenantInfo {
         }
     } catch {}
     
-    if ($EncaseRegistryPaths.Count -gt 0) {
+    # Safely check if array has items (handles deserialized arrays that might not have .Count)
+    $encasePathsArray = @($EncaseRegistryPaths)
+    $hasItems = $false
+    try {
+        $hasItems = $null -ne $encasePathsArray -and $encasePathsArray.Count -gt 0
+    } catch {
+        # If .Count fails, try to enumerate to check if it has items
+        try {
+            $hasItems = ($encasePathsArray | Measure-Object).Count -gt 0
+        } catch {
+            $hasItems = $false
+        }
+    }
+    if ($hasItems) {
         try {
             $baseKey = [Microsoft.Win32.Registry]::LocalMachine
             $tenantKeys = @()
             
-            foreach ($keyName in $EncaseRegistryPaths) {
+            foreach ($keyName in $encasePathsArray) {
                 if (-not [string]::IsNullOrWhiteSpace($keyName)) {
                     $testPath = "SOFTWARE\Microsoft\$keyName"
                     try {
@@ -1028,11 +1054,8 @@ $functionDefinitions
 `$QualysTenantMap = `$args[4]
 
 # Ensure EncaseRegistryPaths is properly converted to array (Invoke-Command may deserialize it incorrectly)
-if (`$null -eq `$EncaseRegistryPaths) {
-    `$EncaseRegistryPaths = @()
-} elseif (`$EncaseRegistryPaths -isnot [array]) {
-    `$EncaseRegistryPaths = @(`$EncaseRegistryPaths)
-}
+# Use @() to force array conversion - this handles null, single values, PSCustomObjects, and nested arrays
+`$EncaseRegistryPaths = @(`$EncaseRegistryPaths)
 
 # Ensure hashtables are properly converted (Invoke-Command may deserialize them as PSCustomObjects)
 if (`$null -eq `$CrowdStrikeTenantMap) {
