@@ -353,34 +353,32 @@ $InvokeDiscoveryOnServerScriptBlock = {
                 $serviceStarted = $true
             }
             else {
-                # Execute the pipeline command exactly as specified
-                # The service object from Get-Service maintains the ComputerName context
-                # and Start-Service will operate on the remote service
-                # Note: Don't specify ErrorAction on Start-Service when piping - it causes parameter binding conflicts
+                # Get the service object first, then start it using the object's Start() method
+                # This preserves the remote computer context better than piping to Start-Service
+                # The equivalent of: Get-Service -Name winrm -ComputerName $ComputerName | Start-Service
                 Write-Host "[$ComputerName] Executing: Get-Service -Name winrm -ComputerName $ComputerName | Start-Service" -ForegroundColor Gray
                 
-                # Execute the pipeline - use ErrorAction Stop only on Get-Service
-                # Start-Service will inherit error handling from the pipeline context
-                Get-Service @serviceParams -ErrorAction Stop | Start-Service
+                # Get the service object (this maintains the remote ComputerName context)
+                $service = Get-Service @serviceParams -ErrorAction Stop
+                
+                # Start the service using the service object's Start() method
+                # This preserves the remote computer context
+                $service.Start()
                 
                 # Wait a moment for the service to start
                 Start-Sleep -Seconds 3
                 
-                # Verify the service is running by getting it again
-                $serviceCheck = Get-Service @serviceParams -ErrorAction SilentlyContinue
+                # Refresh the service object to get updated status
+                $service.Refresh()
                 
-                if ($serviceCheck) {
-                    if ($serviceCheck.Status -eq 'Running') {
-                        Write-Host "[$ComputerName] SUCCESS: WinRM service started via Get-Service/Start-Service pipeline." -ForegroundColor Green
-                        $serviceStarted = $true
-                    }
-                    else {
-                        Write-Warning "[$ComputerName] WinRM service start command completed but service status is: $($serviceCheck.Status)"
-                        # Don't set $serviceStarted = false here - let the retry logic handle it
-                    }
+                # Verify the service is running
+                if ($service.Status -eq 'Running') {
+                    Write-Host "[$ComputerName] SUCCESS: WinRM service started via Get-Service/Start-Service." -ForegroundColor Green
+                    $serviceStarted = $true
                 }
                 else {
-                    Write-Warning "[$ComputerName] WinRM service start command completed but unable to verify status (Get-Service returned no result)"
+                    Write-Warning "[$ComputerName] WinRM service start command completed but service status is: $($service.Status)"
+                    # Don't set $serviceStarted = false here - let the retry logic handle it
                 }
             }
         }
