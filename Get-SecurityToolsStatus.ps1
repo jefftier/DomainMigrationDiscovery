@@ -1,36 +1,54 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Checks security tools status for a specific server remotely.
+    Checks security tools status for one or more servers remotely.
 
 .DESCRIPTION
-    This script connects to a remote server via WinRM and checks the status of security tools:
+    This script connects to remote servers via WinRM and checks the status of security tools:
     - CrowdStrike (Falcon Sensor)
     - Qualys
     - SCCM (Configuration Manager)
     - Encase
     
-    The results are displayed in a formatted console output showing the installation status
-    and tenant configuration for each security tool.
+    The results are displayed in a formatted table showing the installation status
+    and tenant configuration for each security tool across all servers.
 
 .PARAMETER ComputerName
-    The name or IP address of the remote server to check.
+    The name or IP address of a single remote server to check.
+    Mutually exclusive with ServerListPath.
+
+.PARAMETER ServerListPath
+    Path to a text file containing a list of servers (one per line).
+    Default: ".\servers.txt"
+    Mutually exclusive with ComputerName.
+    Lines starting with # are treated as comments and ignored.
 
 .PARAMETER OldDomainFqdn
     Fully Qualified Domain Name (FQDN) of the old domain (required for SCCM detection).
+    Can be provided as parameter or loaded from ConfigFile.
     Example: 'olddomain.com'
 
 .PARAMETER NewDomainFqdn
     Fully Qualified Domain Name (FQDN) of the new domain (required for SCCM detection).
+    Can be provided as parameter or loaded from ConfigFile.
     Example: 'newdomain.com'
 
 .PARAMETER ConfigFile
-    Optional path to JSON configuration file for tenant mappings and Encase registry paths.
+    Optional path to JSON configuration file for domain settings, tenant mappings, and Encase registry paths.
     If not provided, default mappings will be used.
+
+.PARAMETER UseParallel
+    Use parallel execution for multiple servers (PowerShell 7+ only).
+    If not available, falls back to sequential execution.
 
 .PARAMETER Credential
     Optional PSCredential object for remote authentication.
     If not provided, will prompt for credentials or use current user context.
+
+.EXAMPLE
+    .\Get-SecurityToolsStatus.ps1 -ServerListPath ".\servers.txt" -ConfigFile ".\migration-config.json"
+    
+    Checks security tools on all servers in servers.txt using settings from the config file.
 
 .EXAMPLE
     .\Get-SecurityToolsStatus.ps1 -ComputerName "SERVER01" -OldDomainFqdn "oldco.com" -NewDomainFqdn "newco.com"
@@ -38,14 +56,17 @@
     Checks security tools on SERVER01 using default tenant mappings.
 
 .EXAMPLE
-    .\Get-SecurityToolsStatus.ps1 -ComputerName "SERVER01" -OldDomainFqdn "oldco.com" -NewDomainFqdn "newco.com" -ConfigFile ".\migration-config.json"
+    .\Get-SecurityToolsStatus.ps1 -ServerListPath ".\servers.txt" -UseParallel
     
-    Checks security tools on SERVER01 using tenant mappings from the config file.
+    Checks security tools on all servers in parallel (PowerShell 7+).
 #>
 
 param(
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $false, ParameterSetName = 'SingleServer')]
     [string]$ComputerName,
+    
+    [Parameter(Mandatory = $false, ParameterSetName = 'ServerList')]
+    [string]$ServerListPath = ".\servers.txt",
     
     [Parameter(Mandatory = $false)]
     [string]$OldDomainFqdn,
@@ -54,6 +75,8 @@ param(
     [string]$NewDomainFqdn,
     
     [string]$ConfigFile,
+    
+    [switch]$UseParallel,
     
     [System.Management.Automation.PSCredential]$Credential
 )
@@ -493,89 +516,53 @@ function Import-ConfigurationFile {
 
 <#
 .SYNOPSIS
-    Formats and displays security tools status to console.
+    Formats security tools result into a table row.
 #>
-function Format-SecurityToolsOutput {
+function Format-SecurityToolsTableRow {
     param(
-        [string]$ComputerName,
+        [string]$ServerName,
         [object]$SecurityAgents
     )
     
-    Write-Host "`n" + ("="*80) -ForegroundColor Cyan
-    Write-Host "Security Tools Status for: $ComputerName" -ForegroundColor Cyan
-    Write-Host ("="*80) -ForegroundColor Cyan
-    Write-Host ""
-    
-    # CrowdStrike
-    Write-Host "CrowdStrike (Falcon Sensor):" -ForegroundColor Yellow
-    if ($SecurityAgents.CrowdStrike.Installed) {
-        Write-Host "  Status:      " -NoNewline
-        Write-Host "INSTALLED" -ForegroundColor Green
-        Write-Host "  Registry:    $($SecurityAgents.CrowdStrike.RegPath)" -ForegroundColor Gray
-        Write-Host "  Value Name:  $($SecurityAgents.CrowdStrike.ValueName)" -ForegroundColor Gray
-        Write-Host "  Value:       $($SecurityAgents.CrowdStrike.Value)" -ForegroundColor Gray
-        Write-Host "  Tenant:      " -NoNewline
-        Write-Host "$($SecurityAgents.CrowdStrike.Tenant)" -ForegroundColor Cyan
+    # Qualys: Tenant or "Not Installed"
+    $qualysStatus = if ($SecurityAgents.Qualys.Installed) {
+        $SecurityAgents.Qualys.Tenant
     } else {
-        Write-Host "  Status:      " -NoNewline
-        Write-Host "NOT INSTALLED" -ForegroundColor Red
+        "Not Installed"
     }
-    Write-Host ""
     
-    # Qualys
-    Write-Host "Qualys:" -ForegroundColor Yellow
-    if ($SecurityAgents.Qualys.Installed) {
-        Write-Host "  Status:      " -NoNewline
-        Write-Host "INSTALLED" -ForegroundColor Green
-        Write-Host "  Registry:    $($SecurityAgents.Qualys.RegPath)" -ForegroundColor Gray
-        Write-Host "  Value Name:  $($SecurityAgents.Qualys.ValueName)" -ForegroundColor Gray
-        Write-Host "  Value:       $($SecurityAgents.Qualys.Value)" -ForegroundColor Gray
-        Write-Host "  Tenant:      " -NoNewline
-        Write-Host "$($SecurityAgents.Qualys.Tenant)" -ForegroundColor Cyan
+    # CrowdStrike: Tenant or "Not Installed"
+    $crowdStrikeStatus = if ($SecurityAgents.CrowdStrike.Installed) {
+        $SecurityAgents.CrowdStrike.Tenant
     } else {
-        Write-Host "  Status:      " -NoNewline
-        Write-Host "NOT INSTALLED" -ForegroundColor Red
+        "Not Installed"
     }
-    Write-Host ""
     
-    # SCCM
-    Write-Host "SCCM (Configuration Manager):" -ForegroundColor Yellow
-    if ($SecurityAgents.SCCM.Installed) {
-        Write-Host "  Status:      " -NoNewline
-        Write-Host "INSTALLED" -ForegroundColor Green
-        Write-Host "  Registry:    $($SecurityAgents.SCCM.RegPath)" -ForegroundColor Gray
-        Write-Host "  Tenant:      " -NoNewline
-        Write-Host "$($SecurityAgents.SCCM.Tenant)" -ForegroundColor Cyan
-        if ($SecurityAgents.SCCM.HasDomainReference) {
-            Write-Host "  Domains:     " -NoNewline
-            Write-Host "$($SecurityAgents.SCCM.FoundDomains -join ', ')" -ForegroundColor Gray
+    # SCCM: Domains (comma-separated) or "Not Installed"
+    $sccmStatus = if ($SecurityAgents.SCCM.Installed) {
+        if ($SecurityAgents.SCCM.FoundDomains -and $SecurityAgents.SCCM.FoundDomains.Count -gt 0) {
+            $SecurityAgents.SCCM.FoundDomains -join ', '
+        } else {
+            "Installed (No Domains Found)"
         }
     } else {
-        Write-Host "  Status:      " -NoNewline
-        Write-Host "NOT INSTALLED" -ForegroundColor Red
+        "Not Installed"
     }
-    Write-Host ""
     
-    # Encase
-    Write-Host "Encase:" -ForegroundColor Yellow
-    if ($SecurityAgents.Encase.Installed) {
-        Write-Host "  Status:      " -NoNewline
-        Write-Host "INSTALLED" -ForegroundColor Green
-        Write-Host "  Service:     $($SecurityAgents.Encase.ServiceName)" -ForegroundColor Gray
-        if ($SecurityAgents.Encase.RegPath) {
-            Write-Host "  Registry:    $($SecurityAgents.Encase.RegPath)" -ForegroundColor Gray
-        }
-        Write-Host "  Tenant Key:  $($SecurityAgents.Encase.TenantKey)" -ForegroundColor Gray
-        Write-Host "  Tenant:      " -NoNewline
-        Write-Host "$($SecurityAgents.Encase.Tenant)" -ForegroundColor Cyan
+    # Encase: "Installed" or "Not Installed"
+    $encaseStatus = if ($SecurityAgents.Encase.Installed) {
+        "Installed"
     } else {
-        Write-Host "  Status:      " -NoNewline
-        Write-Host "NOT INSTALLED" -ForegroundColor Red
+        "Not Installed"
     }
-    Write-Host ""
     
-    Write-Host ("="*80) -ForegroundColor Cyan
-    Write-Host ""
+    return [PSCustomObject]@{
+        Server = $ServerName
+        Qualys = $qualysStatus
+        CrowdStrike = $crowdStrikeStatus
+        SCCM = $sccmStatus
+        Encase = $encaseStatus
+    }
 }
 
 # ============================================================================
@@ -659,37 +646,44 @@ if ([string]::IsNullOrWhiteSpace($NewDomainFqdn)) {
     throw $errorMsg
 }
 
+# Determine server list
+$servers = @()
+if ($PSCmdlet.ParameterSetName -eq 'ServerList') {
+    if (-not (Test-Path -LiteralPath $ServerListPath)) {
+        $errorMsg = "Server list file not found: $ServerListPath"
+        Write-Error $errorMsg
+        throw $errorMsg
+    }
+    
+    # Read and de-duplicate server names (ignore blank/commented lines)
+    $servers = @(Get-Content -Path $ServerListPath |
+        Where-Object { $_ -and $_.Trim() -ne "" -and -not $_.Trim().StartsWith("#") } |
+        ForEach-Object { $_.Trim() } |
+        Sort-Object -Unique)
+    
+    if ($servers.Count -eq 0) {
+        $errorMsg = "No servers found in list file: $ServerListPath"
+        Write-Error $errorMsg
+        throw $errorMsg
+    }
+    
+    Write-Host "Found $($servers.Count) server(s) in list file" -ForegroundColor Cyan
+} elseif ($ComputerName) {
+    $servers = @($ComputerName)
+} else {
+    $errorMsg = "Either ComputerName or ServerListPath must be provided"
+    Write-Error $errorMsg
+    throw $errorMsg
+}
+
 # Get credentials if not provided
 if (-not $Credential) {
-    $cred = Get-Credential -Message "Enter credentials for $ComputerName (or press Cancel to use current user)"
+    $cred = Get-Credential -Message "Enter credentials for remote servers (or press Cancel to use current user)"
     if ($cred) {
         $Credential = $cred
     }
 }
 
-Write-Host "Connecting to $ComputerName..." -ForegroundColor Yellow
-
-# Test connectivity
-try {
-    $testParams = @{
-        ComputerName = $ComputerName
-        ScriptBlock  = { $env:COMPUTERNAME }
-        ErrorAction  = 'Stop'
-    }
-    if ($Credential) {
-        $testParams['Credential'] = $Credential
-    }
-    if ($PSVersionTable.PSVersion.Major -ge 5) {
-        $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30
-    }
-    
-    $actualComputerName = Invoke-Command @testParams
-    Write-Host "Successfully connected to: $actualComputerName" -ForegroundColor Green
-}
-catch {
-    Write-Error "Failed to connect to $ComputerName : $($_.Exception.Message)"
-    exit 1
-}
 
 # Build scriptblock with all necessary functions
 # We need to define all functions inside the scriptblock for remote execution
@@ -1053,38 +1047,224 @@ if (`$null -eq `$QualysTenantMap) {
 Get-SecurityAgentsTenantInfo -OldDomainFqdn `$OldDomainFqdn -NewDomainFqdn `$NewDomainFqdn -EncaseRegistryPaths `$EncaseRegistryPaths -CrowdStrikeTenantMap `$CrowdStrikeTenantMap -QualysTenantMap `$QualysTenantMap
 "@)
 
-# Execute remote security check
-try {
-    Write-Host "Checking security tools..." -ForegroundColor Yellow
+# Function to check security tools on a single server
+function Invoke-SecurityCheckOnServer {
+    param(
+        [string]$ServerName,
+        [string]$OldDomainFqdn,
+        [string]$NewDomainFqdn,
+        [string[]]$EncaseRegistryPaths,
+        [hashtable]$CrowdStrikeTenantMap,
+        [hashtable]$QualysTenantMap,
+        [System.Management.Automation.PSCredential]$Credential,
+        [scriptblock]$SecurityCheckScriptBlock
+    )
     
-    $invokeParams = @{
-        ComputerName = $ComputerName
-        ScriptBlock  = $securityCheckScriptBlock
-        ArgumentList = @(
-            $OldDomainFqdn,
-            $NewDomainFqdn,
-            ,@($config.EncaseRegistryPaths),
-            $config.CrowdStrikeTenantMap,
-            $config.QualysTenantMap
-        )
-        ErrorAction  = 'Stop'
+    $result = [PSCustomObject]@{
+        Server = $ServerName
+        Qualys = "Error"
+        CrowdStrike = "Error"
+        SCCM = "Error"
+        Encase = "Error"
+        Success = $false
     }
     
-    if ($Credential) {
-        $invokeParams['Credential'] = $Credential
+    try {
+        # Test connectivity
+        $testParams = @{
+            ComputerName = $ServerName
+            ScriptBlock  = { $env:COMPUTERNAME }
+            ErrorAction  = 'Stop'
+        }
+        if ($Credential) {
+            $testParams['Credential'] = $Credential
+        }
+        if ($PSVersionTable.PSVersion.Major -ge 5) {
+            $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30
+        }
+        
+        $actualComputerName = Invoke-Command @testParams
+        
+        # Execute security check
+        $invokeParams = @{
+            ComputerName = $ServerName
+            ScriptBlock  = $SecurityCheckScriptBlock
+            ArgumentList = @(
+                $OldDomainFqdn,
+                $NewDomainFqdn,
+                ,@($EncaseRegistryPaths),
+                $CrowdStrikeTenantMap,
+                $QualysTenantMap
+            )
+            ErrorAction  = 'Stop'
+        }
+        
+        if ($Credential) {
+            $invokeParams['Credential'] = $Credential
+        }
+        
+        if ($PSVersionTable.PSVersion.Major -ge 5) {
+            $invokeParams['SessionOption'] = New-PSSessionOption -OperationTimeout 300
+        }
+        
+        $securityAgents = Invoke-Command @invokeParams
+        
+        # Format result
+        $formatted = Format-SecurityToolsTableRow -ServerName $ServerName -SecurityAgents $securityAgents
+        $result.Server = $formatted.Server
+        $result.Qualys = $formatted.Qualys
+        $result.CrowdStrike = $formatted.CrowdStrike
+        $result.SCCM = $formatted.SCCM
+        $result.Encase = $formatted.Encase
+        $result.Success = $true
+    }
+    catch {
+        $result.Qualys = "Connection Failed"
+        $result.CrowdStrike = "Connection Failed"
+        $result.SCCM = "Connection Failed"
+        $result.Encase = "Connection Failed"
     }
     
-    if ($PSVersionTable.PSVersion.Major -ge 5) {
-        $invokeParams['SessionOption'] = New-PSSessionOption -OperationTimeout 300
-    }
-    
-    $securityAgents = Invoke-Command @invokeParams
-    
-    # Display results
-    Format-SecurityToolsOutput -ComputerName $ComputerName -SecurityAgents $securityAgents
+    return $result
 }
-catch {
-    Write-Error "Failed to check security tools on $ComputerName : $($_.Exception.Message)"
-    exit 1
+
+# Process servers
+$results = @()
+
+if ($UseParallel -and $PSVersionTable.PSVersion.Major -ge 7) {
+    # PowerShell 7+ parallel execution
+    try {
+        $null = Get-Command ForEach-Object -ParameterName Parallel -ErrorAction Stop
+        $results = $servers | ForEach-Object -Parallel {
+            # Recreate the function in the parallel context
+            function Invoke-SecurityCheckOnServer {
+                param(
+                    [string]$ServerName,
+                    [string]$OldDomainFqdn,
+                    [string]$NewDomainFqdn,
+                    [string[]]$EncaseRegistryPaths,
+                    [hashtable]$CrowdStrikeTenantMap,
+                    [hashtable]$QualysTenantMap,
+                    [System.Management.Automation.PSCredential]$Credential,
+                    [scriptblock]$SecurityCheckScriptBlock
+                )
+                
+                $result = [PSCustomObject]@{
+                    Server = $ServerName
+                    Qualys = "Error"
+                    CrowdStrike = "Error"
+                    SCCM = "Error"
+                    Encase = "Error"
+                    Success = $false
+                }
+                
+                try {
+                    $testParams = @{
+                        ComputerName = $ServerName
+                        ScriptBlock  = { $env:COMPUTERNAME }
+                        ErrorAction  = 'Stop'
+                    }
+                    if ($Credential) {
+                        $testParams['Credential'] = $Credential
+                    }
+                    if ($PSVersionTable.PSVersion.Major -ge 5) {
+                        $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30
+                    }
+                    
+                    $actualComputerName = Invoke-Command @testParams
+                    
+                    $invokeParams = @{
+                        ComputerName = $ServerName
+                        ScriptBlock  = $SecurityCheckScriptBlock
+                        ArgumentList = @(
+                            $OldDomainFqdn,
+                            $NewDomainFqdn,
+                            ,@($EncaseRegistryPaths),
+                            $CrowdStrikeTenantMap,
+                            $QualysTenantMap
+                        )
+                        ErrorAction  = 'Stop'
+                    }
+                    
+                    if ($Credential) {
+                        $invokeParams['Credential'] = $Credential
+                    }
+                    
+                    if ($PSVersionTable.PSVersion.Major -ge 5) {
+                        $invokeParams['SessionOption'] = New-PSSessionOption -OperationTimeout 300
+                    }
+                    
+                    $securityAgents = Invoke-Command @invokeParams
+                    
+                    # Format result inline (can't use external function in parallel)
+                    $qualysStatus = if ($securityAgents.Qualys.Installed) { $securityAgents.Qualys.Tenant } else { "Not Installed" }
+                    $crowdStrikeStatus = if ($securityAgents.CrowdStrike.Installed) { $securityAgents.CrowdStrike.Tenant } else { "Not Installed" }
+                    $sccmStatus = if ($securityAgents.SCCM.Installed) {
+                        if ($securityAgents.SCCM.FoundDomains -and $securityAgents.SCCM.FoundDomains.Count -gt 0) {
+                            $securityAgents.SCCM.FoundDomains -join ', '
+                        } else {
+                            "Installed (No Domains Found)"
+                        }
+                    } else {
+                        "Not Installed"
+                    }
+                    $encaseStatus = if ($securityAgents.Encase.Installed) { "Installed" } else { "Not Installed" }
+                    
+                    $result.Server = $ServerName
+                    $result.Qualys = $qualysStatus
+                    $result.CrowdStrike = $crowdStrikeStatus
+                    $result.SCCM = $sccmStatus
+                    $result.Encase = $encaseStatus
+                    $result.Success = $true
+                }
+                catch {
+                    $result.Qualys = "Connection Failed"
+                    $result.CrowdStrike = "Connection Failed"
+                    $result.SCCM = "Connection Failed"
+                    $result.Encase = "Connection Failed"
+                }
+                
+                return $result
+            }
+            
+            Invoke-SecurityCheckOnServer `
+                -ServerName $_ `
+                -OldDomainFqdn $using:OldDomainFqdn `
+                -NewDomainFqdn $using:NewDomainFqdn `
+                -EncaseRegistryPaths $using:config.EncaseRegistryPaths `
+                -CrowdStrikeTenantMap $using:config.CrowdStrikeTenantMap `
+                -QualysTenantMap $using:config.QualysTenantMap `
+                -Credential $using:Credential `
+                -SecurityCheckScriptBlock $using:securityCheckScriptBlock
+        } -ThrottleLimit 10
+    }
+    catch {
+        Write-Warning "Parallel execution not available. Using sequential execution."
+        $UseParallel = $false
+    }
 }
+
+if (-not $UseParallel -or $PSVersionTable.PSVersion.Major -lt 7) {
+    # Sequential execution
+    foreach ($server in $servers) {
+        Write-Host "Checking $server..." -ForegroundColor Yellow
+        $result = Invoke-SecurityCheckOnServer `
+            -ServerName $server `
+            -OldDomainFqdn $OldDomainFqdn `
+            -NewDomainFqdn $NewDomainFqdn `
+            -EncaseRegistryPaths $config.EncaseRegistryPaths `
+            -CrowdStrikeTenantMap $config.CrowdStrikeTenantMap `
+            -QualysTenantMap $config.QualysTenantMap `
+            -Credential $Credential `
+            -SecurityCheckScriptBlock $securityCheckScriptBlock
+        $results += $result
+    }
+}
+
+# Display results table
+Write-Host "`n" + ("="*100) -ForegroundColor Cyan
+Write-Host "Security Tools Status Summary" -ForegroundColor Cyan
+Write-Host ("="*100) -ForegroundColor Cyan
+$results | Format-Table -AutoSize -Property Server, Qualys, CrowdStrike, SCCM, Encase
+Write-Host ("="*100) -ForegroundColor Cyan
 
