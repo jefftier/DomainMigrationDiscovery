@@ -1027,6 +1027,13 @@ $functionDefinitions
 `$CrowdStrikeTenantMap = `$args[3]
 `$QualysTenantMap = `$args[4]
 
+# Ensure EncaseRegistryPaths is properly converted to array (Invoke-Command may deserialize it incorrectly)
+if (`$null -eq `$EncaseRegistryPaths) {
+    `$EncaseRegistryPaths = @()
+} elseif (`$EncaseRegistryPaths -isnot [array]) {
+    `$EncaseRegistryPaths = @(`$EncaseRegistryPaths)
+}
+
 # Ensure hashtables are properly converted (Invoke-Command may deserialize them as PSCustomObjects)
 if (`$null -eq `$CrowdStrikeTenantMap) {
     `$CrowdStrikeTenantMap = @{}
@@ -1071,6 +1078,7 @@ function Invoke-SecurityCheckOnServer {
     
     try {
         # Test connectivity
+        Write-Host "Testing connectivity to $ServerName..." -ForegroundColor Yellow
         $testParams = @{
             ComputerName = $ServerName
             ScriptBlock  = { $env:COMPUTERNAME }
@@ -1079,20 +1087,29 @@ function Invoke-SecurityCheckOnServer {
         if ($Credential) {
             $testParams['Credential'] = $Credential
         }
-        if ($PSVersionTable.PSVersion.Major -ge 5) {
-            $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30
+        
+        # Add SessionOption with error handling
+        try {
+            if ($PSVersionTable.PSVersion.Major -ge 5) {
+                $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30 -ErrorAction Stop
+            }
+        }
+        catch {
+            Write-Warning "Failed to create SessionOption for $ServerName (continuing without timeout): $($_.Exception.Message)"
         }
         
         $actualComputerName = Invoke-Command @testParams
+        Write-Host "Successfully connected to $ServerName (remote computer: $actualComputerName)" -ForegroundColor Green
         
         # Execute security check
+        Write-Host "Executing security check on $ServerName..." -ForegroundColor Yellow
         $invokeParams = @{
             ComputerName = $ServerName
             ScriptBlock  = $SecurityCheckScriptBlock
             ArgumentList = @(
                 $OldDomainFqdn,
                 $NewDomainFqdn,
-                ,@($EncaseRegistryPaths),
+                $EncaseRegistryPaths,
                 $CrowdStrikeTenantMap,
                 $QualysTenantMap
             )
@@ -1103,8 +1120,14 @@ function Invoke-SecurityCheckOnServer {
             $invokeParams['Credential'] = $Credential
         }
         
-        if ($PSVersionTable.PSVersion.Major -ge 5) {
-            $invokeParams['SessionOption'] = New-PSSessionOption -OperationTimeout 300
+        # Add SessionOption with error handling
+        try {
+            if ($PSVersionTable.PSVersion.Major -ge 5) {
+                $invokeParams['SessionOption'] = New-PSSessionOption -OperationTimeout 300 -ErrorAction Stop
+            }
+        }
+        catch {
+            Write-Warning "Failed to create SessionOption for $ServerName (continuing without timeout): $($_.Exception.Message)"
         }
         
         $securityAgents = Invoke-Command @invokeParams
@@ -1117,8 +1140,15 @@ function Invoke-SecurityCheckOnServer {
         $result.SCCM = $formatted.SCCM
         $result.Encase = $formatted.Encase
         $result.Success = $true
+        Write-Host "Security check completed successfully for $ServerName" -ForegroundColor Green
     }
     catch {
+        $errorMessage = $_.Exception.Message
+        $errorCategory = $_.CategoryInfo.Category
+        Write-Warning "Connection failed for $ServerName : $errorMessage (Category: $errorCategory)"
+        if ($_.Exception.InnerException) {
+            Write-Warning "Inner exception: $($_.Exception.InnerException.Message)"
+        }
         $result.Qualys = "Connection Failed"
         $result.CrowdStrike = "Connection Failed"
         $result.SCCM = "Connection Failed"
@@ -1159,6 +1189,7 @@ if ($UseParallel -and $PSVersionTable.PSVersion.Major -ge 7) {
                 }
                 
                 try {
+                    Write-Host "Testing connectivity to $ServerName..." -ForegroundColor Yellow
                     $testParams = @{
                         ComputerName = $ServerName
                         ScriptBlock  = { $env:COMPUTERNAME }
@@ -1167,19 +1198,28 @@ if ($UseParallel -and $PSVersionTable.PSVersion.Major -ge 7) {
                     if ($Credential) {
                         $testParams['Credential'] = $Credential
                     }
-                    if ($PSVersionTable.PSVersion.Major -ge 5) {
-                        $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30
+                    
+                    # Add SessionOption with error handling
+                    try {
+                        if ($PSVersionTable.PSVersion.Major -ge 5) {
+                            $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30 -ErrorAction Stop
+                        }
+                    }
+                    catch {
+                        Write-Warning "Failed to create SessionOption for $ServerName (continuing without timeout): $($_.Exception.Message)"
                     }
                     
                     $actualComputerName = Invoke-Command @testParams
+                    Write-Host "Successfully connected to $ServerName (remote computer: $actualComputerName)" -ForegroundColor Green
                     
+                    Write-Host "Executing security check on $ServerName..." -ForegroundColor Yellow
                     $invokeParams = @{
                         ComputerName = $ServerName
                         ScriptBlock  = $SecurityCheckScriptBlock
                         ArgumentList = @(
                             $OldDomainFqdn,
                             $NewDomainFqdn,
-                            ,@($EncaseRegistryPaths),
+                            $EncaseRegistryPaths,
                             $CrowdStrikeTenantMap,
                             $QualysTenantMap
                         )
@@ -1190,8 +1230,14 @@ if ($UseParallel -and $PSVersionTable.PSVersion.Major -ge 7) {
                         $invokeParams['Credential'] = $Credential
                     }
                     
-                    if ($PSVersionTable.PSVersion.Major -ge 5) {
-                        $invokeParams['SessionOption'] = New-PSSessionOption -OperationTimeout 300
+                    # Add SessionOption with error handling
+                    try {
+                        if ($PSVersionTable.PSVersion.Major -ge 5) {
+                            $invokeParams['SessionOption'] = New-PSSessionOption -OperationTimeout 300 -ErrorAction Stop
+                        }
+                    }
+                    catch {
+                        Write-Warning "Failed to create SessionOption for $ServerName (continuing without timeout): $($_.Exception.Message)"
                     }
                     
                     $securityAgents = Invoke-Command @invokeParams
@@ -1216,8 +1262,15 @@ if ($UseParallel -and $PSVersionTable.PSVersion.Major -ge 7) {
                     $result.SCCM = $sccmStatus
                     $result.Encase = $encaseStatus
                     $result.Success = $true
+                    Write-Host "Security check completed successfully for $ServerName" -ForegroundColor Green
                 }
                 catch {
+                    $errorMessage = $_.Exception.Message
+                    $errorCategory = $_.CategoryInfo.Category
+                    Write-Warning "Connection failed for $ServerName : $errorMessage (Category: $errorCategory)"
+                    if ($_.Exception.InnerException) {
+                        Write-Warning "Inner exception: $($_.Exception.InnerException.Message)"
+                    }
                     $result.Qualys = "Connection Failed"
                     $result.CrowdStrike = "Connection Failed"
                     $result.SCCM = "Connection Failed"
