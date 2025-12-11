@@ -919,7 +919,7 @@ else {
                 -CollectorShare $CollectorShare `
                 -RemoteOutputRoot $RemoteOutputRoot `
                 -WriteErrorLogFunction $writeErrorLogScriptBlock `
-                -GetWinRmFailureCategoryFunction $getWinRmFailureCategoryScriptBlock `
+                -EnsureWinRmAndConnectFunction $ensureWinRmAndConnectScriptBlock `
                 -ConfigFile $ConfigFile `
                 -RemoteConfigPath $remoteConfigPath `
                 -AttemptWinRmHeal:$AttemptWinRmHeal
