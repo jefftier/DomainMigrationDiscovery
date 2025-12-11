@@ -327,90 +327,78 @@ $InvokeDiscoveryOnServerScriptBlock = {
         # For NetworkError or Unknown, attempt to start WinRM service (only if AttemptWinRmHeal is set)
         Write-Host "[$ComputerName] Attempting to start WinRM service and retry connection..." -ForegroundColor Yellow
         
-        # Use Get-Service/Set-Service as the primary method to start WinRM service
+        # Use Get-Service/Start-Service pipeline as the primary method to start WinRM service
         # This method uses RPC/DCOM and doesn't require WinRM to be running
-        # Note: Get-Service doesn't support -Credential, so we use WMI for credential support
+        # Command: Get-Service -Name winrm -ComputerName <PC> | Start-Service
         $serviceStarted = $false
         
         try {
-            Write-Host "[$ComputerName] Attempting to start WinRM service via Get-Service/Set-Service..." -ForegroundColor Cyan
+            Write-Host "[$ComputerName] Attempting to start WinRM service via Get-Service/Start-Service pipeline..." -ForegroundColor Cyan
             
-            # Get-Service doesn't support -Credential parameter, so we need to use WMI when credentials are provided
-            # However, we'll try Get-Service first (uses current user context), then fall back to WMI if needed
-            if ($Credential) {
-                # Use WMI when credentials are provided (Get-Service doesn't support credentials)
-                $wmiParams = @{
-                    ComputerName = $ComputerName
-                    Class        = 'Win32_Service'
-                    Filter       = "Name='WinRM'"
-                    ErrorAction  = 'Stop'
-                    Credential   = $Credential
-                }
-                
-                $service = Get-WmiObject @wmiParams
-                
-                if ($service.State -eq 'Running') {
-                    Write-Host "[$ComputerName] WinRM service is already running." -ForegroundColor Green
-                    $serviceStarted = $true
-                }
-                else {
-                    # Start the service using WMI
-                    $result = $service.StartService()
-                    
-                    if ($result.ReturnValue -eq 0) {
-                        Start-Sleep -Seconds 3
-                        # Verify service is running
-                        $service = Get-WmiObject @wmiParams
-                        if ($service.State -eq 'Running') {
-                            Write-Host "[$ComputerName] SUCCESS: WinRM service started via Get-Service/Set-Service (WMI)." -ForegroundColor Green
-                            $serviceStarted = $true
-                        }
-                        else {
-                            Write-Warning "[$ComputerName] WinRM service start command succeeded but service is not running. State: $($service.State)"
-                        }
-                    }
-                    else {
-                        Write-Warning "[$ComputerName] Failed to start WinRM service. WMI ReturnValue: $($result.ReturnValue)"
-                    }
-                }
+            # Execute the exact pipeline command that works manually
+            # Get-Service -Name winrm -ComputerName $ComputerName | Start-Service
+            # Note: This uses the current session's authentication context
+            # If credentials are needed, they should be established at the session level
+            
+            $serviceParams = @{
+                Name         = 'winrm'
+                ComputerName = $ComputerName
+                ErrorAction  = 'Stop'
+            }
+            
+            # First, check if service is already running
+            $serviceCheck = Get-Service @serviceParams -ErrorAction SilentlyContinue
+            
+            if ($serviceCheck -and $serviceCheck.Status -eq 'Running') {
+                Write-Host "[$ComputerName] WinRM service is already running." -ForegroundColor Green
+                $serviceStarted = $true
             }
             else {
-                # No credentials - use Get-Service (simpler, uses current user context)
-                $serviceParams = @{
-                    Name         = 'winrm'
-                    ComputerName = $ComputerName
-                    ErrorAction  = 'Stop'
-                }
+                # Execute the pipeline command exactly as specified
+                # The service object from Get-Service maintains the ComputerName context
+                # and Start-Service will operate on the remote service
+                Write-Host "[$ComputerName] Executing: Get-Service -Name winrm -ComputerName $ComputerName | Start-Service" -ForegroundColor Gray
                 
-                $service = Get-Service @serviceParams
+                Get-Service @serviceParams | Start-Service -ErrorAction Stop
                 
-                if ($service.Status -eq 'Running') {
-                    Write-Host "[$ComputerName] WinRM service is already running." -ForegroundColor Green
-                    $serviceStarted = $true
-                }
-                else {
-                    # Start the service using the service object's Start() method
-                    $service.Start()
-                    
-                    # Wait a moment for the service to start
-                    Start-Sleep -Seconds 3
-                    
-                    # Refresh the service object to get updated status
-                    $service.Refresh()
-                    
-                    if ($service.Status -eq 'Running') {
-                        Write-Host "[$ComputerName] SUCCESS: WinRM service started via Get-Service/Set-Service." -ForegroundColor Green
+                # Wait a moment for the service to start
+                Start-Sleep -Seconds 3
+                
+                # Verify the service is running by getting it again
+                $serviceCheck = Get-Service @serviceParams -ErrorAction SilentlyContinue
+                
+                if ($serviceCheck) {
+                    if ($serviceCheck.Status -eq 'Running') {
+                        Write-Host "[$ComputerName] SUCCESS: WinRM service started via Get-Service/Start-Service pipeline." -ForegroundColor Green
                         $serviceStarted = $true
                     }
                     else {
-                        Write-Warning "[$ComputerName] WinRM service start command succeeded but service is not running. Status: $($service.Status)"
+                        Write-Warning "[$ComputerName] WinRM service start command completed but service status is: $($serviceCheck.Status)"
+                        # Don't set $serviceStarted = false here - let the retry logic handle it
                     }
+                }
+                else {
+                    Write-Warning "[$ComputerName] WinRM service start command completed but unable to verify status (Get-Service returned no result)"
                 }
             }
         }
         catch {
             $serviceError = $_.Exception.Message
-            Write-Warning "[$ComputerName] Failed to start WinRM service via Get-Service/Set-Service: $serviceError"
+            $errorDetails = $_.Exception.GetType().FullName
+            
+            Write-Warning "[$ComputerName] Failed to start WinRM service via Get-Service/Start-Service pipeline: $serviceError"
+            Write-Warning "[$ComputerName] Error type: $errorDetails"
+            
+            # Log additional context for debugging
+            if ($_.Exception.InnerException) {
+                Write-Warning "[$ComputerName] Inner exception: $($_.Exception.InnerException.Message)"
+            }
+            
+            # If the error is credential-related and credentials were provided, log a note
+            if ($Credential -and ($serviceError -match 'access|credential|unauthorized|denied' -or $serviceError -match '401|403')) {
+                Write-Warning "[$ComputerName] Note: Get-Service doesn't support -Credential parameter. The command uses the current session's authentication context."
+                Write-Warning "[$ComputerName] If credentials are required, ensure they are established at the PowerShell session level before running this script."
+            }
         }
         
         # Retry connection if service was started or was already running
