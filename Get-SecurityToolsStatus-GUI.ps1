@@ -587,7 +587,7 @@ function Update-UIElement {
     Prompts for credentials at startup.
 #>
 function Get-CredentialDialog {
-    $cred = Get-Credential -Message "Enter credentials for remote servers (or press Cancel to use current user)" -Title "Security Tools Status - Credentials"
+    $cred = Get-Credential -Message "Enter credentials for remote servers (or press Cancel to use current user)"
     return $cred
 }
 
@@ -750,7 +750,7 @@ function Show-SecurityToolsGUI {
     $runButton.Content = "Run Check"
     $runButton.Height = 35
     $runButton.FontSize = 14
-    $runButton.FontWeight = [System.Windows.FontWeight]::Bold
+    $runButton.FontWeight = [System.Windows.FontWeights]::Bold
     $runButton.Margin = New-Object System.Windows.Thickness(0, 0, 0, 10)
     [System.Windows.Controls.Grid]::SetRow($runButton, 4)
     $mainGrid.Children.Add($runButton) | Out-Null
