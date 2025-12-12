@@ -78,6 +78,8 @@ param(
     
     [switch]$UseParallel,
     
+    [switch]$AttemptWinRmHeal,
+    
     [System.Management.Automation.PSCredential]$Credential
 )
 
@@ -87,6 +89,288 @@ Set-StrictMode -Version Latest
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
+
+# Helper function to categorize WinRM/Invoke-Command errors
+function Get-WinRmFailureCategory {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ErrorMessage,
+        
+        [Parameter(Mandatory)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+    
+    # Returns one of: 'AuthError','NetworkError','WinRmServiceError','Unknown'
+    
+    # Authentication errors - do not attempt to heal
+    if ($ErrorMessage -match 'access is denied' -or
+        $ErrorMessage -match '401' -or
+        $ErrorMessage -match '403' -or
+        $ErrorMessage -match 'unauthorized' -or
+        $ErrorMessage -match 'authentication failed' -or
+        $ErrorMessage -match 'Kerberos' -or
+        $ErrorMessage -match 'NTLM' -or
+        $ErrorMessage -match 'credential' -or
+        $ErrorRecord.CategoryInfo.Category -eq 'AuthenticationError' -or
+        $ErrorRecord.CategoryInfo.Category -eq 'SecurityError')
+    {
+        return 'AuthError'
+    }
+    
+    # Network/name resolution errors - do not attempt to heal
+    if ($ErrorMessage -match 'WinRM cannot complete the operation' -or
+        $ErrorMessage -match 'The network path was not found' -or
+        $ErrorMessage -match 'No connection could be made' -or
+        $ErrorMessage -match 'cannot resolve' -or
+        $ErrorMessage -match 'host.*not found' -or
+        $ErrorMessage -match 'RPC server is unavailable' -or
+        $ErrorMessage -match 'network is unreachable' -or
+        $ErrorRecord.CategoryInfo.Category -eq 'InvalidOperation' -and $ErrorMessage -match 'network')
+    {
+        return 'NetworkError'
+    }
+    
+    # WinRM service errors - these are candidates for healing
+    if ($ErrorMessage -match 'WinRM service' -or
+        $ErrorMessage -match 'The WinRM client cannot process the request' -or
+        $ErrorMessage -match 'WS-Management service' -or
+        $ErrorMessage -match 'service.*not running' -or
+        ($ErrorMessage -match 'cannot connect' -and $ErrorMessage -match 'WinRM') -or
+        $ErrorRecord.Exception -is [System.Management.Automation.Remoting.PSRemotingTransportException] -or
+        $ErrorRecord.FullyQualifiedErrorId -match 'WinRM')
+    {
+        return 'WinRmServiceError'
+    }
+    
+    return 'Unknown'
+}
+
+# Centralized WinRM connectivity helper
+# This function handles all WinRM connectivity testing, error classification, optional healing, and remote script execution
+#
+# WinRM Auto-Heal Behavior:
+# - When -AttemptWinRmHeal is NOT provided: Tests WinRM connectivity once. If it fails, logs the error and returns.
+# - When -AttemptWinRmHeal IS provided: Tests WinRM connectivity. If it fails with a WinRM service error (not auth/network),
+#   attempts to start the WinRM service on the remote system using: Get-Service -Name winrm -ComputerName $ComputerName | Set-Service -Status Running
+#   After starting the service, waits 10 seconds, verifies the service is running, then retries the connectivity test once.
+#   Authentication errors and network errors are never healed - only WinRM service errors are candidates for healing.
+#
+# Error Classification:
+# - AuthError: Authentication/authorization failures (access denied, 401, credentials, etc.) - never healed
+# - NetworkError: Network/name resolution failures (host unreachable, DNS failure, etc.) - never healed  
+# - WinRmServiceError: WinRM service not running, listener unavailable, WinRM-specific faults - can be healed if -AttemptWinRmHeal is set
+# - Unknown: Unclassified errors - can be healed if -AttemptWinRmHeal is set (treated as potential WinRM service issues)
+function Ensure-WinRmAndConnect {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ComputerName,
+        
+        [Parameter(Mandatory)]
+        [scriptblock]$RemoteScriptBlock,
+        
+        [array]$RemoteScriptArguments = @(),
+        
+        [switch]$AttemptWinRmHeal,
+        
+        [System.Management.Automation.PSCredential]$Credential
+    )
+    
+    # Result object to return
+    $result = @{
+        Success = $false
+        ErrorCategory = $null
+        ErrorMessage = $null
+        Output = $null
+        ActualComputerName = $null
+    }
+    
+    # Step 1: Initial WinRM connectivity check
+    Write-Host "[$ComputerName] Testing WinRM connectivity..." -ForegroundColor Yellow
+    $connectivityTestPassed = $false
+    $actualComputerName = $null
+    
+    try {
+        $testParams = @{
+            ComputerName = $ComputerName
+            ScriptBlock  = { $env:COMPUTERNAME }
+            ErrorAction  = 'Stop'
+        }
+        if ($Credential) {
+            $testParams['Credential'] = $Credential
+        }
+        
+        # Add connection timeout to prevent hangs (PowerShell 5.1+)
+        if ($PSVersionTable.PSVersion.Major -ge 5) {
+            $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30
+        }
+        
+        $testResult = Invoke-Command @testParams
+        $actualComputerName = $testResult
+        $connectivityTestPassed = $true
+        Write-Host "[$ComputerName] WinRM connectivity successful (remote computer: $testResult)" -ForegroundColor Green
+    }
+    catch {
+        $initialError = $_.Exception.Message
+        $errorRecord = $_
+        
+        # Step 2: Classify the error
+        $failureCategory = Get-WinRmFailureCategory -ErrorMessage $initialError -ErrorRecord $errorRecord
+        
+        # Log the categorized error (brief to console)
+        $errorMsg = "WinRM connectivity failed - categorized as $failureCategory. Error: $initialError"
+        Write-Warning "[$ComputerName] WinRM failed: $failureCategory"
+        
+        # Step 3: Handle based on error category
+        
+        # Authentication errors - do not attempt to heal
+        if ($failureCategory -eq 'AuthError') {
+            $result.ErrorCategory = 'AuthError'
+            $result.ErrorMessage = $errorMsg
+            return $result
+        }
+        
+        # Network/name resolution errors - do not attempt to heal
+        if ($failureCategory -eq 'NetworkError') {
+            $result.ErrorCategory = 'NetworkError'
+            $result.ErrorMessage = $errorMsg
+            return $result
+        }
+        
+        # WinRM service errors (or Unknown) - attempt heal only if requested
+        if ($failureCategory -eq 'WinRmServiceError' -or $failureCategory -eq 'Unknown') {
+            if (-not $AttemptWinRmHeal) {
+                $errorMsg = "WinRM is not available and healing is disabled. Category: $failureCategory. Error: $initialError"
+                Write-Warning "[$ComputerName] WinRM unavailable (healing disabled)"
+                $result.ErrorCategory = $failureCategory
+                $result.ErrorMessage = $errorMsg
+                return $result
+            }
+            
+            # Step 4: Attempt to start WinRM service
+            Write-Host "[$ComputerName] Attempting to start WinRM service via Get-Service -Name winrm -ComputerName $ComputerName | Set-Service -Status Running..." -ForegroundColor Yellow
+            $serviceStarted = $false
+            
+            try {
+                # Use the exact command that works manually
+                $service = Get-Service -Name winrm -ComputerName $ComputerName -ErrorAction Stop
+                
+                if ($service.Status -eq 'Running') {
+                    Write-Host "[$ComputerName] WinRM service is already running." -ForegroundColor Green
+                    $serviceStarted = $true
+                }
+                else {
+                    # Execute the exact pipeline command
+                    Get-Service -Name winrm -ComputerName $ComputerName | Set-Service -Status Running -ErrorAction Stop
+                    
+                    # Wait a short period for the service to start
+                    Start-Sleep -Seconds 10
+                    
+                    # Re-check the service status
+                    $serviceCheck = Get-Service -Name winrm -ComputerName $ComputerName -ErrorAction Stop
+                    if ($serviceCheck.Status -eq 'Running') {
+                        Write-Host "[$ComputerName] WinRM service successfully started; retrying WinRM connectivity..." -ForegroundColor Green
+                        $serviceStarted = $true
+                    }
+                    else {
+                        $errorMsg = "WinRM heal failed; service not running after attempt. Status: $($serviceCheck.Status)"
+                        Write-Warning "[$ComputerName] WinRM heal failed"
+                        $result.ErrorCategory = $failureCategory
+                        $result.ErrorMessage = $errorMsg
+                        return $result
+                    }
+                }
+            }
+            catch {
+                $serviceError = $_.Exception.Message
+                $errorMsg = "Failed to start WinRM service: $serviceError"
+                Write-Warning "[$ComputerName] WinRM service start failed"
+                $result.ErrorCategory = $failureCategory
+                $result.ErrorMessage = $errorMsg
+                return $result
+            }
+            
+            # Step 5: Retry WinRM connectivity after healing
+            if ($serviceStarted) {
+                Write-Host "[$ComputerName] Retrying WinRM connectivity test..." -ForegroundColor Yellow
+                try {
+                    $testParams = @{
+                        ComputerName = $ComputerName
+                        ScriptBlock  = { $env:COMPUTERNAME }
+                        ErrorAction  = 'Stop'
+                    }
+                    if ($Credential) {
+                        $testParams['Credential'] = $Credential
+                    }
+                    
+                    if ($PSVersionTable.PSVersion.Major -ge 5) {
+                        $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30
+                    }
+                    
+                    $testResult = Invoke-Command @testParams
+                    $actualComputerName = $testResult
+                    $connectivityTestPassed = $true
+                    Write-Host "[$ComputerName] WinRM connectivity successful after heal (remote computer: $testResult)" -ForegroundColor Green
+                }
+                catch {
+                    $retryError = $_.Exception.Message
+                    $errorMsg = "WinRM connection failed after attempting to start service. Initial error: $initialError. Retry error: $retryError"
+                    Write-Warning "[$ComputerName] WinRM retry failed"
+                    $result.ErrorCategory = $failureCategory
+                    $result.ErrorMessage = $errorMsg
+                    return $result
+                }
+            }
+        }
+    }
+    
+    # Step 6: If connectivity test passed, run the main remote script
+    if (-not $connectivityTestPassed) {
+        $errorMsg = "WinRM connectivity failed: Unable to establish connection"
+        Write-Warning "[$ComputerName] WinRM connection failed"
+        $result.ErrorCategory = 'Unknown'
+        $result.ErrorMessage = $errorMsg
+        return $result
+    }
+    
+    # Execute the remote script block
+    try {
+        $invokeParams = @{
+            ComputerName = $ComputerName
+            ScriptBlock  = $RemoteScriptBlock
+            ErrorAction  = 'Stop'
+        }
+        
+        if ($Credential) {
+            $invokeParams['Credential'] = $Credential
+        }
+        
+        # Add connection timeout (PowerShell 5.1+)
+        if ($PSVersionTable.PSVersion.Major -ge 5) {
+            $invokeParams['SessionOption'] = New-PSSessionOption -OperationTimeout 300
+        }
+        
+        # Add arguments if provided
+        if ($RemoteScriptArguments -and $RemoteScriptArguments.Count -gt 0) {
+            $invokeParams['ArgumentList'] = $RemoteScriptArguments
+        }
+        
+        $output = Invoke-Command @invokeParams
+        
+        $result.Success = $true
+        $result.Output = $output
+        $result.ActualComputerName = $actualComputerName
+        
+        return $result
+    }
+    catch {
+        $execError = $_.Exception.Message
+        $errorMsg = "Failed to execute remote script: $execError"
+        Write-Warning "[$ComputerName] Script execution failed"
+        $result.ErrorCategory = 'Unknown'
+        $result.ErrorMessage = $errorMsg
+        return $result
+    }
+}
 
 <#
 .SYNOPSIS
@@ -1178,7 +1462,8 @@ function Invoke-SecurityCheckOnServer {
         [hashtable]$CrowdStrikeTenantMap,
         [hashtable]$QualysTenantMap,
         [System.Management.Automation.PSCredential]$Credential,
-        [scriptblock]$SecurityCheckScriptBlock
+        [scriptblock]$SecurityCheckScriptBlock,
+        [switch]$AttemptWinRmHeal
     )
     
     $result = [PSCustomObject]@{
@@ -1190,84 +1475,41 @@ function Invoke-SecurityCheckOnServer {
         Success = $false
     }
     
-    try {
-        # Test connectivity
-        Write-Host "Testing connectivity to $ServerName..." -ForegroundColor Yellow
-        $testParams = @{
-            ComputerName = $ServerName
-            ScriptBlock  = { $env:COMPUTERNAME }
-            ErrorAction  = 'Stop'
-        }
-        if ($Credential) {
-            $testParams['Credential'] = $Credential
-        }
-        
-        # Add SessionOption with error handling
-        try {
-            if ($PSVersionTable.PSVersion.Major -ge 5) {
-                $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30 -ErrorAction Stop
-            }
-        }
-        catch {
-            Write-Warning "Failed to create SessionOption for $ServerName (continuing without timeout): $($_.Exception.Message)"
-        }
-        
-        $actualComputerName = Invoke-Command @testParams
-        Write-Host "Successfully connected to $ServerName (remote computer: $actualComputerName)" -ForegroundColor Green
-        
-        # Execute security check
-        Write-Host "Executing security check on $ServerName..." -ForegroundColor Yellow
-        $invokeParams = @{
-            ComputerName = $ServerName
-            ScriptBlock  = $SecurityCheckScriptBlock
-            ArgumentList = @(
-                $OldDomainFqdn,
-                $NewDomainFqdn,
-                $EncaseRegistryPaths,
-                $CrowdStrikeTenantMap,
-                $QualysTenantMap
-            )
-            ErrorAction  = 'Stop'
-        }
-        
-        if ($Credential) {
-            $invokeParams['Credential'] = $Credential
-        }
-        
-        # Add SessionOption with error handling
-        try {
-            if ($PSVersionTable.PSVersion.Major -ge 5) {
-                $invokeParams['SessionOption'] = New-PSSessionOption -OperationTimeout 300 -ErrorAction Stop
-            }
-        }
-        catch {
-            Write-Warning "Failed to create SessionOption for $ServerName (continuing without timeout): $($_.Exception.Message)"
-        }
-        
-        $securityAgents = Invoke-Command @invokeParams
-        
-        # Format result
-        $formatted = Format-SecurityToolsTableRow -ServerName $ServerName -SecurityAgents $securityAgents
-        $result.Server = $formatted.Server
-        $result.Qualys = $formatted.Qualys
-        $result.CrowdStrike = $formatted.CrowdStrike
-        $result.SCCM = $formatted.SCCM
-        $result.Encase = $formatted.Encase
-        $result.Success = $true
-        Write-Host "Security check completed successfully for $ServerName" -ForegroundColor Green
-    }
-    catch {
-        $errorMessage = $_.Exception.Message
-        $errorCategory = $_.CategoryInfo.Category
-        Write-Warning "Connection failed for $ServerName : $errorMessage (Category: $errorCategory)"
-        if ($_.Exception.InnerException) {
-            Write-Warning "Inner exception: $($_.Exception.InnerException.Message)"
-        }
+    # Use the centralized WinRM helper to establish connectivity and run the security check
+    $remoteScriptArguments = @(
+        $OldDomainFqdn,
+        $NewDomainFqdn,
+        $EncaseRegistryPaths,
+        $CrowdStrikeTenantMap,
+        $QualysTenantMap
+    )
+    
+    $winRmResult = Ensure-WinRmAndConnect `
+        -ComputerName $ServerName `
+        -RemoteScriptBlock $SecurityCheckScriptBlock `
+        -RemoteScriptArguments $remoteScriptArguments `
+        -AttemptWinRmHeal:$AttemptWinRmHeal `
+        -Credential $Credential
+    
+    # Check if WinRM connection and script execution succeeded
+    if (-not $winRmResult.Success) {
         $result.Qualys = "Connection Failed"
         $result.CrowdStrike = "Connection Failed"
         $result.SCCM = "Connection Failed"
         $result.Encase = "Connection Failed"
+        return $result
     }
+    
+    # Format result
+    $securityAgents = $winRmResult.Output
+    $formatted = Format-SecurityToolsTableRow -ServerName $ServerName -SecurityAgents $securityAgents
+    $result.Server = $formatted.Server
+    $result.Qualys = $formatted.Qualys
+    $result.CrowdStrike = $formatted.CrowdStrike
+    $result.SCCM = $formatted.SCCM
+    $result.Encase = $formatted.Encase
+    $result.Success = $true
+    Write-Host "Security check completed successfully for $ServerName" -ForegroundColor Green
     
     return $result
 }
@@ -1280,7 +1522,159 @@ if ($UseParallel -and $PSVersionTable.PSVersion.Major -ge 7) {
     try {
         $null = Get-Command ForEach-Object -ParameterName Parallel -ErrorAction Stop
         $results = $servers | ForEach-Object -Parallel {
-            # Recreate the function in the parallel context
+            # Recreate helper functions in the parallel context
+            function Get-WinRmFailureCategory {
+                param(
+                    [Parameter(Mandatory)]
+                    [string]$ErrorMessage,
+                    [Parameter(Mandatory)]
+                    [System.Management.Automation.ErrorRecord]$ErrorRecord
+                )
+                if ($ErrorMessage -match 'access is denied' -or $ErrorMessage -match '401' -or $ErrorMessage -match '403' -or
+                    $ErrorMessage -match 'unauthorized' -or $ErrorMessage -match 'authentication failed' -or
+                    $ErrorMessage -match 'Kerberos' -or $ErrorMessage -match 'NTLM' -or $ErrorMessage -match 'credential' -or
+                    $ErrorRecord.CategoryInfo.Category -eq 'AuthenticationError' -or $ErrorRecord.CategoryInfo.Category -eq 'SecurityError') {
+                    return 'AuthError'
+                }
+                if ($ErrorMessage -match 'WinRM cannot complete the operation' -or $ErrorMessage -match 'The network path was not found' -or
+                    $ErrorMessage -match 'No connection could be made' -or $ErrorMessage -match 'cannot resolve' -or
+                    $ErrorMessage -match 'host.*not found' -or $ErrorMessage -match 'RPC server is unavailable' -or
+                    $ErrorMessage -match 'network is unreachable' -or ($ErrorRecord.CategoryInfo.Category -eq 'InvalidOperation' -and $ErrorMessage -match 'network')) {
+                    return 'NetworkError'
+                }
+                if ($ErrorMessage -match 'WinRM service' -or $ErrorMessage -match 'The WinRM client cannot process the request' -or
+                    $ErrorMessage -match 'WS-Management service' -or $ErrorMessage -match 'service.*not running' -or
+                    ($ErrorMessage -match 'cannot connect' -and $ErrorMessage -match 'WinRM') -or
+                    $ErrorRecord.Exception -is [System.Management.Automation.Remoting.PSRemotingTransportException] -or
+                    $ErrorRecord.FullyQualifiedErrorId -match 'WinRM') {
+                    return 'WinRmServiceError'
+                }
+                return 'Unknown'
+            }
+            
+            function Ensure-WinRmAndConnect {
+                param(
+                    [Parameter(Mandatory)][string]$ComputerName,
+                    [Parameter(Mandatory)][scriptblock]$RemoteScriptBlock,
+                    [array]$RemoteScriptArguments = @(),
+                    [switch]$AttemptWinRmHeal,
+                    [System.Management.Automation.PSCredential]$Credential
+                )
+                $result = @{ Success = $false; ErrorCategory = $null; ErrorMessage = $null; Output = $null; ActualComputerName = $null }
+                Write-Host "[$ComputerName] Testing WinRM connectivity..." -ForegroundColor Yellow
+                $connectivityTestPassed = $false
+                $actualComputerName = $null
+                try {
+                    $testParams = @{ ComputerName = $ComputerName; ScriptBlock = { $env:COMPUTERNAME }; ErrorAction = 'Stop' }
+                    if ($Credential) { $testParams['Credential'] = $Credential }
+                    if ($PSVersionTable.PSVersion.Major -ge 5) { $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30 }
+                    $testResult = Invoke-Command @testParams
+                    $actualComputerName = $testResult
+                    $connectivityTestPassed = $true
+                    Write-Host "[$ComputerName] WinRM connectivity successful (remote computer: $testResult)" -ForegroundColor Green
+                }
+                catch {
+                    $initialError = $_.Exception.Message
+                    $errorRecord = $_
+                    $failureCategory = Get-WinRmFailureCategory -ErrorMessage $initialError -ErrorRecord $errorRecord
+                    $errorMsg = "WinRM connectivity failed - categorized as $failureCategory. Error: $initialError"
+                    Write-Warning "[$ComputerName] WinRM failed: $failureCategory"
+                    if ($failureCategory -eq 'AuthError' -or $failureCategory -eq 'NetworkError') {
+                        $result.ErrorCategory = $failureCategory
+                        $result.ErrorMessage = $errorMsg
+                        return $result
+                    }
+                    if ($failureCategory -eq 'WinRmServiceError' -or $failureCategory -eq 'Unknown') {
+                        if (-not $AttemptWinRmHeal) {
+                            $errorMsg = "WinRM is not available and healing is disabled. Category: $failureCategory. Error: $initialError"
+                            Write-Warning "[$ComputerName] WinRM unavailable (healing disabled)"
+                            $result.ErrorCategory = $failureCategory
+                            $result.ErrorMessage = $errorMsg
+                            return $result
+                        }
+                        Write-Host "[$ComputerName] Attempting to start WinRM service..." -ForegroundColor Yellow
+                        $serviceStarted = $false
+                        try {
+                            $service = Get-Service -Name winrm -ComputerName $ComputerName -ErrorAction Stop
+                            if ($service.Status -eq 'Running') {
+                                Write-Host "[$ComputerName] WinRM service is already running." -ForegroundColor Green
+                                $serviceStarted = $true
+                            }
+                            else {
+                                Get-Service -Name winrm -ComputerName $ComputerName | Set-Service -Status Running -ErrorAction Stop
+                                Start-Sleep -Seconds 10
+                                $serviceCheck = Get-Service -Name winrm -ComputerName $ComputerName -ErrorAction Stop
+                                if ($serviceCheck.Status -eq 'Running') {
+                                    Write-Host "[$ComputerName] WinRM service successfully started; retrying WinRM connectivity..." -ForegroundColor Green
+                                    $serviceStarted = $true
+                                }
+                                else {
+                                    $errorMsg = "WinRM heal failed; service not running after attempt. Status: $($serviceCheck.Status)"
+                                    Write-Warning "[$ComputerName] WinRM heal failed"
+                                    $result.ErrorCategory = $failureCategory
+                                    $result.ErrorMessage = $errorMsg
+                                    return $result
+                                }
+                            }
+                        }
+                        catch {
+                            $serviceError = $_.Exception.Message
+                            $errorMsg = "Failed to start WinRM service: $serviceError"
+                            Write-Warning "[$ComputerName] WinRM service start failed"
+                            $result.ErrorCategory = $failureCategory
+                            $result.ErrorMessage = $errorMsg
+                            return $result
+                        }
+                        if ($serviceStarted) {
+                            Write-Host "[$ComputerName] Retrying WinRM connectivity test..." -ForegroundColor Yellow
+                            try {
+                                $testParams = @{ ComputerName = $ComputerName; ScriptBlock = { $env:COMPUTERNAME }; ErrorAction = 'Stop' }
+                                if ($Credential) { $testParams['Credential'] = $Credential }
+                                if ($PSVersionTable.PSVersion.Major -ge 5) { $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30 }
+                                $testResult = Invoke-Command @testParams
+                                $actualComputerName = $testResult
+                                $connectivityTestPassed = $true
+                                Write-Host "[$ComputerName] WinRM connectivity successful after heal (remote computer: $testResult)" -ForegroundColor Green
+                            }
+                            catch {
+                                $retryError = $_.Exception.Message
+                                $errorMsg = "WinRM connection failed after attempting to start service. Initial error: $initialError. Retry error: $retryError"
+                                Write-Warning "[$ComputerName] WinRM retry failed"
+                                $result.ErrorCategory = $failureCategory
+                                $result.ErrorMessage = $errorMsg
+                                return $result
+                            }
+                        }
+                    }
+                }
+                if (-not $connectivityTestPassed) {
+                    $errorMsg = "WinRM connectivity failed: Unable to establish connection"
+                    Write-Warning "[$ComputerName] WinRM connection failed"
+                    $result.ErrorCategory = 'Unknown'
+                    $result.ErrorMessage = $errorMsg
+                    return $result
+                }
+                try {
+                    $invokeParams = @{ ComputerName = $ComputerName; ScriptBlock = $RemoteScriptBlock; ErrorAction = 'Stop' }
+                    if ($Credential) { $invokeParams['Credential'] = $Credential }
+                    if ($PSVersionTable.PSVersion.Major -ge 5) { $invokeParams['SessionOption'] = New-PSSessionOption -OperationTimeout 300 }
+                    if ($RemoteScriptArguments -and $RemoteScriptArguments.Count -gt 0) { $invokeParams['ArgumentList'] = $RemoteScriptArguments }
+                    $output = Invoke-Command @invokeParams
+                    $result.Success = $true
+                    $result.Output = $output
+                    $result.ActualComputerName = $actualComputerName
+                    return $result
+                }
+                catch {
+                    $execError = $_.Exception.Message
+                    $errorMsg = "Failed to execute remote script: $execError"
+                    Write-Warning "[$ComputerName] Script execution failed"
+                    $result.ErrorCategory = 'Unknown'
+                    $result.ErrorMessage = $errorMsg
+                    return $result
+                }
+            }
+            
             function Invoke-SecurityCheckOnServer {
                 param(
                     [string]$ServerName,
@@ -1290,7 +1684,8 @@ if ($UseParallel -and $PSVersionTable.PSVersion.Major -ge 7) {
                     [hashtable]$CrowdStrikeTenantMap,
                     [hashtable]$QualysTenantMap,
                     [System.Management.Automation.PSCredential]$Credential,
-                    [scriptblock]$SecurityCheckScriptBlock
+                    [scriptblock]$SecurityCheckScriptBlock,
+                    [switch]$AttemptWinRmHeal
                 )
                 
                 $result = [PSCustomObject]@{
@@ -1302,59 +1697,18 @@ if ($UseParallel -and $PSVersionTable.PSVersion.Major -ge 7) {
                     Success = $false
                 }
                 
-                try {
-                    Write-Host "Testing connectivity to $ServerName..." -ForegroundColor Yellow
-                    $testParams = @{
-                        ComputerName = $ServerName
-                        ScriptBlock  = { $env:COMPUTERNAME }
-                        ErrorAction  = 'Stop'
-                    }
-                    if ($Credential) {
-                        $testParams['Credential'] = $Credential
-                    }
-                    
-                    # Add SessionOption with error handling
-                    try {
-                        if ($PSVersionTable.PSVersion.Major -ge 5) {
-                            $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30 -ErrorAction Stop
-                        }
-                    }
-                    catch {
-                        Write-Warning "Failed to create SessionOption for $ServerName (continuing without timeout): $($_.Exception.Message)"
-                    }
-                    
-                    $actualComputerName = Invoke-Command @testParams
-                    Write-Host "Successfully connected to $ServerName (remote computer: $actualComputerName)" -ForegroundColor Green
-                    
-                    Write-Host "Executing security check on $ServerName..." -ForegroundColor Yellow
-                    $invokeParams = @{
-                        ComputerName = $ServerName
-                        ScriptBlock  = $SecurityCheckScriptBlock
-                        ArgumentList = @(
-                            $OldDomainFqdn,
-                            $NewDomainFqdn,
-                            $EncaseRegistryPaths,
-                            $CrowdStrikeTenantMap,
-                            $QualysTenantMap
-                        )
-                        ErrorAction  = 'Stop'
-                    }
-                    
-                    if ($Credential) {
-                        $invokeParams['Credential'] = $Credential
-                    }
-                    
-                    # Add SessionOption with error handling
-                    try {
-                        if ($PSVersionTable.PSVersion.Major -ge 5) {
-                            $invokeParams['SessionOption'] = New-PSSessionOption -OperationTimeout 300 -ErrorAction Stop
-                        }
-                    }
-                    catch {
-                        Write-Warning "Failed to create SessionOption for $ServerName (continuing without timeout): $($_.Exception.Message)"
-                    }
-                    
-                    $securityAgents = Invoke-Command @invokeParams
+                $remoteScriptArguments = @($OldDomainFqdn, $NewDomainFqdn, $EncaseRegistryPaths, $CrowdStrikeTenantMap, $QualysTenantMap)
+                $winRmResult = Ensure-WinRmAndConnect -ComputerName $ServerName -RemoteScriptBlock $SecurityCheckScriptBlock -RemoteScriptArguments $remoteScriptArguments -AttemptWinRmHeal:$AttemptWinRmHeal -Credential $Credential
+                
+                if (-not $winRmResult.Success) {
+                    $result.Qualys = "Connection Failed"
+                    $result.CrowdStrike = "Connection Failed"
+                    $result.SCCM = "Connection Failed"
+                    $result.Encase = "Connection Failed"
+                    return $result
+                }
+                
+                    $securityAgents = $winRmResult.Output
                     
                     # Format result inline (can't use external function in parallel)
                     $qualysStatus = if ($securityAgents.Qualys.Installed) { $securityAgents.Qualys.Tenant } else { "Not Installed" }
@@ -1388,19 +1742,6 @@ if ($UseParallel -and $PSVersionTable.PSVersion.Major -ge 7) {
                     $result.Encase = $encaseStatus
                     $result.Success = $true
                     Write-Host "Security check completed successfully for $ServerName" -ForegroundColor Green
-                }
-                catch {
-                    $errorMessage = $_.Exception.Message
-                    $errorCategory = $_.CategoryInfo.Category
-                    Write-Warning "Connection failed for $ServerName : $errorMessage (Category: $errorCategory)"
-                    if ($_.Exception.InnerException) {
-                        Write-Warning "Inner exception: $($_.Exception.InnerException.Message)"
-                    }
-                    $result.Qualys = "Connection Failed"
-                    $result.CrowdStrike = "Connection Failed"
-                    $result.SCCM = "Connection Failed"
-                    $result.Encase = "Connection Failed"
-                }
                 
                 return $result
             }
@@ -1413,7 +1754,8 @@ if ($UseParallel -and $PSVersionTable.PSVersion.Major -ge 7) {
                 -CrowdStrikeTenantMap $using:config.CrowdStrikeTenantMap `
                 -QualysTenantMap $using:config.QualysTenantMap `
                 -Credential $using:Credential `
-                -SecurityCheckScriptBlock $using:securityCheckScriptBlock
+                -SecurityCheckScriptBlock $using:securityCheckScriptBlock `
+                -AttemptWinRmHeal:$using:AttemptWinRmHeal
         } -ThrottleLimit 10
     }
     catch {
@@ -1434,7 +1776,8 @@ if (-not $UseParallel -or $PSVersionTable.PSVersion.Major -lt 7) {
             -CrowdStrikeTenantMap $config.CrowdStrikeTenantMap `
             -QualysTenantMap $config.QualysTenantMap `
             -Credential $Credential `
-            -SecurityCheckScriptBlock $securityCheckScriptBlock
+            -SecurityCheckScriptBlock $securityCheckScriptBlock `
+            -AttemptWinRmHeal:$AttemptWinRmHeal
         $results += $result
     }
 }
