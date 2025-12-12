@@ -340,14 +340,13 @@ function Ensure-WinRmAndConnect {
     catch {
         $initialError = $_.Exception.Message
         $errorRecord = $_
-        Write-Warning "[$ComputerName] WinRM connectivity failed: $initialError"
         
         # Step 2: Classify the error
         $failureCategory = Get-WinRmFailureCategory -ErrorMessage $initialError -ErrorRecord $errorRecord
         
-        # Log the categorized error
+        # Log the categorized error (detailed message to log, brief to console)
         $errorMsg = "WinRM connectivity failed - categorized as $failureCategory. Error: $initialError"
-        Write-Warning "[$ComputerName] $errorMsg"
+        Write-Warning "[$ComputerName] WinRM failed: $failureCategory"
         if ($WriteErrorLogFunction) {
             & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
         }
@@ -372,7 +371,7 @@ function Ensure-WinRmAndConnect {
         if ($failureCategory -eq 'WinRmServiceError' -or $failureCategory -eq 'Unknown') {
             if (-not $AttemptWinRmHeal) {
                 $errorMsg = "WinRM is not available and healing is disabled. Category: $failureCategory. Error: $initialError"
-                Write-Warning "[$ComputerName] $errorMsg"
+                Write-Warning "[$ComputerName] WinRM unavailable (healing disabled)"
                 if ($WriteErrorLogFunction) {
                     & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
                 }
@@ -399,7 +398,7 @@ function Ensure-WinRmAndConnect {
                     Get-Service -Name winrm -ComputerName $ComputerName | Set-Service -Status Running -ErrorAction Stop
                     
                     # Wait a short period for the service to start
-                    Start-Sleep -Seconds 5
+                    Start-Sleep -Seconds 10
                     
                     # Re-check the service status
                     $serviceCheck = Get-Service -Name winrm -ComputerName $ComputerName -ErrorAction Stop
@@ -409,7 +408,7 @@ function Ensure-WinRmAndConnect {
                     }
                     else {
                         $errorMsg = "WinRM heal failed; service not running after attempt. Status: $($serviceCheck.Status)"
-                        Write-Warning "[$ComputerName] $errorMsg"
+                        Write-Warning "[$ComputerName] WinRM heal failed"
                         if ($WriteErrorLogFunction) {
                             & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "WINRM_HEAL_ERROR"
                         }
@@ -422,7 +421,7 @@ function Ensure-WinRmAndConnect {
             catch {
                 $serviceError = $_.Exception.Message
                 $errorMsg = "Failed to start WinRM service: $serviceError"
-                Write-Warning "[$ComputerName] $errorMsg"
+                Write-Warning "[$ComputerName] WinRM service start failed"
                 if ($WriteErrorLogFunction) {
                     & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "WINRM_HEAL_ERROR"
                 }
@@ -456,7 +455,7 @@ function Ensure-WinRmAndConnect {
                 catch {
                     $retryError = $_.Exception.Message
                     $errorMsg = "WinRM connection failed after attempting to start service. Initial error: $initialError. Retry error: $retryError"
-                    Write-Warning "[$ComputerName] $errorMsg"
+                    Write-Warning "[$ComputerName] WinRM retry failed"
                     if ($WriteErrorLogFunction) {
                         & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
                     }
@@ -471,7 +470,7 @@ function Ensure-WinRmAndConnect {
     # Step 6: If connectivity test passed, run the main remote script
     if (-not $connectivityTestPassed) {
         $errorMsg = "WinRM connectivity failed: Unable to establish connection"
-        Write-Warning "[$ComputerName] $errorMsg"
+        Write-Warning "[$ComputerName] WinRM connection failed"
         if ($WriteErrorLogFunction) {
             & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
         }
@@ -513,7 +512,7 @@ function Ensure-WinRmAndConnect {
     catch {
         $execError = $_.Exception.Message
         $errorMsg = "Failed to execute remote script: $execError"
-        Write-Warning "[$ComputerName] $errorMsg"
+        Write-Warning "[$ComputerName] Script execution failed"
         if ($WriteErrorLogFunction) {
             & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "SCRIPT_EXECUTION_ERROR"
         }
@@ -607,7 +606,7 @@ $InvokeDiscoveryOnServerScriptBlock = {
             }
             catch {
                 $errorMsg = "Failed to copy configuration file: $($_.Exception.Message)"
-                Write-Warning "[$ComputerName] $errorMsg"
+                Write-Warning "[$ComputerName] Config file copy failed"
                 & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONFIG_FILE_ERROR"
                 # Continue execution - the discovery script will run without config file
                 $ScriptParams.Remove('ConfigFile')
@@ -625,7 +624,7 @@ $InvokeDiscoveryOnServerScriptBlock = {
         }
         catch {
             $errorMsg = "Failed to prepare remote directory for config file: $($_.Exception.Message)"
-            Write-Warning "[$ComputerName] $errorMsg"
+            Write-Warning "[$ComputerName] Config file setup failed"
             & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONFIG_FILE_ERROR"
             # Continue execution - the discovery script will run without config file
             $ScriptParams.Remove('ConfigFile')
@@ -706,7 +705,7 @@ $InvokeDiscoveryOnServerScriptBlock = {
         }
         catch {
             $errorMsg = "Failed to collect JSON from CollectorShare: $($_.Exception.Message)"
-            Write-Warning "[$ComputerName] $errorMsg"
+            Write-Warning "[$ComputerName] JSON collection failed"
             & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
         }
         finally {
@@ -812,7 +811,7 @@ $InvokeDiscoveryOnServerScriptBlock = {
         }
         catch {
             $errorMsg = "Failed to collect JSON from C$ share: $($_.Exception.Message)"
-            Write-Warning "[$ComputerName] $errorMsg"
+            Write-Warning "[$ComputerName] JSON collection failed"
             & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
             Write-Host "[$ComputerName] JSON file is available on the remote server at: $remotePath" -ForegroundColor Cyan
         }
