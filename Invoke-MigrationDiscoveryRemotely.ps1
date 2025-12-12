@@ -294,7 +294,7 @@ function Ensure-WinRmAndConnect {
         [Parameter(Mandatory)]
         [scriptblock]$RemoteScriptBlock,
         
-        [hashtable]$RemoteScriptArguments = @{},
+        [array]$RemoteScriptArguments = @(),
         
         [switch]$AttemptWinRmHeal,
         
@@ -497,8 +497,9 @@ function Ensure-WinRmAndConnect {
         }
         
         # Add arguments if provided
+        # ArgumentList expects an array matching the scriptblock's param() parameters in order
         if ($RemoteScriptArguments -and $RemoteScriptArguments.Count -gt 0) {
-            $invokeParams['ArgumentList'] = @($RemoteScriptArguments)
+            $invokeParams['ArgumentList'] = $RemoteScriptArguments
         }
         
         $output = Invoke-Command @invokeParams
@@ -556,7 +557,7 @@ $InvokeDiscoveryOnServerScriptBlock = {
     $testResult = & $EnsureWinRmAndConnectFunction `
         -ComputerName $ComputerName `
         -RemoteScriptBlock $testScriptBlock `
-        -RemoteScriptArguments @{} `
+        -RemoteScriptArguments @() `
         -AttemptWinRmHeal:$AttemptWinRmHeal `
         -Credential $Credential `
         -WriteErrorLogFunction $WriteErrorLogFunction
@@ -641,10 +642,8 @@ $InvokeDiscoveryOnServerScriptBlock = {
         & ([scriptblock]::Create($ScriptContent)) @Params
     }
     
-    $remoteScriptArguments = @{
-        ScriptContent = $ScriptContent
-        Params = $ScriptParams
-    }
+    # Pass arguments as an array matching the scriptblock parameter order
+    $remoteScriptArguments = @($ScriptContent, $ScriptParams)
     
     $discoveryResult = & $EnsureWinRmAndConnectFunction `
         -ComputerName $ComputerName `
