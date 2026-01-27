@@ -28,6 +28,7 @@ param(
     [switch]$EmitStdOut,      # bubble up the summary object from each server
     [switch]$UseParallel,     # simple fan-out option
     [switch]$AttemptWinRmHeal, # Optional: attempt to start WinRM service if connection fails (default: false)
+    [switch]$UseSmbForResults, # If set, retrieve JSON via \\server\c$ or CollectorShare; default is WinRM return (no SMB)
     [System.Management.Automation.PSCredential]$Credential  # Optional: if not provided, will prompt or use current user
 )
 
@@ -186,6 +187,17 @@ if (-not $Credential) {
 # Read the script content to pass to remote execution
 $scriptContent = Get-Content -Path $ScriptPath -Raw
 
+# Resolve helper module path (same directory as discovery script) and read content for remote staging
+$scriptDirForDiscovery = Split-Path (Resolve-Path -LiteralPath $ScriptPath) -Parent
+$helperModulePath = Join-Path $scriptDirForDiscovery 'DomainMigrationDiscovery.Helpers.psm1'
+if (-not (Test-Path -LiteralPath $helperModulePath)) {
+    $errorMsg = "Helper module not found: $helperModulePath. Required for remote discovery."
+    Write-Error $errorMsg
+    throw $errorMsg
+}
+$helperModuleContent = Get-Content -Path $helperModulePath -Raw -ErrorAction Stop
+$remoteRunDir = "C:\temp\MigrationDiscovery\run"
+
 # Build a hashtable of parameters for the discovery script
 $scriptParams = @{
     OutputRoot    = $RemoteOutputRoot
@@ -327,9 +339,9 @@ function Ensure-WinRmAndConnect {
             $testParams['Credential'] = $Credential
         }
         
-        # Add connection timeout to prevent hangs (PowerShell 5.1+)
+        # Add connection timeout to prevent hangs (PowerShell 5.1+) - OperationTimeout is in milliseconds
         if ($PSVersionTable.PSVersion.Major -ge 5) {
-            $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30
+            $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30000
         }
         
         $testResult = Invoke-Command @testParams
@@ -444,7 +456,7 @@ function Ensure-WinRmAndConnect {
                     }
                     
                     if ($PSVersionTable.PSVersion.Major -ge 5) {
-                        $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30
+                        $testParams['SessionOption'] = New-PSSessionOption -OperationTimeout 30000
                     }
                     
                     $testResult = Invoke-Command @testParams
@@ -491,9 +503,9 @@ function Ensure-WinRmAndConnect {
             $invokeParams['Credential'] = $Credential
         }
         
-        # Add connection timeout (PowerShell 5.1+)
+        # Add connection timeout (PowerShell 5.1+) - OperationTimeout is in milliseconds (300000 = 5 min)
         if ($PSVersionTable.PSVersion.Major -ge 5) {
-            $invokeParams['SessionOption'] = New-PSSessionOption -OperationTimeout 300
+            $invokeParams['SessionOption'] = New-PSSessionOption -OperationTimeout 300000
         }
         
         # Add arguments if provided
@@ -539,7 +551,10 @@ $InvokeDiscoveryOnServerScriptBlock = {
         [string]$ConfigFile,
         [string]$RemoteConfigPath,
         [string]$CompatibilityMode,
-        [switch]$AttemptWinRmHeal
+        [switch]$AttemptWinRmHeal,
+        [string]$HelperModuleContent,
+        [string]$RemoteRunDir,
+        [switch]$UseSmbForResults
     )
 
     # Determine compatibility mode locally (don't rely on script-level variables)
@@ -633,18 +648,133 @@ $InvokeDiscoveryOnServerScriptBlock = {
     }
 
     # Step 3: Run the discovery script using the centralized helper
-    # WinRM connectivity is already established, so this should succeed
+    # WinRM connectivity is already established
     Write-Host "[$ComputerName] Starting discovery..." -ForegroundColor Cyan
 
-    $remoteScriptBlock = {
-        param($ScriptContent, $Params)
-        # Execute the script with the provided parameters using splatting
-        & ([scriptblock]::Create($ScriptContent)) @Params
+    if (-not $UseSmbForResults) {
+        # WinRM-return path: stage script + helper, run from path, read JSON, return gzip+base64 over WinRM
+        $remoteScriptBlock = {
+            param($HelperModuleContent, $RemoteRunDir, $ScriptContent, $ScriptParams, $RemoteOutputRoot)
+            $ErrorActionPreference = 'Stop'
+            if (-not (Test-Path -LiteralPath $RemoteRunDir)) {
+                New-Item -Path $RemoteRunDir -ItemType Directory -Force | Out-Null
+            }
+            $scriptPath = Join-Path $RemoteRunDir 'Get-WorkstationDiscovery.ps1'
+            $modulePath = Join-Path $RemoteRunDir 'DomainMigrationDiscovery.Helpers.psm1'
+            [System.IO.File]::WriteAllText($scriptPath, $ScriptContent)
+            [System.IO.File]::WriteAllText($modulePath, $HelperModuleContent)
+            Push-Location $RemoteRunDir
+            try {
+                & ".\Get-WorkstationDiscovery.ps1" @ScriptParams
+            } finally {
+                Pop-Location
+            }
+            $jsonPath = Join-Path $RemoteOutputRoot ("{0}_{1}.json" -f $env:COMPUTERNAME, (Get-Date).ToString('MM-dd-yyyy'))
+            if (-not (Test-Path -LiteralPath $jsonPath)) {
+                throw "Discovery ran but JSON file not found: $jsonPath"
+            }
+            $bytes = [System.IO.File]::ReadAllBytes($jsonPath)
+            $ms = New-Object System.IO.MemoryStream
+            $gzip = New-Object System.IO.Compression.GzipStream($ms, [System.IO.Compression.CompressionMode]::Compress)
+            $gzip.Write($bytes, 0, $bytes.Length)
+            $gzip.Close()
+            $b64 = [Convert]::ToBase64String($ms.ToArray())
+            [pscustomobject]@{
+                ComputerName = $env:COMPUTERNAME
+                JsonFileName = [System.IO.Path]::GetFileName($jsonPath)
+                JsonPath     = $jsonPath
+                Encoding     = 'gzip+base64'
+                Payload      = $b64
+            }
+        }
+        $remoteScriptArguments = @($HelperModuleContent, $RemoteRunDir, $ScriptContent, $ScriptParams, $RemoteOutputRoot)
+        $discoveryResult = & $EnsureWinRmAndConnectFunction `
+            -ComputerName $ComputerName `
+            -RemoteScriptBlock $remoteScriptBlock `
+            -RemoteScriptArguments $remoteScriptArguments `
+            -AttemptWinRmHeal:$false `
+            -Credential $Credential `
+            -WriteErrorLogFunction $WriteErrorLogFunction
+
+        if (-not $discoveryResult.Success) {
+            return
+        }
+
+        $payloadObj = $discoveryResult.Output
+        if (-not $payloadObj -or -not $payloadObj.Payload) {
+            $errorMsg = "Discovery ran but no JSON payload returned from $ComputerName"
+            Write-Warning "[$ComputerName] $errorMsg"
+            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
+            return
+        }
+
+        try {
+            $compressed = [Convert]::FromBase64String($payloadObj.Payload)
+            $in = New-Object System.IO.MemoryStream(,$compressed)
+            $gzip = New-Object System.IO.Compression.GzipStream($in, [System.IO.Compression.CompressionMode]::Decompress)
+            $out = New-Object System.IO.MemoryStream
+            $gzip.CopyTo($out)
+            $gzip.Close()
+            $decodedBytes = $out.ToArray()
+
+            if ($MyInvocation.PSCommandPath) { $scriptDir = Split-Path -Parent $MyInvocation.PSCommandPath }
+            elseif ($PSScriptRoot) { $scriptDir = $PSScriptRoot }
+            else { $scriptDir = (Get-Location).Path }
+            $localOutputRoot = Join-Path $scriptDir "results\out"
+            if (-not (Test-Path -Path $localOutputRoot)) {
+                New-Item -Path $localOutputRoot -ItemType Directory -Force | Out-Null
+            }
+            $localPath = Join-Path $localOutputRoot $payloadObj.JsonFileName
+            [System.IO.File]::WriteAllBytes($localPath, $decodedBytes)
+            Write-Host "[$ComputerName] Received JSON over WinRM and wrote $localPath" -ForegroundColor Green
+        }
+        catch {
+            $errorMsg = "Failed to decode JSON payload from $ComputerName : $($_.Exception.Message)"
+            Write-Warning "[$ComputerName] $errorMsg"
+            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
+            return
+        }
+
+        # Optional: best-effort cleanup of staged files on remote
+        try {
+            $cleanupBlock = {
+                param($RunDir)
+                if (Test-Path -LiteralPath $RunDir) {
+                    Remove-Item -LiteralPath (Join-Path $RunDir 'Get-WorkstationDiscovery.ps1') -Force -ErrorAction SilentlyContinue
+                    Remove-Item -LiteralPath (Join-Path $RunDir 'DomainMigrationDiscovery.Helpers.psm1') -Force -ErrorAction SilentlyContinue
+                }
+            }
+            $cleanupParams = @{ ComputerName = $ComputerName; ScriptBlock = $cleanupBlock; ArgumentList = @($RemoteRunDir); ErrorAction = 'SilentlyContinue' }
+            if ($Credential) { $cleanupParams['Credential'] = $Credential }
+            Invoke-Command @cleanupParams | Out-Null
+        }
+        catch {
+            # Ignore cleanup failures
+        }
+
+        Write-Host "[$ComputerName] Discovery completed." -ForegroundColor Green
+        return
     }
-    
-    # Pass arguments as an array matching the scriptblock parameter order
-    $remoteScriptArguments = @($ScriptContent, $ScriptParams)
-    
+
+    # SMB/legacy path: stage script + helper and run from path (so helper module loads), then collect via CollectorShare or \\server\c$
+    $remoteScriptBlock = {
+        param($HelperModuleContent, $RemoteRunDir, $ScriptContent, $ScriptParams)
+        $ErrorActionPreference = 'Stop'
+        if (-not (Test-Path -LiteralPath $RemoteRunDir)) {
+            New-Item -Path $RemoteRunDir -ItemType Directory -Force | Out-Null
+        }
+        $scriptPath = Join-Path $RemoteRunDir 'Get-WorkstationDiscovery.ps1'
+        $modulePath = Join-Path $RemoteRunDir 'DomainMigrationDiscovery.Helpers.psm1'
+        [System.IO.File]::WriteAllText($scriptPath, $ScriptContent)
+        [System.IO.File]::WriteAllText($modulePath, $HelperModuleContent)
+        Push-Location $RemoteRunDir
+        try {
+            & ".\Get-WorkstationDiscovery.ps1" @ScriptParams
+        } finally {
+            Pop-Location
+        }
+    }
+    $remoteScriptArguments = @($HelperModuleContent, $RemoteRunDir, $ScriptContent, $ScriptParams)
     $discoveryResult = & $EnsureWinRmAndConnectFunction `
         -ComputerName $ComputerName `
         -RemoteScriptBlock $remoteScriptBlock `
@@ -652,28 +782,18 @@ $InvokeDiscoveryOnServerScriptBlock = {
         -AttemptWinRmHeal:$false `
         -Credential $Credential `
         -WriteErrorLogFunction $WriteErrorLogFunction
-    
-    # Check if discovery script execution succeeded
+
     if (-not $discoveryResult.Success) {
-        # Error already logged by Ensure-WinRmAndConnect
         return
     }
-    
-    $summary = $discoveryResult.Output
 
-    # Note: $EmitStdOut is passed via $ScriptParams, so we check it from there for parallel execution compatibility
+    $summary = $discoveryResult.Output
     $shouldEmitStdOut = $ScriptParams.ContainsKey('EmitStdOut') -and $ScriptParams['EmitStdOut'] -eq $true
     if ($summary -and $shouldEmitStdOut) {
-        # $summary is the small summary object your script writes when -EmitStdOut is set
-        # You can write it or collect it into an array for reporting.
         Write-Host "[$ComputerName] Summary:" -ForegroundColor Green
         $summary | ConvertTo-Json -Depth 4
     }
 
-    # Collect JSON file from remote server
-    # Use the exact computer name from the remote system to match the filename pattern
-    # The discovery script uses $env:COMPUTERNAME which we captured as $actualComputerName
-    # This ensures exact matching regardless of case, since we use the actual value from the remote system
     $today = Get-Date
     $pattern = "{0}_{1}.json" -f $actualComputerName, $today.ToString('MM-dd-yyyy')
     $remotePath = Join-Path $RemoteOutputRoot $pattern
@@ -871,7 +991,10 @@ if ($script:CompatibilityMode -eq 'Full' -and $UseParallel) {
                 -ConfigFile $using:ConfigFile `
                 -RemoteConfigPath $using:remoteConfigPath `
                 -CompatibilityMode $using:script:CompatibilityMode `
-                -AttemptWinRmHeal:$using:AttemptWinRmHeal
+                -AttemptWinRmHeal:$using:AttemptWinRmHeal `
+                -HelperModuleContent $using:helperModuleContent `
+                -RemoteRunDir $using:remoteRunDir `
+                -UseSmbForResults:$using:UseSmbForResults
         } -ThrottleLimit 10
     }
     else {
@@ -891,7 +1014,10 @@ if ($script:CompatibilityMode -eq 'Full' -and $UseParallel) {
                     -ConfigFile $ConfigFile `
                     -RemoteConfigPath $remoteConfigPath `
                     -CompatibilityMode $script:CompatibilityMode `
-                    -AttemptWinRmHeal:$AttemptWinRmHeal
+                    -AttemptWinRmHeal:$AttemptWinRmHeal `
+                    -HelperModuleContent $helperModuleContent `
+                    -RemoteRunDir $remoteRunDir `
+                    -UseSmbForResults:$UseSmbForResults
             }
             catch {
                 # Log any unexpected errors that escape the function
@@ -920,7 +1046,10 @@ else {
                 -EnsureWinRmAndConnectFunction $ensureWinRmAndConnectScriptBlock `
                 -ConfigFile $ConfigFile `
                 -RemoteConfigPath $remoteConfigPath `
-                -AttemptWinRmHeal:$AttemptWinRmHeal
+                -AttemptWinRmHeal:$AttemptWinRmHeal `
+                -HelperModuleContent $helperModuleContent `
+                -RemoteRunDir $remoteRunDir `
+                -UseSmbForResults:$UseSmbForResults
         }
         catch {
             # Log any unexpected errors that escape the function
