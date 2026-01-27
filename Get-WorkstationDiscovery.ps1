@@ -2189,7 +2189,8 @@ try {
       if ($sqlInstance.ConfigFilesWithDomainReferences -and $sqlInstance.ConfigFilesWithDomainReferences.Count -gt 0) {
         foreach($configFile in @($sqlInstance.ConfigFilesWithDomainReferences)){
           if ($null -eq $configFile) { continue }
-          $sqlServerOldDomain += ("{0}: Config File {1}" -f $sqlInstance.InstanceName, $configFile.FilePath)
+          $pathVal = if ($configFile.PSObject.Properties['FilePath']) { $configFile.FilePath } elseif ($configFile.PSObject.Properties['FullName']) { $configFile.FullName } else { [string]$configFile }
+          $sqlServerOldDomain += ("{0}: Config File {1}" -f $sqlInstance.InstanceName, $pathVal)
         }
       }
     }
@@ -2212,13 +2213,15 @@ try {
     if ($applicationConfigFiles.FilesWithDomainReferences -and $applicationConfigFiles.FilesWithDomainReferences.Count -gt 0) {
       foreach($configFile in @($applicationConfigFiles.FilesWithDomainReferences)){
         if ($null -eq $configFile) { continue }
-        $appConfigOldDomain += ("Config File: {0}" -f $configFile.FilePath)
+        $pathVal = if ($configFile.PSObject.Properties['FilePath']) { $configFile.FilePath } elseif ($configFile.PSObject.Properties['FullName']) { $configFile.FullName } else { [string]$configFile }
+        $appConfigOldDomain += ("Config File: {0}" -f $pathVal)
       }
     }
     if ($applicationConfigFiles.FilesWithCredentials -and $applicationConfigFiles.FilesWithCredentials.Count -gt 0) {
       foreach($configFile in @($applicationConfigFiles.FilesWithCredentials)){
         if ($null -eq $configFile) { continue }
-        $appConfigOldDomain += ("Config File (Credentials): {0}" -f $configFile.FilePath)
+        $pathVal = if ($configFile.PSObject.Properties['FilePath']) { $configFile.FilePath } elseif ($configFile.PSObject.Properties['FullName']) { $configFile.FullName } else { [string]$configFile }
+        $appConfigOldDomain += ("Config File (Credentials): {0}" -f $pathVal)
       }
     }
   }

@@ -630,25 +630,29 @@ function Get-SqlDomainReferences {
   
   # Step 1: Detect SQL Server instances
   $sqlInstances = @()
+  # Known Windows/SQL support services that are NOT connectable instances (do not add to $sqlInstances)
+  $nonInstanceServiceSuffixes = @('SQLBrowser', 'SQLSERVERAGENT', 'SQLTELEMETRY', 'SQLWriter', 'SSISTELEMETRY', 'ReportServer')
   
   # Method 1: Check for SQL Server services (MSSQL*)
   try {
     $sqlServices = Get-Service -ErrorAction SilentlyContinue | Where-Object { 
       $_.Name -like 'MSSQL*' -or 
-      $_.Name -like 'MSSQLSERVER' -or
+      $_.Name -eq 'MSSQLSERVER' -or
       $_.DisplayName -like '*SQL Server*'
     }
     
     foreach ($svc in $sqlServices) {
       # Extract instance name from service name
-      # MSSQLSERVER = default instance
-      # MSSQL$INSTANCENAME = named instance
-      $instanceName = if ($svc.Name -eq 'MSSQLSERVER') { 
-        $env:COMPUTERNAME 
+      # MSSQLSERVER = default instance; MSSQL$INSTANCENAME = named instance
+      # Skip support services that are not connectable database instances
+      $instanceName = $null
+      if ($svc.Name -eq 'MSSQLSERVER') {
+        $instanceName = $env:COMPUTERNAME
       } elseif ($svc.Name -like 'MSSQL$*') {
-        $svc.Name -replace 'MSSQL\$', ''
-      } else {
-        $svc.Name
+        $suffix = $svc.Name -replace 'MSSQL\$', ''
+        if ($nonInstanceServiceSuffixes -notcontains $suffix) {
+          $instanceName = $suffix
+        }
       }
       
       if ($instanceName -and -not ($sqlInstances | Where-Object { $_.InstanceName -eq $instanceName })) {
@@ -1338,15 +1342,20 @@ function Get-EventLogDomainReferences {
       }
       
       # Query events within time window (query more events since we'll filter many out)
+      # FilterHashtable must include LogName in hashtable on some systems; fallback to unfiltered + Where-Object if it fails
       $events = $null
       try {
-        $events = Get-WinEvent -LogName $logName -FilterHashtable @{
+        $events = Get-WinEvent -FilterHashtable @{
+          LogName = $logName
           StartTime = $startTime
         } -ErrorAction Stop -MaxEvents ($maxEventsPerLog * 5)
       } catch {
-        # Event query failed - may be due to permissions, log corruption, or service issues
-        if ($Log) { $Log.Write("Unable to query events from log '$logName': $($_.Exception.Message)", 'WARN') }
-        continue
+        try {
+          $events = Get-WinEvent -LogName $logName -MaxEvents ($maxEventsPerLog * 5) -ErrorAction Stop | Where-Object { $_.TimeCreated -ge $startTime } | Select-Object -First ($maxEventsPerLog * 5)
+        } catch {
+          if ($Log) { $Log.Write("Unable to query events from log '$logName': $($_.Exception.Message)", 'WARN') }
+          continue
+        }
       }
       
       if (-not $events) { continue }
@@ -1416,11 +1425,4 @@ function Get-EventLogDomainReferences {
   return $results
 }
 
-Export-ModuleMember -Function \
-  Get-CredentialManagerDomainReferences,\
-  Get-CertificatesWithDomainReferences,\
-  Get-FirewallRulesWithDomainReferences,\
-  Get-IISDomainReferences,\
-  Get-SqlDomainReferences,\
-  Get-EventLogDomainReferences,\
-  Get-ApplicationConfigDomainReferences
+Export-ModuleMember -Function Get-CredentialManagerDomainReferences, Get-CertificatesWithDomainReferences, Get-FirewallRulesWithDomainReferences, Get-IISDomainReferences, Get-SqlDomainReferences, Get-EventLogDomainReferences, Get-ApplicationConfigDomainReferences
