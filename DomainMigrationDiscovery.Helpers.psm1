@@ -1182,6 +1182,12 @@ function Get-ApplicationConfigDomainReferences {
         }
         
         if ($fileInfo -and $fileInfo.Length -gt 5MB) { continue }
+        # Skip empty or nearly empty files (noise, nothing actionable)
+        if ($fileInfo -and $fileInfo.Length -le 32) { continue }
+        # Skip common log/trace files (domain refs there are usually transient, not config)
+        $ext = [System.IO.Path]::GetExtension($configFile.FullName).ToLowerInvariant()
+        $pathUpper = $configFile.FullName.ToUpperInvariant()
+        if ($ext -in @('.log', '.trace', '.trc', '.evtx') -or $pathUpper -like '*\LOGS\*' -or $pathUpper -like '*\LOG\*') { continue }
         
         $content = $null
         $matchedLines = @()
@@ -1321,8 +1327,10 @@ function Get-EventLogDomainReferences {
   $maxEventsPerLog = 100
   $logNames = @('System', 'Security', 'Application')
   $startTime = (Get-Date).AddDays(-1 * [Math]::Abs($DaysBack))
+  # Security log event IDs that are purely logon/logoff (domain refs are transient, not config) - exclude to reduce noise
+  $securityLogonEventIds = @(4624, 4625, 4634, 4647, 4672, 4648, 4768, 4769, 4770, 4771, 4776, 4778, 4779)
   
-  if ($Log) { $Log.Write("Scanning event logs for domain references (last $DaysBack days, max $maxEventsPerLog per log)") }
+  if ($Log) { $Log.Write("Scanning event logs for domain references (last $DaysBack days, max $maxEventsPerLog per log; Security logon events excluded)") }
   
   foreach ($logName in $logNames) {
     try {
@@ -1382,6 +1390,9 @@ function Get-EventLogDomainReferences {
           }
           
           if ([string]::IsNullOrWhiteSpace($message)) { continue }
+          
+          # Skip Security log logon/logoff events (domain\user in message is transient, not config)
+          if ($logName -eq 'Security' -and $securityLogonEventIds -contains $event.Id) { continue }
           
           # Check if message contains domain reference
           if ($DomainMatchers.Match($message)) {
