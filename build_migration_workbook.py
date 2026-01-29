@@ -424,6 +424,15 @@ def flatten_record(computer_name, record, sheet_rows):
     row_det["Encase_Installed"] = encase.get("Installed", False)
     row_det["Encase_Tenant"] = encase.get("Tenant")
 
+    # SQL / Oracle / RDS presence (always listed regardless of domain)
+    row_det["SqlServerInstalled"] = record.get("SqlServerInstalled", False)
+    row_det["SqlServerVersion"] = record.get("SqlServerVersion")
+    _ora = record.get("Oracle")
+    row_det["OracleInstalled"] = _ora.get("OracleInstalled", False) if isinstance(_ora, dict) else False
+    row_det["OracleVersion"] = _ora.get("OracleVersion") if isinstance(_ora, dict) else None
+    _rds = record.get("RDSLicensing")
+    row_det["RdsLicensingRoleInstalled"] = _rds.get("RdsLicensingRoleInstalled", False) if isinstance(_rds, dict) else False
+
     for k, v in counts.items():
         # Prefix with Count_ to make it obvious in Excel
         col_name = f"Count_{k}"
@@ -669,29 +678,55 @@ def flatten_record(computer_name, record, sheet_rows):
         row["RawJson"] = json.dumps(iis, ensure_ascii=False)
         add_row(sheet_rows, "IIS", row)
 
+    # SqlServer: always one row with Installed + Version; RawJson when detail present
+    row_sql = base.copy()
+    row_sql["SqlServerInstalled"] = record.get("SqlServerInstalled", False)
+    row_sql["SqlServerVersion"] = record.get("SqlServerVersion")
     sql = record.get("SqlServer")
     if sql is not None:
-        row = base.copy()
-        row["RawJson"] = json.dumps(sql, ensure_ascii=False)
-        add_row(sheet_rows, "SqlServer", row)
+        row_sql["RawJson"] = json.dumps(sql, ensure_ascii=False)
+    add_row(sheet_rows, "SqlServer", row_sql)
 
-    # --- RDS Licensing (one row per computer) ---
+    # --- RDS Licensing (one row per computer; always list) ---
     rds = record.get("RDSLicensing")
+    row_rds = base.copy()
     if rds is not None and isinstance(rds, dict):
-        row_rds = base.copy()
         row_rds["IsRDSSessionHost"] = rds.get("IsRDSSessionHost", False)
         row_rds["RDSRoleInstalled"] = rds.get("RDSRoleInstalled")
+        row_rds["RdsLicensingRoleInstalled"] = rds.get("RdsLicensingRoleInstalled", False)
         row_rds["LicensingMode"] = rds.get("LicensingMode", "Unknown")
         row_rds["LicenseServerConfigured"] = "; ".join(rds.get("LicenseServerConfigured") or [])
         row_rds["RDSLicensingEvidence"] = "; ".join(rds.get("RDSLicensingEvidence") or [])
         row_rds["IsRDSLicensingLikelyInUse"] = rds.get("IsRDSLicensingLikelyInUse", False)
         row_rds["Errors"] = "; ".join(rds.get("Errors") or []) if rds.get("Errors") else ""
-        add_row(sheet_rows, "RDS Licensing", row_rds)
+    else:
+        row_rds["IsRDSSessionHost"] = False
+        row_rds["RDSRoleInstalled"] = None
+        row_rds["RdsLicensingRoleInstalled"] = False
+        row_rds["LicensingMode"] = "Unknown"
+        row_rds["LicenseServerConfigured"] = ""
+        row_rds["RDSLicensingEvidence"] = ""
+        row_rds["IsRDSLicensingLikelyInUse"] = False
+        row_rds["Errors"] = ""
+    add_row(sheet_rows, "RDS Licensing", row_rds)
 
-    # --- Oracle discovery (Summary + Details) ---
+    # --- Oracle discovery (Summary + Details; always one row per computer) ---
     oracle = record.get("Oracle")
+    row_ora_sum = base.copy()
+    row_ora_sum["OracleInstalled"] = False
+    row_ora_sum["OracleVersion"] = None
+    row_ora_sum["IsOracleServerLikely"] = False
+    row_ora_sum["OracleClientInstalled"] = False
+    row_ora_sum["OracleHomesCount"] = 0
+    row_ora_sum["OracleServicesCount"] = 0
+    row_ora_sum["OracleODBCDriversCount"] = 0
+    row_ora_sum["TnsnamesFilesCount"] = 0
+    row_ora_sum["OracleHomes"] = ""
+    row_ora_sum["OracleODBCDrivers"] = ""
+    row_ora_sum["Errors"] = ""
     if oracle is not None and isinstance(oracle, dict):
-        row_ora_sum = base.copy()
+        row_ora_sum["OracleInstalled"] = oracle.get("OracleInstalled", False)
+        row_ora_sum["OracleVersion"] = oracle.get("OracleVersion")
         row_ora_sum["IsOracleServerLikely"] = oracle.get("IsOracleServerLikely", False)
         row_ora_sum["OracleClientInstalled"] = oracle.get("OracleClientInstalled", False)
         row_ora_sum["OracleHomesCount"] = len(oracle.get("OracleHomes") or [])
@@ -701,8 +736,8 @@ def flatten_record(computer_name, record, sheet_rows):
         row_ora_sum["OracleHomes"] = "; ".join(oracle.get("OracleHomes") or [])[:500]
         row_ora_sum["OracleODBCDrivers"] = "; ".join(oracle.get("OracleODBCDrivers") or [])
         row_ora_sum["Errors"] = "; ".join(oracle.get("Errors") or []) if oracle.get("Errors") else ""
-        add_row(sheet_rows, "Oracle Summary", row_ora_sum)
-        # Oracle Details: one row per Oracle service
+    add_row(sheet_rows, "Oracle Summary", row_ora_sum)
+    if oracle is not None and isinstance(oracle, dict):
         for svc in oracle.get("OracleServices") or []:
             if isinstance(svc, dict):
                 row_svc = base.copy()
@@ -1227,7 +1262,10 @@ def write_excel(sheet_rows, output_path):
             core_cols = ["ComputerName", "PlantId", "CollectedAt"]
             # For Summary sheet, put key metrics first
             if sheet_name == "Summary":
-                summary_cols = ["HasOldDomainRefs", "PotentialServiceAccounts", 
+                summary_cols = ["HasOldDomainRefs", "PotentialServiceAccounts",
+                               "SqlServerInstalled", "SqlServerVersion",
+                               "OracleInstalled", "OracleVersion",
+                               "RdsLicensingRoleInstalled",
                                "CrowdStrike_Tenant",
                                "Qualys_Tenant",
                                "SCCM_Tenant", "SCCM_HasDomainReference", "SCCM_AllowedMPs", "SCCM_AllowedMPDomains",

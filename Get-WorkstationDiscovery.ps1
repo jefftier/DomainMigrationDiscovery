@@ -1890,9 +1890,10 @@ try {
   } 'IIS'
 
   # --------------------------------------------------------------------------------
-  # SQL Server
+  # SQL Server (presence + version always; domain refs when instances exist)
   # --------------------------------------------------------------------------------
-  # Scan SQL Server instances for old domain references in logins, linked servers, etc.
+  $sqlServerPresence = Safe-Try { Get-SqlServerPresence -Log $script:log } 'SqlServerPresence'
+  if (-not $sqlServerPresence) { $sqlServerPresence = [pscustomobject]@{ Installed = $false; Version = $null } }
   $sqlServerConfiguration = Safe-Try {
     Get-SqlDomainReferences -DomainMatchers $matchers -Log $script:log
   } 'SQL Server'
@@ -2714,11 +2715,13 @@ function Get-SharedFoldersWithACL {
     FirewallRules = $firewallRules
     DnsConfiguration = $dnsConfiguration
     IIS = $iisConfiguration
+    SqlServerInstalled = $sqlServerPresence.Installed
+    SqlServerVersion   = $sqlServerPresence.Version
     SqlServer = $sqlServerConfiguration
     EventLogDomainReferences = $eventLogDomainReferences
     ApplicationConfigFiles = $applicationConfigFiles
-    Oracle = if ($oracleDiscovery) { $oracleDiscovery } else { [pscustomobject]@{ IsOracleServerLikely = $false; OracleServices = @(); OracleHomes = @(); OracleClientInstalled = $false; OracleODBCDrivers = @(); TnsnamesFiles = @(); SqlNetConfigPaths = @(); Errors = @('Discovery not run or failed') } }
-    RDSLicensing = if ($rdsLicensing) { $rdsLicensing } else { [pscustomobject]@{ IsRDSSessionHost = $false; RDSRoleInstalled = $null; LicensingMode = 'Unknown'; LicenseServerConfigured = @(); RDSLicensingEvidence = @(); IsRDSLicensingLikelyInUse = $false; Errors = @('Discovery not run or failed') } }
+    Oracle = if ($oracleDiscovery) { $oracleDiscovery } else { [pscustomobject]@{ OracleInstalled = $false; OracleVersion = $null; IsOracleServerLikely = $false; OracleServices = @(); OracleHomes = @(); OracleClientInstalled = $false; OracleODBCDrivers = @(); TnsnamesFiles = @(); SqlNetConfigPaths = @(); Errors = @('Discovery not run or failed') } }
+    RDSLicensing = if ($rdsLicensing) { $rdsLicensing } else { [pscustomobject]@{ IsRDSSessionHost = $false; RDSRoleInstalled = $null; RdsLicensingRoleInstalled = $false; LicensingMode = 'Unknown'; LicenseServerConfigured = @(); RDSLicensingEvidence = @(); IsRDSLicensingLikelyInUse = $false; Errors = @('Discovery not run or failed') } }
     SecurityAgents = $securityAgents
     Detection     = [pscustomobject]@{ OldDomain = $flags; Summary = $summary }
   }
@@ -2872,8 +2875,10 @@ function Get-SharedFoldersWithACL {
       SqlServer = $null
       EventLogDomainReferences = @()
       ApplicationConfigFiles = [pscustomobject]@{ FilesWithDomainReferences = @(); FilesWithCredentials = @() }
-      Oracle = [pscustomobject]@{ IsOracleServerLikely = $false; OracleServices = @(); OracleHomes = @(); OracleClientInstalled = $false; OracleODBCDrivers = @(); TnsnamesFiles = @(); SqlNetConfigPaths = @(); Errors = $null }
-      RDSLicensing = [pscustomobject]@{ IsRDSSessionHost = $false; RDSRoleInstalled = $null; LicensingMode = 'Unknown'; LicenseServerConfigured = @(); RDSLicensingEvidence = @(); IsRDSLicensingLikelyInUse = $false; Errors = $null }
+      SqlServerInstalled = $false
+      SqlServerVersion   = $null
+      Oracle = [pscustomobject]@{ OracleInstalled = $false; OracleVersion = $null; IsOracleServerLikely = $false; OracleServices = @(); OracleHomes = @(); OracleClientInstalled = $false; OracleODBCDrivers = @(); TnsnamesFiles = @(); SqlNetConfigPaths = @(); Errors = $null }
+      RDSLicensing = [pscustomobject]@{ IsRDSSessionHost = $false; RDSRoleInstalled = $null; RdsLicensingRoleInstalled = $false; LicensingMode = 'Unknown'; LicenseServerConfigured = @(); RDSLicensingEvidence = @(); IsRDSLicensingLikelyInUse = $false; Errors = $null }
       SecurityAgents = [pscustomobject]@{
         CrowdStrike = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }
         Qualys = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }
@@ -3097,8 +3102,10 @@ catch {
         FilesWithDomainReferences = @()
         FilesWithCredentials = @()
       }
-      Oracle = [pscustomobject]@{ IsOracleServerLikely = $false; OracleServices = @(); OracleHomes = @(); OracleClientInstalled = $false; OracleODBCDrivers = @(); TnsnamesFiles = @(); SqlNetConfigPaths = @(); Errors = $null }
-      RDSLicensing = [pscustomobject]@{ IsRDSSessionHost = $false; RDSRoleInstalled = $null; LicensingMode = 'Unknown'; LicenseServerConfigured = @(); RDSLicensingEvidence = @(); IsRDSLicensingLikelyInUse = $false; Errors = $null }
+      SqlServerInstalled = $false
+      SqlServerVersion   = $null
+      Oracle = [pscustomobject]@{ OracleInstalled = $false; OracleVersion = $null; IsOracleServerLikely = $false; OracleServices = @(); OracleHomes = @(); OracleClientInstalled = $false; OracleODBCDrivers = @(); TnsnamesFiles = @(); SqlNetConfigPaths = @(); Errors = $null }
+      RDSLicensing = [pscustomobject]@{ IsRDSSessionHost = $false; RDSRoleInstalled = $null; RdsLicensingRoleInstalled = $false; LicensingMode = 'Unknown'; LicenseServerConfigured = @(); RDSLicensingEvidence = @(); IsRDSLicensingLikelyInUse = $false; Errors = $null }
       SecurityAgents = [pscustomobject]@{
         CrowdStrike = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }
         Qualys = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }

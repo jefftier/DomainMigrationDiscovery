@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-  Redacts sensitive values in text (passwords, tokens, secrets, connection strings).
+  Hides (redacts) sensitive values in text (passwords, tokens, secrets, connection strings).
   Preserves key names; replaces only values with "REDACTED". Used before storing
-  config excerpts or event snippets in JSON/Excel.
-  Lightweight self-test examples: Redact-SensitiveText 'password=secret' -> 'password=REDACTED';
-  Redact-SensitiveText 'Token: abc123' -> 'Token: REDACTED'; Redact-SensitiveText '"api_key":"xyz"' -> '"api_key":"REDACTED"'
+  config excerpts or event snippets in JSON/Excel. Uses approved verb Hide.
+  Lightweight self-test examples: Hide-SensitiveText 'password=secret' -> 'password=REDACTED';
+  Hide-SensitiveText 'Token: abc123' -> 'Token: REDACTED'; Hide-SensitiveText '"api_key":"xyz"' -> '"api_key":"REDACTED"'
 #>
-function Redact-SensitiveText {
+function Hide-SensitiveText {
   [CmdletBinding()]
   param(
     [Parameter(Mandatory = $false)]
@@ -660,6 +660,46 @@ function Get-IISDomainReferences {
   return $result
 }
 
+function Get-SqlServerPresence {
+  [CmdletBinding()]
+  param([Parameter(Mandatory = $false)] $Log)
+  $installed = $false
+  $version = $null
+  try {
+    # Registry: Instance Names\SQL lists instances; value data is instance ID (e.g. MSSQL15.MSSQLSERVER)
+    $regPath = 'SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL'
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Default)
+    $key = $base.OpenSubKey($regPath)
+    if ($key) {
+      $instanceIds = @()
+      foreach ($valueName in $key.GetValueNames()) {
+        if (-not $valueName) { continue }
+        $instanceId = $key.GetValue($valueName)
+        if ($instanceId -and $instanceId -notin $instanceIds) { $instanceIds += $instanceId }
+      }
+      $key.Close()
+      if ($instanceIds.Count -gt 0) {
+        $installed = $true
+        # Read version from first instance: ...\MSSQLServer\CurrentVersion
+        $instanceId = $instanceIds[0]
+        $verKey = $base.OpenSubKey("SOFTWARE\Microsoft\Microsoft SQL Server\$instanceId\MSSQLServer\CurrentVersion")
+        if ($verKey) {
+          $version = $verKey.GetValue('CurrentVersion')
+          $verKey.Close()
+        }
+      }
+    }
+    # Fallback: check for MSSQLSERVER or MSSQL$* services if registry had nothing
+    if (-not $installed) {
+      $svc = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'MSSQLSERVER' -or ($_.Name -like 'MSSQL$*' -and $_.Name -notlike '*SQLBrowser*' -and $_.Name -notlike '*SQLWriter*' -and $_.Name -notlike '*SQLSERVERAGENT*') } | Select-Object -First 1
+      if ($svc) { $installed = $true }
+    }
+  } catch {
+    if ($Log) { $Log.Write("Get-SqlServerPresence: $($_.Exception.Message)", 'WARN') }
+  }
+  return [pscustomobject]@{ Installed = $installed; Version = $version }
+}
+
 function Get-SqlDomainReferences {
   [CmdletBinding()]
   param(
@@ -1007,7 +1047,7 @@ WHERE srv.is_linked = 1
               $linesToStore = @()
               $cap = [Math]::Min(5, $matchedLines.Count - 1)
               for ($i = 0; $i -le $cap; $i++) {
-                $linesToStore += Redact-SensitiveText -InputString $matchedLines[$i]
+                $linesToStore += Hide-SensitiveText -InputString $matchedLines[$i]
               }
               $configFilesWithDomainRefs += [pscustomobject]@{
                 FilePath = $configFile.FullName
@@ -1308,7 +1348,7 @@ function Get-ApplicationConfigDomainReferences {
         if ($matchedLines.Count -gt 0) {
           $cap = [Math]::Min(10, $matchedLines.Count - 1)
           for ($i = 0; $i -le $cap; $i++) {
-            $linesToStore += Redact-SensitiveText -InputString $matchedLines[$i]
+            $linesToStore += Hide-SensitiveText -InputString $matchedLines[$i]
           }
         }
         if ($hasDomainRef -or $hasCredentials) {
@@ -1456,7 +1496,7 @@ function Get-EventLogDomainReferences {
             if ($snippet.Length -gt 200) {
               $snippet = $message.Substring(0, 200) + '...'
             }
-            $snippet = Redact-SensitiveText -InputString $snippet
+            $snippet = Hide-SensitiveText -InputString $snippet
             
             $results += [pscustomobject]@{
               LogName = $logName
@@ -1597,15 +1637,40 @@ function Get-OracleDiscovery {
     $errors += $_.Exception.Message
   }
 
+  $oracleInstalled = $isOracleServerLikely -or $oracleClientInstalled
+  $oracleVersion = $null
+  try {
+    # Try to get version from first Oracle home path (e.g. ...\product\19.0.0\client_1) or registry key name
+    foreach ($oh in $oracleHomes) {
+      if ($oh -match '\\product\\(\d+\.\d+\.\d+)') {
+        $oracleVersion = $Matches[1]
+        break
+      }
+    }
+    if (-not $oracleVersion) {
+      $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Default)
+      $key = $base.OpenSubKey('SOFTWARE\Oracle')
+      if ($key) {
+        foreach ($subName in $key.GetSubKeyNames()) {
+          if ($subName -match '(\d+\.\d+\.\d+)') { $oracleVersion = $Matches[1]; break }
+          if ($subName -match 'KEY_Ora.*?(\d+)c') { $oracleVersion = "$($Matches[1]).0.0"; break }
+        }
+        $key.Close()
+      }
+    }
+  } catch {}
+
   return [pscustomobject]@{
+    OracleInstalled       = $oracleInstalled
+    OracleVersion         = $oracleVersion
     IsOracleServerLikely  = $isOracleServerLikely
-    OracleServices       = $oracleServices
-    OracleHomes          = $oracleHomes
+    OracleServices        = $oracleServices
+    OracleHomes           = $oracleHomes
     OracleClientInstalled = $oracleClientInstalled
-    OracleODBCDrivers    = $oracleOdbcDrivers
-    TnsnamesFiles        = $tnsnamesFiles
-    SqlNetConfigPaths    = $sqlNetConfigPaths
-    Errors               = if ($errors.Count -gt 0) { $errors } else { $null }
+    OracleODBCDrivers     = $oracleOdbcDrivers
+    TnsnamesFiles         = $tnsnamesFiles
+    SqlNetConfigPaths     = $sqlNetConfigPaths
+    Errors                = if ($errors.Count -gt 0) { $errors } else { $null }
   }
 }
 
@@ -1619,6 +1684,7 @@ function Get-RDSLicensingDiscovery {
   $licensingMode = 'Unknown'
   $licenseServers = @()
   $isLikelyInUse = $false
+  $rdsLicensingRoleInstalled = $false  # RDS-Licensing role (license server / CALs)
 
   try {
     # TermService present indicates RDP/RDS capability
@@ -1636,6 +1702,12 @@ function Get-RDSLicensingDiscovery {
           $evidence += 'RDS-RD-Server feature installed'
         } else {
           $rdsRoleInstalled = $false
+        }
+        # RDS-Licensing role: license server where CALs can be installed
+        $rdLicensing = Get-WindowsFeature -Name RDS-Licensing -ErrorAction SilentlyContinue
+        if ($rdLicensing -and $rdLicensing.Installed) {
+          $rdsLicensingRoleInstalled = $true
+          $evidence += 'RDS-Licensing role installed'
         }
       }
     } catch {}
@@ -1705,14 +1777,15 @@ function Get-RDSLicensingDiscovery {
   }
 
   return [pscustomobject]@{
-    IsRDSSessionHost       = $isRdsSessionHost
-    RDSRoleInstalled       = $rdsRoleInstalled
-    LicensingMode          = $licensingMode
-    LicenseServerConfigured = $licenseServers
-    RDSLicensingEvidence   = $evidence
+    IsRDSSessionHost          = $isRdsSessionHost
+    RDSRoleInstalled          = $rdsRoleInstalled
+    RdsLicensingRoleInstalled  = $rdsLicensingRoleInstalled
+    LicensingMode             = $licensingMode
+    LicenseServerConfigured   = $licenseServers
+    RDSLicensingEvidence      = $evidence
     IsRDSLicensingLikelyInUse = $isLikelyInUse
-    Errors                 = if ($errors.Count -gt 0) { $errors } else { $null }
+    Errors                    = if ($errors.Count -gt 0) { $errors } else { $null }
   }
 }
 
-Export-ModuleMember -Function Redact-SensitiveText, Get-CredentialManagerDomainReferences, Get-CertificatesWithDomainReferences, Get-FirewallRulesWithDomainReferences, Get-IISDomainReferences, Get-SqlDomainReferences, Get-EventLogDomainReferences, Get-ApplicationConfigDomainReferences, Get-OracleDiscovery, Get-RDSLicensingDiscovery
+Export-ModuleMember -Function Hide-SensitiveText, Get-SqlServerPresence, Get-CredentialManagerDomainReferences, Get-CertificatesWithDomainReferences, Get-FirewallRulesWithDomainReferences, Get-IISDomainReferences, Get-SqlDomainReferences, Get-EventLogDomainReferences, Get-ApplicationConfigDomainReferences, Get-OracleDiscovery, Get-RDSLicensingDiscovery
