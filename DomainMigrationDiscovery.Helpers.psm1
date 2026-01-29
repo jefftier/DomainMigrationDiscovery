@@ -1,3 +1,46 @@
+<#
+.SYNOPSIS
+  Redacts sensitive values in text (passwords, tokens, secrets, connection strings).
+  Preserves key names; replaces only values with "REDACTED". Used before storing
+  config excerpts or event snippets in JSON/Excel.
+  Lightweight self-test examples: Redact-SensitiveText 'password=secret' -> 'password=REDACTED';
+  Redact-SensitiveText 'Token: abc123' -> 'Token: REDACTED'; Redact-SensitiveText '"api_key":"xyz"' -> '"api_key":"REDACTED"'
+#>
+function Redact-SensitiveText {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory = $false)]
+    [string]$InputString
+  )
+  if ([string]::IsNullOrEmpty($InputString)) { return $InputString }
+  $text = $InputString
+  $opt = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+  # Literal key names (case-insensitive match)
+  $sensitiveKeys = @(
+    'password', 'pwd', 'passwd', 'pass',
+    'token', 'access_token', 'refresh_token', 'id_token',
+    'apikey', 'api_key', 'api key',
+    'secret', 'client_secret', 'sharedsecret',
+    'connectionstring', 'connection string', 'connection_string',
+    'datasource', 'data source', 'server', 'uid', 'userid', 'user id',
+    'integrated security', 'trusted_connection'
+  )
+  foreach ($key in $sensitiveKeys) {
+    $esc = [regex]::Escape($key)
+    # key=value (value: non-quoted, to next space/semicolon/quote/newline)
+    $text = [regex]::Replace($text, "($esc)\s*[=:]\s*([^;\s""'<>`r`n]+)", "`${1}=REDACTED", $opt)
+    # key="value" or key='value'
+    $text = [regex]::Replace($text, "($esc)\s*[=:]\s*[""']([^""']*)[""']", "`${1}=REDACTED", $opt)
+    # JSON: "key": "value" ($1 must be literal for regex backreference; escape $ in double-quoted string)
+    $text = [regex]::Replace($text, "[""']($esc)[""']\s*:\s*[""']([^""']*)[""']", "`"`$1`":`"REDACTED`"", $opt)
+    # XML: <key>value</key> (escape $ so $1 is literal for regex backreference)
+    $text = [regex]::Replace($text, "<($esc)>[^<]*</\1>", '<$1>REDACTED</$1>', $opt)
+  }
+  # Connection string style: Password=xxx; or Pwd=xxx;
+  $text = [regex]::Replace($text, '(Password|Pwd)\s*=\s*[^;]+', '${1}=REDACTED', $opt)
+  return $text
+}
+
 function Get-CredentialManagerDomainReferences {
   [CmdletBinding()]
   param(
@@ -961,10 +1004,15 @@ WHERE srv.is_linked = 1
             }
             
             if ($matchedLines.Count -gt 0) {
+              $linesToStore = @()
+              $cap = [Math]::Min(5, $matchedLines.Count - 1)
+              for ($i = 0; $i -le $cap; $i++) {
+                $linesToStore += Redact-SensitiveText -InputString $matchedLines[$i]
+              }
               $configFilesWithDomainRefs += [pscustomobject]@{
                 FilePath = $configFile.FullName
                 FileName = $configFile.Name
-                MatchedLines = $matchedLines[0..([Math]::Min(5, $matchedLines.Count - 1))]  # Limit to first 5 matches
+                MatchedLines = $linesToStore
                 TotalMatches = $matchedLines.Count
               }
             }
@@ -1255,7 +1303,14 @@ function Get-ApplicationConfigDomainReferences {
           }
         }
         
-        # Record findings
+        # Record findings (redact MatchedLines before storing - no secrets in JSON/Excel)
+        $linesToStore = @()
+        if ($matchedLines.Count -gt 0) {
+          $cap = [Math]::Min(10, $matchedLines.Count - 1)
+          for ($i = 0; $i -le $cap; $i++) {
+            $linesToStore += Redact-SensitiveText -InputString $matchedLines[$i]
+          }
+        }
         if ($hasDomainRef -or $hasCredentials) {
           $fileResult = [pscustomobject]@{
             FilePath = $configFile.FullName
@@ -1263,7 +1318,7 @@ function Get-ApplicationConfigDomainReferences {
             FileSize = if ($fileInfo) { $fileInfo.Length } else { $null }
             HasDomainReference = $hasDomainRef
             HasCredentials = $hasCredentials
-            MatchedLines = if ($matchedLines.Count -gt 0) { $matchedLines[0..([Math]::Min(10, $matchedLines.Count - 1))] } else { @() }
+            MatchedLines = $linesToStore
             TotalDomainMatches = $matchedLines.Count
             CredentialPatterns = $credentialPatterns
           }
@@ -1396,11 +1451,12 @@ function Get-EventLogDomainReferences {
           
           # Check if message contains domain reference
           if ($DomainMatchers.Match($message)) {
-            # Extract a snippet (truncate to 200 chars for performance)
+            # Extract a snippet (truncate to 200 chars for performance); redact before storing
             $snippet = $message
             if ($snippet.Length -gt 200) {
               $snippet = $message.Substring(0, 200) + '...'
             }
+            $snippet = Redact-SensitiveText -InputString $snippet
             
             $results += [pscustomobject]@{
               LogName = $logName
@@ -1436,4 +1492,227 @@ function Get-EventLogDomainReferences {
   return $results
 }
 
-Export-ModuleMember -Function Get-CredentialManagerDomainReferences, Get-CertificatesWithDomainReferences, Get-FirewallRulesWithDomainReferences, Get-IISDomainReferences, Get-SqlDomainReferences, Get-EventLogDomainReferences, Get-ApplicationConfigDomainReferences
+function Get-OracleDiscovery {
+  [CmdletBinding()]
+  param([Parameter(Mandatory = $false)] $Log)
+  $errors = @()
+  $oracleServices = @()
+  $oracleHomes = @()
+  $tnsnamesFiles = @()
+  $sqlNetConfigPaths = @()
+  $oracleOdbcDrivers = @()
+  $isOracleServerLikely = $false
+  $oracleClientInstalled = $false
+
+  try {
+    # Services: OracleService*, TNSListener, OracleVssWriter*, etc.
+    $svcPatterns = @('OracleService*', 'TNSListener', 'OracleVssWriter*', 'Oracle*Service*', 'OracleMTSRecoveryService', 'OracleJobScheduler*')
+    try {
+      $allSvcs = Get-Service -ErrorAction SilentlyContinue
+      foreach ($s in $allSvcs) {
+        $match = $false
+        foreach ($p in $svcPatterns) {
+          if ($s.Name -like $p) { $match = $true; break }
+        }
+        if ($match) {
+          $isOracleServerLikely = $true
+          $oracleServices += [pscustomobject]@{
+            Name       = $s.Name
+            DisplayName = $s.DisplayName
+            Status     = $s.Status.ToString()
+            StartType = $s.StartType.ToString()
+          }
+        }
+      }
+    } catch { $errors += "Services: $($_.Exception.Message)" }
+
+    # Registry: HKLM\SOFTWARE\Oracle and WOW6432Node
+    $regPaths = @('SOFTWARE\Oracle', 'SOFTWARE\WOW6432Node\Oracle')
+    foreach ($regPath in $regPaths) {
+      try {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Default)
+        $key = $base.OpenSubKey($regPath)
+        if ($key) {
+          $oracleClientInstalled = $true
+          foreach ($subName in $key.GetSubKeyNames()) {
+            try {
+              $sub = $key.OpenSubKey($subName)
+              if ($sub) {
+                $oh = $sub.GetValue('ORACLE_HOME')
+                if ($oh) { $oracleHomes += $oh }
+                $sub.Close()
+              }
+            } catch {}
+          }
+          $key.Close()
+        }
+      } catch {}
+    }
+    $oracleHomes = $oracleHomes | Sort-Object -Unique
+
+    # ODBC drivers (Oracle)
+    try {
+      $odbcKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Default).OpenSubKey('SOFTWARE\ODBC\ODBCINST.INI\ODBC Drivers')
+      if ($odbcKey) {
+        foreach ($name in $odbcKey.GetValueNames()) {
+          if ($name -match 'Oracle' -or $name -match 'Oracle in') {
+            $oracleOdbcDrivers += $name
+            $oracleClientInstalled = $true
+          }
+        }
+        $odbcKey.Close()
+      }
+    } catch {}
+    # 32-bit drivers
+    try {
+      $odbcKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32).OpenSubKey('SOFTWARE\ODBC\ODBCINST.INI\ODBC Drivers')
+      if ($odbcKey) {
+        foreach ($name in $odbcKey.GetValueNames()) {
+          if (($name -match 'Oracle' -or $name -match 'Oracle in') -and $oracleOdbcDrivers -notcontains $name) {
+            $oracleOdbcDrivers += $name
+            $oracleClientInstalled = $true
+          }
+        }
+        $odbcKey.Close()
+      }
+    } catch {}
+
+    # Filesystem: tnsnames.ora, sqlnet.ora, listener.ora (paths only)
+    $searchDirs = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ORACLE_HOME, $env:TNS_ADMIN)
+    foreach ($oh in $oracleHomes) { if ($oh -and (Test-Path -LiteralPath $oh -ErrorAction SilentlyContinue)) { $searchDirs += $oh } }
+    $searchDirs = $searchDirs | Where-Object { $_ } | Sort-Object -Unique
+    $oraFiles = @('tnsnames.ora', 'sqlnet.ora', 'listener.ora')
+    foreach ($dir in $searchDirs) {
+      if (-not (Test-Path -LiteralPath $dir -ErrorAction SilentlyContinue)) { continue }
+      try {
+        $items = Get-ChildItem -Path $dir -Recurse -ErrorAction SilentlyContinue -Filter 'tnsnames.ora' | Select-Object -First 20
+        foreach ($f in $items) { if ($f.FullName -notin $tnsnamesFiles) { $tnsnamesFiles += $f.FullName } }
+        $items = Get-ChildItem -Path $dir -Recurse -ErrorAction SilentlyContinue -Filter 'sqlnet.ora' | Select-Object -First 20
+        foreach ($f in $items) { if ($f.FullName -notin $sqlNetConfigPaths) { $sqlNetConfigPaths += $f.FullName } }
+        $items = Get-ChildItem -Path $dir -Recurse -ErrorAction SilentlyContinue -Filter 'listener.ora' | Select-Object -First 20
+        foreach ($f in $items) { if ($f.FullName -notin $sqlNetConfigPaths) { $sqlNetConfigPaths += $f.FullName } }
+      } catch {}
+    }
+  } catch {
+    $errors += $_.Exception.Message
+  }
+
+  return [pscustomobject]@{
+    IsOracleServerLikely  = $isOracleServerLikely
+    OracleServices       = $oracleServices
+    OracleHomes          = $oracleHomes
+    OracleClientInstalled = $oracleClientInstalled
+    OracleODBCDrivers    = $oracleOdbcDrivers
+    TnsnamesFiles        = $tnsnamesFiles
+    SqlNetConfigPaths    = $sqlNetConfigPaths
+    Errors               = if ($errors.Count -gt 0) { $errors } else { $null }
+  }
+}
+
+function Get-RDSLicensingDiscovery {
+  [CmdletBinding()]
+  param([Parameter(Mandatory = $false)] $Log)
+  $errors = @()
+  $evidence = @()
+  $isRdsSessionHost = $false
+  $rdsRoleInstalled = $null  # Unknown when Get-WindowsFeature not available
+  $licensingMode = 'Unknown'
+  $licenseServers = @()
+  $isLikelyInUse = $false
+
+  try {
+    # TermService present indicates RDP/RDS capability
+    try {
+      $ts = Get-Service -Name TermService -ErrorAction SilentlyContinue
+      if ($ts) { $evidence += 'TermService present'; $isRdsSessionHost = $true }
+    } catch {}
+
+    # Get-WindowsFeature when available (Server OS)
+    try {
+      if (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue) {
+        $rdServer = Get-WindowsFeature -Name RDS-RD-Server -ErrorAction SilentlyContinue
+        if ($rdServer -and $rdServer.Installed) {
+          $rdsRoleInstalled = $true
+          $evidence += 'RDS-RD-Server feature installed'
+        } else {
+          $rdsRoleInstalled = $false
+        }
+      }
+    } catch {}
+
+    # WMI/CIM: Win32_TerminalServiceSetting for licensing mode and license servers
+    try {
+      $tsSetting = Get-CimInstance -Namespace root/cimv2/TerminalServices -ClassName Win32_TerminalServiceSetting -ErrorAction SilentlyContinue | Select-Object -First 1
+      if ($tsSetting) {
+        # LicensingType: 0=NotConfigured, 1=PerDevice, 2=PerUser (documented for Win32_TerminalServiceSetting)
+        $lt = $tsSetting.LicensingType
+        if ($null -ne $lt) {
+          switch ([int]$lt) {
+            0 { $licensingMode = 'NotConfigured' }
+            1 { $licensingMode = 'PerDevice'; $evidence += 'LicensingMode=PerDevice' }
+            2 { $licensingMode = 'PerUser'; $evidence += 'LicensingMode=PerUser' }
+            default { $licensingMode = "Raw$lt" }
+          }
+        }
+        try {
+          $list = $tsSetting.GetSpecifiedLicenseServerList()
+          if ($list -and $list.Length -gt 0) {
+            $licenseServers = @($list)
+            $evidence += "LicenseServerConfigured($($list.Length))"
+          }
+        } catch {}
+      }
+    } catch { $errors += "WMI TerminalService: $($_.Exception.Message)" }
+
+    # Registry: Terminal Server licensing
+    $regPaths = @(
+      'SYSTEM\CurrentControlSet\Control\Terminal Server\RCM\Licensing Core',
+      'SYSTEM\CurrentControlSet\Control\Terminal Server\Licensing'
+    )
+    foreach ($regPath in $regPaths) {
+      try {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Default)
+        $key = $base.OpenSubKey($regPath)
+        if ($key) {
+          $ls = $key.GetValue('LicenseServers')
+          if ($ls) {
+            $evidence += 'Registry LicenseServers'
+            if ($ls -is [string] -and $ls -notin $licenseServers) { $licenseServers += $ls }
+            elseif ($ls -is [array]) { foreach ($s in $ls) { if ($s -notin $licenseServers) { $licenseServers += $s } } }
+          }
+          $key.Close()
+        }
+      } catch {}
+    }
+
+    # Small event log probe: TerminalServices licensing, last 14 days, max 30 events
+    try {
+      $logNames = @('Microsoft-Windows-TerminalServices-Licensing/Operational', 'Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational')
+      $startTime = (Get-Date).AddDays(-14)
+      foreach ($logName in $logNames) {
+        try {
+          $events = Get-WinEvent -LogName $logName -MaxEvents 30 -ErrorAction SilentlyContinue | Where-Object { $_.TimeCreated -ge $startTime }
+          if ($events -and $events.Count -gt 0) {
+            $evidence += "Events:$logName($($events.Count))"
+          }
+        } catch {}
+      }
+    } catch {}
+
+    $isLikelyInUse = ($licensingMode -notin @('Unknown', 'NotConfigured')) -or ($licenseServers.Count -gt 0) -or ($evidence.Count -gt 1)
+  } catch {
+    $errors += $_.Exception.Message
+  }
+
+  return [pscustomobject]@{
+    IsRDSSessionHost       = $isRdsSessionHost
+    RDSRoleInstalled       = $rdsRoleInstalled
+    LicensingMode          = $licensingMode
+    LicenseServerConfigured = $licenseServers
+    RDSLicensingEvidence   = $evidence
+    IsRDSLicensingLikelyInUse = $isLikelyInUse
+    Errors                 = if ($errors.Count -gt 0) { $errors } else { $null }
+  }
+}
+
+Export-ModuleMember -Function Redact-SensitiveText, Get-CredentialManagerDomainReferences, Get-CertificatesWithDomainReferences, Get-FirewallRulesWithDomainReferences, Get-IISDomainReferences, Get-SqlDomainReferences, Get-EventLogDomainReferences, Get-ApplicationConfigDomainReferences, Get-OracleDiscovery, Get-RDSLicensingDiscovery

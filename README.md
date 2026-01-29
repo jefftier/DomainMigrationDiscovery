@@ -28,6 +28,17 @@ A comprehensive PowerShell script for discovering domain migration readiness by 
 python build_migration_workbook.py -i "Y:\results" -o "."
 ```
 
+### Smoke run (end-to-end, no new dependencies)
+```powershell
+# 1. Run discovery locally (writes JSON to C:\temp\MigrationDiscovery\out)
+.\Get-WorkstationDiscovery.ps1 -OldDomainFqdn "oldco.com" -NewDomainFqdn "newco.com" -SlimOutputOnly
+
+# 2. Build workbook from that folder (adjust -i if you use a different output path)
+python build_migration_workbook.py -i "C:\temp\MigrationDiscovery\out" -o "."
+
+# 3. Open the generated *MigrationDiscovery_*.xlsx and verify Summary, Config File Findings, Config Summary, Oracle Summary, RDS Licensing, Local Admin Membership tabs
+```
+
 **Key Files:**
 - `Get-WorkstationDiscovery.ps1` - Main discovery script
 - `Invoke-MigrationDiscoveryRemotely.ps1` - Remote execution launcher
@@ -399,6 +410,12 @@ The script generates a JSON file named `{COMPUTERNAME}_{MM-dd-yyyy}.json` in the
 **Important**: The JSON structure is **identical** regardless of the `SlimOutputOnly` setting. When `SlimOutputOnly` is enabled, the script uses filtered data (excluding Microsoft-built-in applications and services), but the structure remains the same. This ensures consistent ingestion into reporting engines.
 
 The JSON output includes a self-documenting `Schema` section that describes all sections, property types, and data formats for easy integration with Power BI and custom web applications.
+
+### Security and backward compatibility
+
+- **Redaction**: Config file matched lines and event-log snippets are redacted before storage (passwords, tokens, API keys, connection-string values replaced with "REDACTED"). Same JSON structure; no secrets in JSON or Excel.
+- **Excel formula injection**: String cells that start with `=`, `+`, `-`, or `@` are escaped so Excel treats them as text, not formulas.
+- **New JSON sections**: `Oracle` (server/client discovery) and `RDSLicensing` (RDS/RDP licensing). The workbook builder accepts older JSON that lacks these sections; missing sections produce empty or default rows.
 
 ## Complete Data Elements Collected
 
@@ -1058,13 +1075,25 @@ The Excel workbook includes the following sheets:
 
 22. **EventLogDomainReferences** - Event log entries with domain references
 
-23. **ApplicationConfigFiles** - Application configuration files
+23. **ApplicationConfigFiles** - Application configuration files (raw JSON)
 
-24. **SecurityAgents** - Security agent information (CrowdStrike, Qualys, SCCM, EnCase)
+24. **Config File Findings** - One row per machine per config file finding (FilePath, Extension, MatchCount, HasCredentialIndicators, OldDomainIndicator, MatchedLinesRedacted capped)
 
-25. **IIS** - IIS configuration (raw JSON)
+25. **Config Summary** - One row per computer: total files with hits, total match count, files credential-flagged, top 5 file paths
 
-26. **SqlServer** - SQL Server configuration (raw JSON)
+26. **Oracle Summary** - Oracle server/client discovery: IsOracleServerLikely, OracleClientInstalled, OracleHomes, OracleODBCDrivers, TnsnamesFiles counts
+
+27. **Oracle Details** - One row per Oracle service (Name, DisplayName, Status, StartType)
+
+28. **RDS Licensing** - RDS/RDP licensing: IsRDSSessionHost, LicensingMode, LicenseServerConfigured, IsRDSLicensingLikelyInUse, RDSLicensingEvidence
+
+29. **Local Admin Membership** - One row per local Administrators group member (GroupName=Administrators, MemberName, MemberType, DomainOrScope, SID, Source). Every computer appears; errors captured.
+
+30. **SecurityAgents** - Security agent information (CrowdStrike, Qualys, SCCM, EnCase)
+
+31. **IIS** - IIS configuration (raw JSON)
+
+32. **SqlServer** - SQL Server configuration (raw JSON)
 
 ### Report Builder Features
 

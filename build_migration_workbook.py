@@ -1,3 +1,16 @@
+"""
+Build migration discovery Excel workbook from JSON snapshots.
+
+Internal note - JSON schema keys relevant to enhancements (Phase 0):
+- Metadata: ComputerName, PlantId, CollectedAt, Version, Domain, OldDomainFqdn, NewDomainFqdn, OldDomainNetBIOS
+- ApplicationConfigFiles: FilesWithDomainReferences, FilesWithCredentials (each file: FilePath, FileName, MatchedLines, TotalDomainMatches, CredentialPatterns, HasDomainReference, HasCredentials). MatchedLines = raw text; must be redacted.
+- EventLogDomainReferences: list of { LogName, TimeCreated, Id, MessageSnippet }. MessageSnippet = raw text; must be redacted.
+- SqlServer.ConfigFilesWithDomainReferences (per instance): MatchedLines = raw text; must be redacted.
+- LocalAdministrators: list of { Name, SID, ObjectClass, PrincipalSource, IsGroup, IsDomain, Domain, Account, Source }
+- LocalGroupMembers: list of { Group, Name, ObjectClass, PrincipalSource, SID }
+- Detection.OldDomain, Detection.Summary, Detection.Summary.Counts
+- New sections (this branch): Oracle, RDSLicensing; Config worksheets use ApplicationConfigFiles data.
+"""
 import os
 import sys
 
@@ -13,6 +26,31 @@ import argparse
 import datetime
 from collections import defaultdict
 
+_REQUIRED_MODULES = [
+    ("pandas", "pandas"),
+    ("openpyxl", "openpyxl"),
+]
+
+
+def _check_dependencies():
+    """Ensure required modules are installed; exit with a friendly message if not."""
+    missing = []
+    for _import_name, _pip_name in _REQUIRED_MODULES:
+        try:
+            __import__(_import_name)
+        except ImportError:
+            missing.append(_pip_name)
+    if missing:
+        print("This script requires the following Python packages to be installed:", file=sys.stderr)
+        for name in missing:
+            print(f"  - {name}", file=sys.stderr)
+        print(file=sys.stderr)
+        print("Install them with pip before running:", file=sys.stderr)
+        print("  pip install " + " ".join(missing), file=sys.stderr)
+        sys.exit(1)
+
+
+_check_dependencies()
 import pandas as pd
 
 DEFAULT_INPUT_FOLDER = "results"
@@ -121,6 +159,19 @@ def load_latest_records(input_folder, explicit_plant_id=None):
     pure_records = {k: v["data"] for k, v in latest_by_computer.items()}
 
     return pure_records, plant_ids_seen
+
+
+def escape_excel_formula(value):
+    """
+    Prevent Excel formula injection: prefix string with apostrophe if it starts
+    with =, +, -, or @ so the cell is treated as text, not a formula.
+    """
+    if value is None or not isinstance(value, str):
+        return value
+    s = value.strip()
+    if s and s[0] in ("=", "+", "-", "@"):
+        return "'" + value
+    return value
 
 
 def filter_search_criteria_fields(row_dict, section_name=None):
@@ -467,6 +518,32 @@ def flatten_record(computer_name, record, sheet_rows):
         add_row(sheet_rows, "ScheduledTasks", row)
     
     # Other simple list sections
+    # --- Local Admin Membership: one row per (ComputerName, Administrators, member) ---
+    local_admins_list = record.get("LocalAdministrators") or []
+    if isinstance(local_admins_list, dict):
+        local_admins_list = [local_admins_list]
+    for admin in local_admins_list:
+        if not isinstance(admin, dict):
+            continue
+        row_lam = base.copy()
+        row_lam["GroupName"] = "Administrators"
+        row_lam["MemberName"] = admin.get("Name")
+        row_lam["MemberType"] = admin.get("ObjectClass")
+        row_lam["DomainOrScope"] = admin.get("Domain")
+        row_lam["SID"] = admin.get("SID")
+        row_lam["Source"] = admin.get("Source")
+        add_row(sheet_rows, "Local Admin Membership", row_lam)
+    # If no local admins collected (e.g. error), still add one row per computer so every computer appears
+    if not local_admins_list:
+        row_lam = base.copy()
+        row_lam["GroupName"] = "Administrators"
+        row_lam["MemberName"] = None
+        row_lam["MemberType"] = None
+        row_lam["DomainOrScope"] = None
+        row_lam["SID"] = None
+        row_lam["Source"] = "Not collected or error"
+        add_row(sheet_rows, "Local Admin Membership", row_lam)
+
     for section in [
         "Profiles",
         "InstalledApps",
@@ -598,13 +675,48 @@ def flatten_record(computer_name, record, sheet_rows):
         row["RawJson"] = json.dumps(sql, ensure_ascii=False)
         add_row(sheet_rows, "SqlServer", row)
 
-    # --- ApplicationConfigFiles: also often nested; store raw + some summary if present ---
+    # --- RDS Licensing (one row per computer) ---
+    rds = record.get("RDSLicensing")
+    if rds is not None and isinstance(rds, dict):
+        row_rds = base.copy()
+        row_rds["IsRDSSessionHost"] = rds.get("IsRDSSessionHost", False)
+        row_rds["RDSRoleInstalled"] = rds.get("RDSRoleInstalled")
+        row_rds["LicensingMode"] = rds.get("LicensingMode", "Unknown")
+        row_rds["LicenseServerConfigured"] = "; ".join(rds.get("LicenseServerConfigured") or [])
+        row_rds["RDSLicensingEvidence"] = "; ".join(rds.get("RDSLicensingEvidence") or [])
+        row_rds["IsRDSLicensingLikelyInUse"] = rds.get("IsRDSLicensingLikelyInUse", False)
+        row_rds["Errors"] = "; ".join(rds.get("Errors") or []) if rds.get("Errors") else ""
+        add_row(sheet_rows, "RDS Licensing", row_rds)
+
+    # --- Oracle discovery (Summary + Details) ---
+    oracle = record.get("Oracle")
+    if oracle is not None and isinstance(oracle, dict):
+        row_ora_sum = base.copy()
+        row_ora_sum["IsOracleServerLikely"] = oracle.get("IsOracleServerLikely", False)
+        row_ora_sum["OracleClientInstalled"] = oracle.get("OracleClientInstalled", False)
+        row_ora_sum["OracleHomesCount"] = len(oracle.get("OracleHomes") or [])
+        row_ora_sum["OracleServicesCount"] = len(oracle.get("OracleServices") or [])
+        row_ora_sum["OracleODBCDriversCount"] = len(oracle.get("OracleODBCDrivers") or [])
+        row_ora_sum["TnsnamesFilesCount"] = len(oracle.get("TnsnamesFiles") or [])
+        row_ora_sum["OracleHomes"] = "; ".join(oracle.get("OracleHomes") or [])[:500]
+        row_ora_sum["OracleODBCDrivers"] = "; ".join(oracle.get("OracleODBCDrivers") or [])
+        row_ora_sum["Errors"] = "; ".join(oracle.get("Errors") or []) if oracle.get("Errors") else ""
+        add_row(sheet_rows, "Oracle Summary", row_ora_sum)
+        # Oracle Details: one row per Oracle service
+        for svc in oracle.get("OracleServices") or []:
+            if isinstance(svc, dict):
+                row_svc = base.copy()
+                row_svc["ServiceName"] = svc.get("Name")
+                row_svc["DisplayName"] = svc.get("DisplayName")
+                row_svc["Status"] = svc.get("Status")
+                row_svc["StartType"] = svc.get("StartType")
+                add_row(sheet_rows, "Oracle Details", row_svc)
+
+    # --- ApplicationConfigFiles: raw row + Config File Findings + Config Summary ---
     app_cfg = record.get("ApplicationConfigFiles")
     if app_cfg is not None:
         row = base.copy()
         if isinstance(app_cfg, dict):
-            # Try to surface a high-level summary if the structure provides it,
-            # otherwise keep the whole object as JSON.
             for k, v in app_cfg.items():
                 if not isinstance(v, (list, dict)):
                     row[k] = v
@@ -612,6 +724,68 @@ def flatten_record(computer_name, record, sheet_rows):
         else:
             row["RawJson"] = json.dumps(app_cfg, ensure_ascii=False)
         add_row(sheet_rows, "ApplicationConfigFiles", row)
+
+        # Config File Findings: one row per machine per file finding (readable in Excel)
+        if isinstance(app_cfg, dict):
+            files_with_refs = app_cfg.get("FilesWithDomainReferences") or []
+            files_with_creds = app_cfg.get("FilesWithCredentials") or []
+            if not isinstance(files_with_refs, list):
+                files_with_refs = [files_with_refs] if files_with_refs else []
+            if not isinstance(files_with_creds, list):
+                files_with_creds = [files_with_creds] if files_with_creds else []
+            # Merge by file path: collect all file entries (path -> combined info)
+            by_path = {}
+            for f in files_with_refs + files_with_creds:
+                if not isinstance(f, dict):
+                    continue
+                path = f.get("FilePath") or f.get("FileName") or ""
+                if not path:
+                    continue
+                ext = os.path.splitext(path)[1] if path else ""
+                matched_lines = list(f.get("MatchedLines") or [])
+                match_count = f.get("TotalDomainMatches") or len(matched_lines)
+                has_creds = f.get("HasCredentials", False)
+                cred_patterns = f.get("CredentialPatterns") or []
+                matched_tokens = "; ".join(str(p) for p in cred_patterns[:10]) if isinstance(cred_patterns, list) else (str(cred_patterns) if cred_patterns else "")
+                if path in by_path:
+                    existing = by_path[path]
+                    existing_lines = existing.get("_lines") or []
+                    existing_lines = list(dict.fromkeys(existing_lines + [str(x) for x in matched_lines]))
+                    match_count = max(match_count, existing.get("MatchCount", 0), len(existing_lines))
+                    has_creds = has_creds or existing.get("HasCredentialIndicators", False)
+                    matched_lines = existing_lines
+                    if (existing.get("MatchedTokens") or "") and matched_tokens:
+                        matched_tokens = (existing.get("MatchedTokens") or "") + "; " + matched_tokens
+                cap_lines = 10
+                lines_redacted = "\n".join(matched_lines[:cap_lines])
+                if len(matched_lines) > cap_lines:
+                    lines_redacted += "\n...TRUNCATED"
+                by_path[path] = {
+                    "FilePath": path,
+                    "Extension": ext,
+                    "MatchCount": match_count,
+                    "HasCredentialIndicators": has_creds,
+                    "OldDomainIndicator": f.get("HasDomainReference", False),
+                    "MatchedTokens": matched_tokens,
+                    "MatchedLinesRedacted": lines_redacted,
+                    "_lines": matched_lines,
+                }
+            for _path, info in by_path.items():
+                row_cfg = base.copy()
+                row_cfg.update({k: v for k, v in info.items() if k != "_lines"})
+                add_row(sheet_rows, "Config File Findings", row_cfg)
+
+            # Config Summary: one row per computer
+            total_files = len(by_path)
+            total_hits = sum(info.get("MatchCount", 0) for info in by_path.values())
+            cred_flagged = sum(1 for info in by_path.values() if info.get("HasCredentialIndicators"))
+            top5 = list(by_path.keys())[:5]
+            row_summary = base.copy()
+            row_summary["TotalFilesWithHits"] = total_files
+            row_summary["TotalMatchCount"] = total_hits
+            row_summary["FilesCredentialFlagged"] = cred_flagged
+            row_summary["Top5FilePaths"] = "; ".join(top5) if top5 else ""
+            add_row(sheet_rows, "Config Summary", row_summary)
 
     # --- SecurityAgents (CrowdStrike, Qualys, SCCM, Encase) ---
     # Only include output data, not search criteria or anecdotal information
@@ -1002,6 +1176,7 @@ def write_excel(sheet_rows, output_path):
         "Services",
         "ScheduledTasks",
         "LocalAdministrators",
+        "Local Admin Membership",
         "LocalGroupMembers",
         "MappedDrives",
         "Printers",
@@ -1018,6 +1193,11 @@ def write_excel(sheet_rows, output_path):
         "AutoAdminLogon",
         "EventLogDomainReferences",
         "ApplicationConfigFiles",
+        "Config File Findings",
+        "Config Summary",
+        "Oracle Summary",
+        "Oracle Details",
+        "RDS Licensing",
         "SecurityAgents",
         "IIS",
         "SqlServer",
@@ -1035,6 +1215,13 @@ def write_excel(sheet_rows, output_path):
             if not rows:
                 continue
             df = pd.DataFrame(rows)
+
+            # Excel formula injection protection: escape string cells starting with =, +, -, @
+            for col in df.columns:
+                if df[col].dtype == object:
+                    df[col] = df[col].apply(
+                        lambda v: escape_excel_formula(v) if isinstance(v, str) else v
+                    )
 
             # Core columns first if they exist (no Domain in base, only in Metadata)
             core_cols = ["ComputerName", "PlantId", "CollectedAt"]
