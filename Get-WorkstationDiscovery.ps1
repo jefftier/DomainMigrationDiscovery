@@ -1425,6 +1425,7 @@ function Get-SecurityAgentsTenantInfo {
             DomainReferences  = $sccmInfo.DomainReferences
             FoundDomains      = $sccmInfo.FoundDomains
             Tenant            = $sccmInfo.Tenant
+            OldDomainName     = if ($sccmInfo.Tenant -eq 'OldDomain') { $OldDomainFqdn } else { $null }
             HasDomainReference = $sccmInfo.HasDomainReference
         }
         Encase = [pscustomobject]@{
@@ -1454,7 +1455,7 @@ function Get-LocalGroupMembersSafe([string]$group){
   } catch {}
   try {
     $grp = [ADSI]"WinNT://./$group,group"
-    $grp.psbase.Invoke('Members') | ForEach-Object {
+    $members = $grp.psbase.Invoke('Members') | ForEach-Object {
       $p = $_.GetType().InvokeMember('Name','GetProperty',$null,$_,$null)
       $class = $null
       try { $class = $_.GetType().InvokeMember('Class','GetProperty',$null,$_,$null) } catch {}
@@ -1467,7 +1468,7 @@ function Get-LocalGroupMembersSafe([string]$group){
       }
     }
   } catch {}
-  $members
+  return $members
 }
 
 function Get-LocalAdministratorsDetailed{
@@ -1483,7 +1484,7 @@ function Get-LocalAdministratorsDetailed{
         if ($nm -like '*\\*'){ $parts = $nm -split '\\',2; $domain=$parts[0]; $account=$parts[1] }
         [pscustomobject]@{
           Name=$nm; SID=$sid; ObjectClass=$_.ObjectClass; PrincipalSource=$_.PrincipalSource;
-          IsGroup=$isGroup; IsDomain=$isDomain; IsBuiltIn=($nm -like 'BUILTIN\\*');
+          Type=if($isDomain){'Domain'}else{'Local'}; IsGroup=$isGroup; IsDomain=$isDomain; IsBuiltIn=($nm -like 'BUILTIN\\*');
           Domain=$domain; Account=$account; IsDomainGroupLikely=($isDomain -and $isGroup); Source='Get-LocalGroupMember'
         }
       }
@@ -1492,7 +1493,7 @@ function Get-LocalAdministratorsDetailed{
   } catch {}
   try {
     $grp = [ADSI]"WinNT://./Administrators,group"
-    $grp.psbase.Invoke('Members') | ForEach-Object {
+    $items = $grp.psbase.Invoke('Members') | ForEach-Object {
       $name   = $_.GetType().InvokeMember('Name','GetProperty',$null,$_,$null)
       $adspath= $_.GetType().InvokeMember('ADsPath','GetProperty',$null,$_,$null)
       $class  = $null
@@ -1511,12 +1512,11 @@ function Get-LocalAdministratorsDetailed{
       } catch {}
       $domain,$account = $null,$null
       if ($resolved -like '*\\*'){ $parts = $resolved -split '\\',2; $domain=$parts[0]; $account=$parts[1] }
+      $isDomainResolved = ($resolved -like '*\*') -and ($resolved -notlike "$env:COMPUTERNAME\*") -and ($resolved -notlike 'BUILTIN\*')
       [pscustomobject]@{
         Name=$resolved; SID=$sidVal; ObjectClass=$class; PrincipalSource='WinNT';
-        IsGroup=($class -like '*Group*'); IsDomain=($resolved -like '*\\*') -and ($resolved -notlike "$env:COMPUTERNAME\\*") -and ($resolved -notlike 'BUILTIN\\*');
-        IsBuiltIn=($resolved -like 'BUILTIN\\*'); Domain=$domain; Account=$account; IsDomainGroupLikely=(($resolved -like '*\\*') -and ($class -like '*Group*')); Source='ADSI'
+        Type=if($isDomainResolved){'Domain'}else{'Local'}; IsGroup=($class -like '*Group*'); IsDomain=$isDomainResolved; IsBuiltIn=($resolved -like 'BUILTIN\*'); Domain=$domain; Account=$account; IsDomainGroupLikely=(($resolved -like '*\*') -and ($class -like '*Group*')); Source='ADSI'
       }
-
     }
   } catch {}
   return $items

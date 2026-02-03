@@ -448,7 +448,8 @@ def flatten_record(computer_name, record, sheet_rows):
     row_det["SqlServerInstalled"] = record.get("SqlServerInstalled", False)
     row_det["SqlServerVersion"] = record.get("SqlServerVersion")
     _ora = record.get("Oracle")
-    row_det["OracleInstalled"] = _ora.get("OracleInstalled", False) if isinstance(_ora, dict) else False
+    # Summary indicates only if machine is likely an Oracle DB server (not just ODBC/client)
+    row_det["IsOracleServerLikely"] = _ora.get("IsOracleServerLikely", False) if isinstance(_ora, dict) else False
     row_det["OracleVersion"] = _ora.get("OracleVersion") if isinstance(_ora, dict) else None
     _rds = record.get("RDSLicensing")
     row_det["RdsLicensingRoleInstalled"] = _rds.get("RdsLicensingRoleInstalled", False) if isinstance(_rds, dict) else False
@@ -1284,7 +1285,7 @@ def write_excel(sheet_rows, output_path):
             if sheet_name == "Summary":
                 summary_cols = ["HasOldDomainRefs", "PotentialServiceAccounts",
                                "SqlServerInstalled", "SqlServerVersion",
-                               "OracleInstalled", "OracleVersion",
+                               "IsOracleServerLikely", "OracleVersion",
                                "RdsLicensingRoleInstalled",
                                "CrowdStrike_Tenant",
                                "Qualys_Tenant",
