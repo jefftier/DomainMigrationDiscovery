@@ -1,10 +1,21 @@
 import os
+import sys
+
+# Check Python version before heavier imports so we can show a clear message
+if sys.version_info < (3, 8):
+    print("This script requires Python 3.8 or newer.")
+    print("Current version: {}".format(sys.version.split()[0]))
+    print("Please update Python from https://www.python.org/downloads/ and try again.")
+    sys.exit(1)
+
 import json
 import argparse
 import datetime
 from collections import defaultdict
 
 import pandas as pd
+
+DEFAULT_INPUT_FOLDER = "results"
 
 
 def parse_args():
@@ -14,8 +25,8 @@ def parse_args():
     parser.add_argument(
         "-i",
         "--input",
-        default=r"Y:\results",
-        help="Folder containing discovery JSON files (default: Y:\\results)",
+        default=DEFAULT_INPUT_FOLDER,
+        help="Folder containing discovery JSON files (default: ./results)",
     )
     parser.add_argument(
         "-o",
@@ -1082,10 +1093,20 @@ def write_excel(sheet_rows, output_path):
 def main():
     args = parse_args()
 
-    records, plant_ids_seen = load_latest_records(args.input, explicit_plant_id=args.plant_id)
+    input_path = os.path.abspath(os.path.normpath(args.input))
+    if not os.path.isdir(input_path):
+        if args.input == DEFAULT_INPUT_FOLDER:
+            print("Default input folder './results' was not found in the current directory.")
+            print("Use the -i (or --input) switch to specify the folder that contains your discovery JSON files.")
+            print("Example: python build_migration_workbook.py -i C:\\path\\to\\results")
+            sys.exit(1)
+        print("Input folder not found: {}".format(args.input))
+        sys.exit(1)
+
+    records, plant_ids_seen = load_latest_records(input_path, explicit_plant_id=args.plant_id)
 
     if not records:
-        print(f"No JSON records found in {args.input}")
+        print("No JSON records found in {}".format(input_path))
         return
 
     # Decide PlantId to use in file name
