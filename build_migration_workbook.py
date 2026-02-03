@@ -26,6 +26,26 @@ import argparse
 import datetime
 from collections import defaultdict
 
+# Minimum Python version required (3.8+ for datetime.fromisoformat behavior and modern pandas/openpyxl)
+_REQUIRED_PYTHON_VERSION = (3, 8)
+
+
+def _check_python_version():
+    """Ensure Python version is sufficient; exit with a clear message if not."""
+    if sys.version_info < _REQUIRED_PYTHON_VERSION:
+        required_str = ".".join(map(str, _REQUIRED_PYTHON_VERSION))
+        current_str = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        print("This script requires Python {} or newer.".format(required_str), file=sys.stderr)
+        print("You are running Python {}.".format(current_str), file=sys.stderr)
+        print(file=sys.stderr)
+        print("Please update Python and try again.", file=sys.stderr)
+        print("  - Windows: https://www.python.org/downloads/", file=sys.stderr)
+        print("  - Check your version with: python --version", file=sys.stderr)
+        sys.exit(1)
+
+
+_check_python_version()
+
 _REQUIRED_MODULES = [
     ("pandas", "pandas"),
     ("openpyxl", "openpyxl"),
