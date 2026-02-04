@@ -18,6 +18,7 @@ build/
 # Local test / run artifacts
 test_input/
 tests/
+*.xlsx
 
 # IDE / OS
 .idea/
