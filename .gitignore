@@ -1,0 +1,27 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Local test / run artifacts
+test_input/
+tests/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
