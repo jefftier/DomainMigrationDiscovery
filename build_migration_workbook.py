@@ -11,7 +11,9 @@ Internal note - JSON schema keys relevant to enhancements (Phase 0):
 - Detection.OldDomain, Detection.Summary, Detection.Summary.Counts
 - New sections (this branch): Oracle, RDSLicensing; Config worksheets use ApplicationConfigFiles data.
 """
+import csv
 import os
+import re
 import sys
 
 # Check Python version before heavier imports so we can show a clear message
@@ -25,6 +27,7 @@ import json
 import argparse
 import datetime
 from collections import defaultdict
+from typing import List, NamedTuple, Optional
 
 # Minimum Python version required (3.8+ for datetime.fromisoformat behavior and modern pandas/openpyxl)
 _REQUIRED_PYTHON_VERSION = (3, 8)
@@ -99,6 +102,38 @@ def parse_args():
         help="Optional PlantId to use for naming/filtering. "
              "If omitted, will infer from JSON Metadata.PlantId.",
     )
+    parser.add_argument(
+        "--debug-provenance",
+        action="store_true",
+        default=False,
+        help="Include SourceFile (and SourceComputerKey, SourceSection) in every sheet. "
+             "When off, provenance appears only in the Diagnostics sheet.",
+    )
+    parser.add_argument(
+        "--validate-only",
+        action="store_true",
+        default=False,
+        help="Scan all sheets for Excel-illegal characters, emit report CSV, and do not write XLSX. "
+             "Exits with non-zero status if any issues are found.",
+    )
+    parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        default=False,
+        help="Stop at the first sheet/cell with illegal characters and exit with a clear message.",
+    )
+    parser.add_argument(
+        "--strict-json",
+        action="store_true",
+        default=False,
+        help="Do not fall back to cp1252 for non-UTF-8 files; fail decode instead (for CI).",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=False,
+        help="Emit sanitize report CSV when issues were found (sheet/row/col + source file).",
+    )
     return parser.parse_args()
 
 
@@ -113,7 +148,66 @@ def safe_iso_parse(value):
         return None
 
 
-def load_latest_records(input_folder, explicit_plant_id=None):
+def _load_json_file(fpath: str, strict_json: bool = False):
+    """
+    Load a JSON file with encoding fallback. Tries utf-8, then utf-8-sig.
+    If decoding fails and not strict_json, falls back to cp1252 with errors="replace"
+    and logs a WARNING. On JSON parse failure, logs file path, exception type, and
+    a small excerpt around the error. Returns the parsed dict or None on any failure.
+    """
+    content = None
+    for encoding in ("utf-8", "utf-8-sig"):
+        try:
+            with open(fpath, "r", encoding=encoding) as f:
+                content = f.read()
+            break
+        except UnicodeDecodeError:
+            continue
+    if content is None and not strict_json:
+        try:
+            with open(fpath, "r", encoding="cp1252", errors="replace") as f:
+                content = f.read()
+            print(
+                f"WARNING: Decoded {fpath} using cp1252 (replace); file was not valid UTF-8.",
+                file=sys.stderr,
+            )
+        except Exception as e:
+            print(f"WARNING: Could not decode {fpath}: {type(e).__name__}: {e}", file=sys.stderr)
+            return None
+    if content is None:
+        print(
+            f"WARNING: Could not decode {fpath} as UTF-8. Use --strict-json to avoid fallback.",
+            file=sys.stderr,
+        )
+        return None
+
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as e:
+        excerpt_len = 80
+        start = max(0, e.pos - excerpt_len // 2)
+        end = min(len(content), e.pos + excerpt_len // 2)
+        excerpt = content[start:end]
+        if start > 0:
+            excerpt = "..." + excerpt
+        if end < len(content):
+            excerpt = excerpt + "..."
+        excerpt_repr = repr(excerpt)
+        print(
+            f"WARNING: JSON parse failed for {fpath}: {type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
+        print(f"  Excerpt around error (pos={e.pos}): {excerpt_repr}", file=sys.stderr)
+        return None
+    except Exception as e:
+        print(
+            f"WARNING: JSON parse failed for {fpath}: {type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
+        return None
+
+
+def load_latest_records(input_folder, explicit_plant_id=None, strict_json: bool = False):
     """
     Load all JSON files, group by ComputerName, and keep the latest snapshot
     (by Metadata.CollectedAt). Returns dict: {computerName: data}.
@@ -127,11 +221,8 @@ def load_latest_records(input_folder, explicit_plant_id=None):
             if not fname.lower().endswith(".json"):
                 continue
             fpath = os.path.join(root, fname)
-            try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception as e:
-                print(f"WARNING: Failed to parse {fpath}: {e}")
+            data = _load_json_file(fpath, strict_json=strict_json)
+            if data is None:
                 continue
 
             meta = data.get("Metadata", {}) or {}
@@ -175,10 +266,25 @@ def load_latest_records(input_folder, explicit_plant_id=None):
                         }
                 # else: collected_dt is None and prev_dt is not None -> keep existing
 
-    # Strip helper keys, keep just JSON data
-    pure_records = {k: v["data"] for k, v in latest_by_computer.items()}
+    # Retain path (and key) for each record so provenance is available downstream
+    records_with_provenance = [
+        {"computer_key": k, "data": v["data"], "path": v["path"]}
+        for k, v in latest_by_computer.items()
+    ]
+    return records_with_provenance, plant_ids_seen
 
-    return pure_records, plant_ids_seen
+
+# Excel cell character limit (openpyxl/Excel)
+MAX_EXCEL_CELL_LEN = 32767
+
+# Control characters disallowed in Excel XML: \x00-\x08, \x0B, \x0C, \x0E-\x1F
+_EXCEL_ILLEGAL_CONTROL_RE = None
+
+def _get_excel_illegal_control_re():
+    global _EXCEL_ILLEGAL_CONTROL_RE
+    if _EXCEL_ILLEGAL_CONTROL_RE is None:
+        _EXCEL_ILLEGAL_CONTROL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+    return _EXCEL_ILLEGAL_CONTROL_RE
 
 
 def escape_excel_formula(value):
@@ -192,6 +298,135 @@ def escape_excel_formula(value):
     if s and s[0] in ("=", "+", "-", "@"):
         return "'" + value
     return value
+
+
+def sanitize_for_excel(value):
+    """
+    Make a value safe for Excel/openpyxl: strip illegal control chars, normalize
+    newlines, apply formula escaping, and truncate long strings. Prevents
+    openpyxl.utils.exceptions.IllegalCharacterError.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        re_illegal = _get_excel_illegal_control_re()
+        s = re_illegal.sub("", value)
+        s = s.replace("\r\n", "\n").replace("\r", "\n")
+        if len(s) > MAX_EXCEL_CELL_LEN:
+            suffix = "...TRUNCATED"
+            s = s[: MAX_EXCEL_CELL_LEN - len(suffix)] + suffix
+        return escape_excel_formula(s)
+    if isinstance(value, (dict, list)):
+        s = json.dumps(value, ensure_ascii=False)
+        return sanitize_for_excel(s)
+    return value
+
+
+# Maximum length of value_repr in Issue (sample for report)
+_ISSUE_VALUE_REPR_MAX = 200
+
+
+class ExcelIllegalIssue(NamedTuple):
+    """One cell that contained Excel-illegal control characters."""
+
+    sheet_name: str
+    column: str
+    row_index: int  # 0-based
+    computer_name: Optional[str]
+    source_file: Optional[str]
+    value_repr: str  # repr of a small slice
+    illegal_count: int
+    illegal_codepoints: str  # comma-separated hex, e.g. "0x0,0x1"
+
+
+def _string_for_validation(value):  # noqa: C901
+    """Return string form of value for illegal-char check (str or json.dumps)."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def find_illegal_excel_chars(
+    df, sheet_name: str
+) -> List[ExcelIllegalIssue]:
+    """
+    Scan a DataFrame (before sanitization) for Excel-illegal control characters.
+    Returns list of issues with sheet/col/row, computer_name/source_file when present,
+    value_repr (small slice), and illegal count/codepoints.
+    """
+    re_illegal = _get_excel_illegal_control_re()
+    issues: List[ExcelIllegalIssue] = []
+    has_computer = "ComputerName" in df.columns
+    has_source = "SourceFile" in df.columns
+
+    for col in df.columns:
+        if df[col].dtype != object:
+            continue
+        for row_index in range(len(df)):
+            val = df.iloc[row_index][col]
+            s = _string_for_validation(val)
+            if not s:
+                continue
+            matches = re_illegal.findall(s)
+            if not matches:
+                continue
+            illegal_count = len(matches)
+            codepoints = ",".join(sorted(set(hex(ord(m)) for m in matches)))
+            sample = s[:_ISSUE_VALUE_REPR_MAX]
+            if len(s) > _ISSUE_VALUE_REPR_MAX:
+                sample += "..."
+            value_repr = repr(sample)
+            computer_name = None
+            if has_computer:
+                cn = df.iloc[row_index]["ComputerName"]
+                if cn is not None and not (isinstance(cn, float) and pd.isna(cn)):
+                    computer_name = str(cn)
+            source_file = None
+            if has_source:
+                sf = df.iloc[row_index]["SourceFile"]
+                if sf is not None and not (isinstance(sf, float) and pd.isna(sf)):
+                    source_file = str(sf)
+            issues.append(
+                ExcelIllegalIssue(
+                    sheet_name=sheet_name,
+                    column=col,
+                    row_index=row_index,
+                    computer_name=computer_name,
+                    source_file=source_file,
+                    value_repr=value_repr,
+                    illegal_count=illegal_count,
+                    illegal_codepoints=codepoints,
+                )
+            )
+    return issues
+
+
+def write_sanitize_report_csv(issues: List[ExcelIllegalIssue], report_path: str) -> None:
+    """Write issues to a CSV report (sheet/row/col + source file + sample value)."""
+    if not issues:
+        return
+    with open(report_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "sheet_name", "column", "row_index", "row_display",
+            "computer_name", "source_file", "value_repr", "illegal_count", "illegal_codepoints",
+        ])
+        for i in issues:
+            w.writerow([
+                i.sheet_name,
+                i.column,
+                i.row_index,
+                i.row_index + 1,  # 1-based for display
+                i.computer_name or "",
+                i.source_file or "",
+                i.value_repr,
+                i.illegal_count,
+                i.illegal_codepoints,
+            ])
 
 
 def filter_search_criteria_fields(row_dict, section_name=None):
@@ -228,15 +463,18 @@ def filter_search_criteria_fields(row_dict, section_name=None):
     return filtered
 
 
-def add_row(sheet_rows, sheet_name, row_dict):
+def add_row(sheet_rows, sheet_name, row_dict, include_source_section=False):
     """
     Append a row (dict) to the given sheet name in the rows dict.
     Filters out search criteria fields before adding.
+    If include_source_section is True (e.g. for --debug-provenance), add SourceSection = sheet_name to the row.
     """
     if row_dict is None:
         return
     # Filter out search criteria fields
     filtered_row = filter_search_criteria_fields(row_dict, sheet_name)
+    if include_source_section:
+        filtered_row["SourceSection"] = sheet_name
     sheet_rows[sheet_name].append(filtered_row)
 
 
@@ -259,7 +497,7 @@ def parse_account_identity(account_identity):
     return result
 
 
-def flatten_record(computer_name, record, sheet_rows):
+def flatten_record(computer_name, record, sheet_rows, source_file=None, source_computer_key=None, debug_provenance=False):
     """
     Flatten a single JSON record into multiple sheet rows.
 
@@ -271,6 +509,10 @@ def flatten_record(computer_name, record, sheet_rows):
       FirewallRules, DnsSummary, DnsSuffixSearchList, DnsAdapters, IIS,
       SqlServer, EventLogDomainReferences, ApplicationConfigFiles,
       SecurityAgents, ServiceAccountCandidates.
+
+    - source_file: path to the JSON file this record came from (for provenance).
+    - source_computer_key: dict key used (computer name from dedup); may differ from Metadata.ComputerName.
+    - debug_provenance: if True, add SourceFile, SourceComputerKey (and SourceSection in add_row) to every row.
     """
     meta = record.get("Metadata", {}) or {}
     system = record.get("System", {}) or {}
@@ -283,6 +525,9 @@ def flatten_record(computer_name, record, sheet_rows):
         "CollectedAt": meta.get("CollectedAt"),
         "ScriptVersion": meta.get("Version"),
     }
+    if debug_provenance:
+        base["SourceFile"] = source_file or ""
+        base["SourceComputerKey"] = source_computer_key or computer_name
     
     # Store domain info separately for use where needed
     old_domain_fqdn = meta.get("OldDomainFqdn")
@@ -411,7 +656,6 @@ def flatten_record(computer_name, record, sheet_rows):
     sccm_allowed_mps = None
     sccm_allowed_mp_domains = []
     if sccm.get("DomainReferences"):
-        import re
         for ref in sccm.get("DomainReferences", []):
             if isinstance(ref, dict) and ref.get("ValueName") == "AllowedMPs":
                 sccm_allowed_mps = ref.get("Value")
@@ -459,7 +703,7 @@ def flatten_record(computer_name, record, sheet_rows):
         col_name = f"Count_{k}"
         row_det[col_name] = v
 
-    add_row(sheet_rows, "Summary", row_det)
+    add_row(sheet_rows, "Summary", row_det, include_source_section=debug_provenance)
 
     # --- Metadata (one row per computer) ---
     # Metadata tab should include all domain info for reference
@@ -472,12 +716,12 @@ def flatten_record(computer_name, record, sheet_rows):
     for k, v in meta.items():
         if k not in row_meta:
             row_meta[k] = v
-    add_row(sheet_rows, "Metadata", row_meta)
+    add_row(sheet_rows, "Metadata", row_meta, include_source_section=debug_provenance)
 
     # --- System (one row per computer) ---
     row_sys = base.copy()
     row_sys.update(system)
-    add_row(sheet_rows, "System", row_sys)
+    add_row(sheet_rows, "System", row_sys, include_source_section=debug_provenance)
 
     # Helper to flatten simple list-of-dict arrays
     def flatten_list_section(section_name):
@@ -504,7 +748,7 @@ def flatten_record(computer_name, record, sheet_rows):
                     if isinstance(account_identity, dict):
                         row["IsOldDomainAccount"] = account_identity.get("IsOldDomain", False)
                         row["NeedsAttention"] = row["IsOldDomainAccount"]
-            add_row(sheet_rows, section_name, row)
+            add_row(sheet_rows, section_name, row, include_source_section=debug_provenance)
 
     # --- Simple list sections with enhanced processing ---
     # Services: Add helper columns for old domain detection
@@ -527,7 +771,7 @@ def flatten_record(computer_name, record, sheet_rows):
         row["HasOldDomainAccount"] = service_name in services_run_as_old
         row["HasOldDomainPath"] = service_name in services_path_old
         row["NeedsAttention"] = row["HasOldDomainAccount"] or row["HasOldDomainPath"]
-        add_row(sheet_rows, "Services", row)
+        add_row(sheet_rows, "Services", row, include_source_section=debug_provenance)
     
     # ScheduledTasks: Add helper columns
     tasks_list = record.get("ScheduledTasks") or []
@@ -545,7 +789,7 @@ def flatten_record(computer_name, record, sheet_rows):
         row["HasOldDomainAccount"] = task_path in tasks_old_accounts
         row["HasOldDomainAction"] = task_path in tasks_old_actions
         row["NeedsAttention"] = row["HasOldDomainAccount"] or row["HasOldDomainAction"]
-        add_row(sheet_rows, "ScheduledTasks", row)
+        add_row(sheet_rows, "ScheduledTasks", row, include_source_section=debug_provenance)
     
     # Other simple list sections
     # --- Local Admin Membership: one row per (ComputerName, Administrators, member) ---
@@ -562,7 +806,7 @@ def flatten_record(computer_name, record, sheet_rows):
         row_lam["DomainOrScope"] = admin.get("Domain")
         row_lam["SID"] = admin.get("SID")
         row_lam["Source"] = admin.get("Source")
-        add_row(sheet_rows, "Local Admin Membership", row_lam)
+        add_row(sheet_rows, "Local Admin Membership", row_lam, include_source_section=debug_provenance)
     # If no local admins collected (e.g. error), still add one row per computer so every computer appears
     if not local_admins_list:
         row_lam = base.copy()
@@ -572,7 +816,7 @@ def flatten_record(computer_name, record, sheet_rows):
         row_lam["DomainOrScope"] = None
         row_lam["SID"] = None
         row_lam["Source"] = "Not collected or error"
-        add_row(sheet_rows, "Local Admin Membership", row_lam)
+        add_row(sheet_rows, "Local Admin Membership", row_lam, include_source_section=debug_provenance)
 
     for section in [
         "Profiles",
@@ -629,7 +873,7 @@ def flatten_record(computer_name, record, sheet_rows):
             row["IsDomainAccount"] = is_domain_account
             row["NeedsAttention"] = is_old_domain  # Flag old domain accounts for attention
         
-        add_row(sheet_rows, "SharedFolders_Shares", row)
+        add_row(sheet_rows, "SharedFolders_Shares", row, include_source_section=debug_provenance)
 
     for err in errors:
         row = base.copy()
@@ -637,7 +881,7 @@ def flatten_record(computer_name, record, sheet_rows):
             row.update(err)
         else:
             row["Error"] = err
-        add_row(sheet_rows, "SharedFolders_Errors", row)
+        add_row(sheet_rows, "SharedFolders_Errors", row, include_source_section=debug_provenance)
 
     # --- Printers: can be dict or list ---
     printers = record.get("Printers")
@@ -654,14 +898,14 @@ def flatten_record(computer_name, record, sheet_rows):
                 printer_name = row.get("Name")
                 row["HasOldDomainReference"] = printer_name in printers_to_old
                 row["NeedsAttention"] = row["HasOldDomainReference"]
-                add_row(sheet_rows, "Printers", row)
+                add_row(sheet_rows, "Printers", row, include_source_section=debug_provenance)
         elif isinstance(printers, dict):
             row = base.copy()
             row.update(printers)
             printer_name = row.get("Name")
             row["HasOldDomainReference"] = printer_name in printers_to_old
             row["NeedsAttention"] = row["HasOldDomainReference"]
-            add_row(sheet_rows, "Printers", row)
+            add_row(sheet_rows, "Printers", row, include_source_section=debug_provenance)
 
     # --- AutoAdminLogon: single object ---
     auto = record.get("AutoAdminLogon")
@@ -671,7 +915,7 @@ def flatten_record(computer_name, record, sheet_rows):
             row.update(auto)
         else:
             row["Value"] = auto
-        add_row(sheet_rows, "AutoAdminLogon", row)
+        add_row(sheet_rows, "AutoAdminLogon", row, include_source_section=debug_provenance)
 
     # --- DNS Configuration ---
     dns = record.get("DnsConfiguration") or {}
@@ -680,7 +924,7 @@ def flatten_record(computer_name, record, sheet_rows):
         for suffix in dns.get("SuffixSearchList") or []:
             row = base.copy()
             row["Suffix"] = suffix
-            add_row(sheet_rows, "DnsSuffixSearchList", row)
+            add_row(sheet_rows, "DnsSuffixSearchList", row, include_source_section=debug_provenance)
 
         # Adapters
         adapters = dns.get("Adapters") or []
@@ -690,14 +934,14 @@ def flatten_record(computer_name, record, sheet_rows):
                 row.update(adapter)
             else:
                 row["Adapter"] = adapter
-            add_row(sheet_rows, "DnsAdapters", row)
+            add_row(sheet_rows, "DnsAdapters", row, include_source_section=debug_provenance)
 
     # --- IIS & SqlServer: store raw JSON per machine for now ---
     iis = record.get("IIS")
     if iis is not None:
         row = base.copy()
         row["RawJson"] = json.dumps(iis, ensure_ascii=False)
-        add_row(sheet_rows, "IIS", row)
+        add_row(sheet_rows, "IIS", row, include_source_section=debug_provenance)
 
     # SqlServer: always one row with Installed + Version; RawJson when detail present
     row_sql = base.copy()
@@ -706,7 +950,7 @@ def flatten_record(computer_name, record, sheet_rows):
     sql = record.get("SqlServer")
     if sql is not None:
         row_sql["RawJson"] = json.dumps(sql, ensure_ascii=False)
-    add_row(sheet_rows, "SqlServer", row_sql)
+    add_row(sheet_rows, "SqlServer", row_sql, include_source_section=debug_provenance)
 
     # --- RDS Licensing (one row per computer; always list) ---
     rds = record.get("RDSLicensing")
@@ -729,7 +973,7 @@ def flatten_record(computer_name, record, sheet_rows):
         row_rds["RDSLicensingEvidence"] = ""
         row_rds["IsRDSLicensingLikelyInUse"] = False
         row_rds["Errors"] = ""
-    add_row(sheet_rows, "RDS Licensing", row_rds)
+    add_row(sheet_rows, "RDS Licensing", row_rds, include_source_section=debug_provenance)
 
     # --- Oracle discovery (Summary + Details; always one row per computer) ---
     oracle = record.get("Oracle")
@@ -757,7 +1001,7 @@ def flatten_record(computer_name, record, sheet_rows):
         row_ora_sum["OracleHomes"] = "; ".join(oracle.get("OracleHomes") or [])[:500]
         row_ora_sum["OracleODBCDrivers"] = "; ".join(oracle.get("OracleODBCDrivers") or [])
         row_ora_sum["Errors"] = "; ".join(oracle.get("Errors") or []) if oracle.get("Errors") else ""
-    add_row(sheet_rows, "Oracle Summary", row_ora_sum)
+    add_row(sheet_rows, "Oracle Summary", row_ora_sum, include_source_section=debug_provenance)
     if oracle is not None and isinstance(oracle, dict):
         for svc in oracle.get("OracleServices") or []:
             if isinstance(svc, dict):
@@ -766,7 +1010,7 @@ def flatten_record(computer_name, record, sheet_rows):
                 row_svc["DisplayName"] = svc.get("DisplayName")
                 row_svc["Status"] = svc.get("Status")
                 row_svc["StartType"] = svc.get("StartType")
-                add_row(sheet_rows, "Oracle Details", row_svc)
+                add_row(sheet_rows, "Oracle Details", row_svc, include_source_section=debug_provenance)
 
     # --- ApplicationConfigFiles: raw row + Config File Findings + Config Summary ---
     app_cfg = record.get("ApplicationConfigFiles")
@@ -779,7 +1023,7 @@ def flatten_record(computer_name, record, sheet_rows):
             row["RawJson"] = json.dumps(app_cfg, ensure_ascii=False)
         else:
             row["RawJson"] = json.dumps(app_cfg, ensure_ascii=False)
-        add_row(sheet_rows, "ApplicationConfigFiles", row)
+        add_row(sheet_rows, "ApplicationConfigFiles", row, include_source_section=debug_provenance)
 
         # Config File Findings: one row per machine per file finding (readable in Excel)
         if isinstance(app_cfg, dict):
@@ -813,9 +1057,11 @@ def flatten_record(computer_name, record, sheet_rows):
                     if (existing.get("MatchedTokens") or "") and matched_tokens:
                         matched_tokens = (existing.get("MatchedTokens") or "") + "; " + matched_tokens
                 cap_lines = 10
-                lines_redacted = "\n".join(matched_lines[:cap_lines])
+                lines_redacted = "\n".join(str(x) for x in matched_lines[:cap_lines])
                 if len(matched_lines) > cap_lines:
                     lines_redacted += "\n...TRUNCATED"
+                # Sanitize for Excel (MatchedLines can contain binary-ish content)
+                lines_redacted = sanitize_for_excel(lines_redacted)
                 by_path[path] = {
                     "FilePath": path,
                     "Extension": ext,
@@ -829,7 +1075,7 @@ def flatten_record(computer_name, record, sheet_rows):
             for _path, info in by_path.items():
                 row_cfg = base.copy()
                 row_cfg.update({k: v for k, v in info.items() if k != "_lines"})
-                add_row(sheet_rows, "Config File Findings", row_cfg)
+                add_row(sheet_rows, "Config File Findings", row_cfg, include_source_section=debug_provenance)
 
             # Config Summary: one row per computer
             total_files = len(by_path)
@@ -841,7 +1087,7 @@ def flatten_record(computer_name, record, sheet_rows):
             row_summary["TotalMatchCount"] = total_hits
             row_summary["FilesCredentialFlagged"] = cred_flagged
             row_summary["Top5FilePaths"] = "; ".join(top5) if top5 else ""
-            add_row(sheet_rows, "Config Summary", row_summary)
+            add_row(sheet_rows, "Config Summary", row_summary, include_source_section=debug_provenance)
 
     # --- SecurityAgents (CrowdStrike, Qualys, SCCM, Encase) ---
     # Only include output data, not search criteria or anecdotal information
@@ -861,7 +1107,7 @@ def flatten_record(computer_name, record, sheet_rows):
             else:
                 row[agent_name] = agent_obj
         # Filter will be applied in add_row function
-        add_row(sheet_rows, "SecurityAgents", row)
+        add_row(sheet_rows, "SecurityAgents", row, include_source_section=debug_provenance)
 
     # --- Service Account Candidates ---
     # Comprehensive extraction of ALL service accounts and domain accounts from all sources
@@ -958,7 +1204,7 @@ def flatten_record(computer_name, record, sheet_rows):
         row["AccountValue"] = parsed_account  # Original account value
         row["NeedsAttention"] = needs_attention_flag or account_info.get("IsOldDomainAccount", False)
         
-        add_row(sheet_rows, "ServiceAccountCandidates", row)
+        add_row(sheet_rows, "ServiceAccountCandidates", row, include_source_section=debug_provenance)
     
     # Get detection flags for flagging
     services_run_as_old_domain = set(detection_flags.get("ServicesRunAsOldDomain") or [])
@@ -1214,18 +1460,29 @@ def flatten_record(computer_name, record, sheet_rows):
                 )
 
 
-def write_excel(sheet_rows, output_path):
+def write_excel(
+    sheet_rows,
+    output_path,
+    fail_fast: bool = False,
+    report_path: Optional[str] = None,
+    emit_sanitize_report: bool = False,
+):
     """
     Write sheet_rows (dict of sheet_name -> list[dict]) to an XLSX file.
+    Before writing, validates each sheet for Excel-illegal characters; if fail_fast
+    and any issue is found, exits with a clear message. After sanitizing and writing,
+    if any issues were found, report_path is set, and emit_sanitize_report is True
+    (e.g. --debug), writes a CSV report.
     """
     # Ensure output directory exists
     output_dir = os.path.dirname(output_path)
     if output_dir:  # Only create if there's actually a directory path
         os.makedirs(output_dir, exist_ok=True)
 
-    # Define sheet order - Summary first for quick overview
+    # Define sheet order - Summary first for quick overview; Diagnostics for provenance/errors
     preferred_order = [
         "Summary",
+        "Diagnostics",
         "Metadata",
         "System",
         "ServiceAccountCandidates",
@@ -1265,6 +1522,8 @@ def write_excel(sheet_rows, output_path):
     remaining_sheets = sorted(all_sheets - set(preferred_order))
     final_sheet_order = ordered_sheets + remaining_sheets
 
+    all_issues: List[ExcelIllegalIssue] = []
+
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         for sheet_name in final_sheet_order:
             rows = sheet_rows.get(sheet_name, [])
@@ -1272,12 +1531,27 @@ def write_excel(sheet_rows, output_path):
                 continue
             df = pd.DataFrame(rows)
 
-            # Excel formula injection protection: escape string cells starting with =, +, -, @
+            # Validate for illegal chars before sanitizing (for report / fail-fast)
+            sheet_issues = find_illegal_excel_chars(df, sheet_name)
+            all_issues.extend(sheet_issues)
+            if fail_fast and sheet_issues:
+                first = sheet_issues[0]
+                value_preview = (first.value_repr[:80] + "...") if len(first.value_repr) > 80 else first.value_repr
+                msg = (
+                    f"fail-fast: illegal Excel character(s) at sheet={first.sheet_name!r} "
+                    f"row={first.row_index + 1} col={first.column!r} "
+                    f"(illegal_count={first.illegal_count}). "
+                    f"source_file={first.source_file or 'N/A'} "
+                    f"value_repr={value_preview}"
+                )
+                print(msg, file=sys.stderr)
+                sys.exit(1)
+
+            # Sanitize all object columns: strip illegal control chars, normalize newlines,
+            # formula escaping, truncation (prevents IllegalCharacterError and formula injection)
             for col in df.columns:
                 if df[col].dtype == object:
-                    df[col] = df[col].apply(
-                        lambda v: escape_excel_formula(v) if isinstance(v, str) else v
-                    )
+                    df[col] = df[col].apply(sanitize_for_excel)
 
             # Core columns first if they exist (no Domain in base, only in Metadata)
             core_cols = ["ComputerName", "PlantId", "CollectedAt"]
@@ -1292,9 +1566,12 @@ def write_excel(sheet_rows, output_path):
                                "SCCM_Tenant", "SCCM_HasDomainReference", "SCCM_AllowedMPs", "SCCM_AllowedMPDomains",
                                "Encase_Installed", "Encase_Tenant"]
                 core_cols = core_cols + [c for c in summary_cols if c in df.columns]
+            # For Diagnostics sheet, provenance first for traceability
+            elif sheet_name == "Diagnostics":
+                core_cols = ["SourceFile", "SourceComputerKey", "ComputerName", "CollectedAt", "PlantId"]
             # For Metadata sheet, include domain info
             elif sheet_name == "Metadata":
-                core_cols = ["ComputerName", "PlantId", "Domain", "OldDomainFqdn", 
+                core_cols = ["ComputerName", "PlantId", "Domain", "OldDomainFqdn",
                             "OldDomainNetBIOS", "NewDomainFqdn", "CollectedAt"]
             # For ServiceAccountCandidates, put actionable columns first
             elif sheet_name == "ServiceAccountCandidates":
@@ -1333,6 +1610,10 @@ def write_excel(sheet_rows, output_path):
 
             df.to_excel(writer, sheet_name=safe_name, index=False)
 
+    if all_issues and report_path and emit_sanitize_report:
+        write_sanitize_report_csv(all_issues, report_path)
+        print(f"Sanitize report ({len(all_issues)} issue(s)): {report_path}", file=sys.stderr)
+
     print(f"Wrote Excel workbook: {output_path}")
 
 
@@ -1349,10 +1630,12 @@ def main():
         print("Input folder not found: {}".format(args.input))
         sys.exit(1)
 
-    records, plant_ids_seen = load_latest_records(input_path, explicit_plant_id=args.plant_id)
+    records_with_provenance, plant_ids_seen = load_latest_records(
+        input_path, explicit_plant_id=args.plant_id, strict_json=args.strict_json
+    )
 
-    if not records:
-        print("No JSON records found in {}".format(input_path))
+    if not records_with_provenance:
+        print(f"No JSON records found in {input_path}")
         return
 
     # Decide PlantId to use in file name
@@ -1370,14 +1653,77 @@ def main():
     today_str = datetime.date.today().strftime("%Y%m%d")
     filename = f"{plant_for_name}_MigrationDiscovery_{today_str}.xlsx"
     output_path = os.path.join(args.output_dir, filename)
+    report_path = os.path.join(
+        args.output_dir,
+        os.path.splitext(filename)[0] + "_excel_sanitize_report.csv",
+    )
 
-    # Collect rows for each sheet
+    # Collect rows for each sheet (provenance included before writing so downstream reports can use it)
     sheet_rows = defaultdict(list)
 
-    for comp_name, record in records.items():
-        flatten_record(comp_name, record, sheet_rows)
+    for item in records_with_provenance:
+        comp_key = item["computer_key"]
+        record = item["data"]
+        path = item["path"]
+        flatten_record(
+            comp_key,
+            record,
+            sheet_rows,
+            source_file=path,
+            source_computer_key=comp_key,
+            debug_provenance=args.debug_provenance,
+        )
 
-    write_excel(sheet_rows, output_path)
+    # Diagnostics sheet: one row per loaded record with SourceFile/SourceComputerKey for traceability
+    # (when --debug-provenance is off, this is the only sheet with SourceFile; when on, it's redundant but consistent)
+    for item in records_with_provenance:
+        meta = (item["data"] or {}).get("Metadata") or {}
+        sheet_rows["Diagnostics"].append({
+            "SourceFile": item["path"],
+            "SourceComputerKey": item["computer_key"],
+            "ComputerName": meta.get("ComputerName", item["computer_key"]),
+            "CollectedAt": meta.get("CollectedAt"),
+            "PlantId": meta.get("PlantId"),
+        })
+
+    if args.validate_only:
+        # Scan all sheets, emit report CSV, do not write XLSX; exit non-zero if issues found
+        preferred_order = [
+            "Summary", "Diagnostics", "Metadata", "System", "ServiceAccountCandidates",
+            "Services", "ScheduledTasks", "LocalAdministrators", "Local Admin Membership",
+            "LocalGroupMembers", "MappedDrives", "Printers", "OdbcDsn", "CredentialManager",
+            "Certificates", "FirewallRules", "Profiles", "InstalledApps", "SharedFolders_Shares",
+            "SharedFolders_Errors", "DnsSuffixSearchList", "DnsAdapters", "AutoAdminLogon",
+            "EventLogDomainReferences", "ApplicationConfigFiles", "Config File Findings",
+            "Config Summary", "Oracle Summary", "Oracle Details", "RDS Licensing",
+            "SecurityAgents", "IIS", "SqlServer",
+        ]
+        all_sheets = set(sheet_rows.keys())
+        ordered_sheets = [s for s in preferred_order if s in all_sheets]
+        remaining_sheets = sorted(all_sheets - set(preferred_order))
+        final_sheet_order = ordered_sheets + remaining_sheets
+        all_issues: List[ExcelIllegalIssue] = []
+        for sheet_name in final_sheet_order:
+            rows = sheet_rows.get(sheet_name, [])
+            if not rows:
+                continue
+            df = pd.DataFrame(rows)
+            all_issues.extend(find_illegal_excel_chars(df, sheet_name))
+        validate_report_path = os.path.join(args.output_dir, "excel_validate_report.csv")
+        if all_issues:
+            write_sanitize_report_csv(all_issues, validate_report_path)
+            print(f"Validation found {len(all_issues)} issue(s). Report: {validate_report_path}", file=sys.stderr)
+            sys.exit(1)
+        print("Validation completed: no illegal Excel characters found.")
+        return
+
+    write_excel(
+        sheet_rows,
+        output_path,
+        fail_fast=args.fail_fast,
+        report_path=report_path,
+        emit_sanitize_report=args.debug,
+    )
 
 
 if __name__ == "__main__":
