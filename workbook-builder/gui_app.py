@@ -214,6 +214,7 @@ class MainWindow(QMainWindow):
             "sanitize": self.check_sanitize.isChecked(),
             "include_sourcefile": self.check_include_sourcefile.isChecked(),
             "fail_fast": self.check_fail_fast.isChecked(),
+            "minimal_log": True,
         }
 
         self.thread = QThread()

@@ -1805,6 +1805,7 @@ def build_workbook(
     include_sourcefile: bool = False,
     fail_fast: bool = False,
     strict_json: bool = False,
+    minimal_log: bool = False,
     cancel_event: Optional[threading.Event] = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
     log_cb: Optional[Callable[[str], None]] = None,
@@ -1813,13 +1814,14 @@ def build_workbook(
     """
     Build migration discovery workbook from JSON snapshots (GUI-safe).
     All long-running loops check cancel_event; progress/log/status go only through callbacks.
+    When minimal_log is True, only the preflight count-by-type is sent to log_cb (no per-cell or status chatter).
     """
     warnings_count = [0]  # mutable so inner callbacks can increment
 
     def _log(msg: str) -> None:
         if msg.strip().startswith("WARNING") or "WARNING:" in msg:
             warnings_count[0] += 1
-        if log_cb:
+        if not minimal_log and log_cb:
             log_cb(msg)
 
     def _status(msg: str) -> None:
@@ -1934,11 +1936,28 @@ def build_workbook(
             report_path=sanitize_report_path,
             emit_sanitize_report=sanitize,
             cancel_event=ev,
-            log_cb=_log,
+            log_cb=None if minimal_log else _log,
             progress_cb=progress_cb,
         )
         warnings_count[0] += sanitization_count
         errors_count = len(all_issues)
+        if all_issues:
+            by_kind = defaultdict(int)
+            for i in all_issues:
+                by_kind[i.issue_kind] += 1
+            parts = [f"{c} {k.replace('_', ' ')}" for k, c in sorted(by_kind.items())]
+            summary_line = (
+                f"Preflight: {errors_count} issue(s) found and corrected by sanitization: "
+                + ", ".join(parts) + "."
+            )
+            if minimal_log and log_cb:
+                log_cb(summary_line)
+            else:
+                _log(summary_line)
+                _log(
+                    "These are not failures — the workbook was still written. "
+                    "For locations (sheet/row/column/source file), enable 'Emit sanitize report' and check the CSV."
+                )
         return BuildResult(
             workbook_path=workbook_path,
             report_path=report_path if all_issues and sanitize else None,
