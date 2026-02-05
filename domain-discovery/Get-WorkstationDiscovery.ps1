@@ -2724,7 +2724,8 @@ function Get-SharedFoldersWithACL {
     Services       = $servicesData
     ScheduledTasks = $scheduledTasksData
     LocalGroupMembers    = if ($SlimOutputOnly) { $null } else { $localGroupMembers }
-    LocalAdministrators  = if ($SlimOutputOnly) { $null } else { $localAdministrators }
+    # Always include LocalAdministrators so Detection.OldDomain.LocalAdministratorsOldDomain has full context and workbooks can show the Local Administrator tab
+    LocalAdministrators  = $localAdministrators
     MappedDrives  = if ($SlimOutputOnly) { $null } else { $driveMaps }
     Printers      = $printersData
     OdbcDsn       = if ($SlimOutputOnly) { $null } else { $odbc }

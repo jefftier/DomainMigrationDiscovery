@@ -850,6 +850,11 @@ def flatten_record(computer_name, record, sheet_rows, source_file=None, source_c
                     if isinstance(account_identity, dict):
                         row["IsOldDomainAccount"] = account_identity.get("IsOldDomain", False)
                         row["NeedsAttention"] = row["IsOldDomainAccount"]
+                    elif section_name == "LocalAdministrators":
+                        # Local admin objects from PowerShell don't have AccountIdentity; use Detection.OldDomain.LocalAdministratorsOldDomain
+                        local_admins_old = set(detection_flags.get("LocalAdministratorsOldDomain") or [])
+                        row["IsOldDomainAccount"] = (entry.get("Name") or "") in local_admins_old
+                        row["NeedsAttention"] = row["IsOldDomainAccount"]
             add_row(sheet_rows, section_name, row, include_source_section=debug_provenance)
 
     # --- Simple list sections with enhanced processing ---
@@ -898,6 +903,7 @@ def flatten_record(computer_name, record, sheet_rows, source_file=None, source_c
     local_admins_list = record.get("LocalAdministrators") or []
     if isinstance(local_admins_list, dict):
         local_admins_list = [local_admins_list]
+    local_admins_old_set = set(detection_flags.get("LocalAdministratorsOldDomain") or [])
     for admin in local_admins_list:
         if not isinstance(admin, dict):
             continue
@@ -906,8 +912,10 @@ def flatten_record(computer_name, record, sheet_rows, source_file=None, source_c
         row_lam["MemberName"] = admin.get("Name")
         row_lam["MemberType"] = admin.get("ObjectClass")
         row_lam["DomainOrScope"] = admin.get("Domain")
-        row_lam["SID"] = admin.get("SID")
+        row_lam["SID"] = admin.get("SID") or admin.get("Sid")
         row_lam["Source"] = admin.get("Source")
+        row_lam["HasOldDomainAccount"] = (admin.get("Name") or "") in local_admins_old_set
+        row_lam["NeedsAttention"] = row_lam["HasOldDomainAccount"]
         add_row(sheet_rows, "Local Admin Membership", row_lam, include_source_section=debug_provenance)
     # If no local admins collected (e.g. error), still add one row per computer so every computer appears
     if not local_admins_list:
@@ -1471,7 +1479,7 @@ def flatten_record(computer_name, record, sheet_rows, source_file=None, source_c
                 admin_name,
                 None,  # Local admins may not have AccountIdentity
                 {
-                    "AdminSid": admin.get("Sid"),
+                    "AdminSid": admin.get("SID") or admin.get("Sid"),
                     "Source": admin.get("Source"),
                 },
                 needs_attention
