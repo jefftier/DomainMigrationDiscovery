@@ -10,6 +10,8 @@ on:
 jobs:
   release:
     runs-on: windows-latest
+    permissions:
+      contents: write   # required for creating releases and uploading assets
     defaults:
       run:
         working-directory: workbook-builder
@@ -35,6 +37,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: workbook-builder/dist/DomainMigrationBuilder.exe
-          generate_release_notes: true
+          generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
