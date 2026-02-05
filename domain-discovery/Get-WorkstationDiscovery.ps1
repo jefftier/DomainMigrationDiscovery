@@ -245,6 +245,12 @@ switch ($langMode) {
   'RestrictedLanguage'  { Write-Error "This script requires Full Language mode. Current: $langMode."; exit 1 }
   'NoLanguage'          { Write-Error "This script requires Full Language mode. Current: $langMode."; exit 1 }
 }
+# Definitively test that the 'if' keyword works in this runspace (some policies disable it)
+try {
+  $null = [scriptblock]::Create('if ($true) { 1 }').Invoke()
+} catch {
+  Write-Error "This session cannot use the 'if' keyword (LanguageMode: $langMode). You need Full Language mode. Error: $($_.Exception.Message)"; exit 1
+}
 
 # Load helper module (Domain References functions) early so they are available to discovery logic
 $helperModulePath = Join-Path $PSScriptRoot 'DomainMigrationDiscovery.Helpers.psm1'
@@ -415,7 +421,7 @@ function Import-ConfigurationFile {
 # ============================================================================
 
 # Script Version (for tracking and reporting)
-$ScriptVersion = '1.7.0'
+$ScriptVersion = '1.7.1'
 
 # ----------------------------------------------------------------------------
 # Security Agent Tenant Mapping
@@ -3520,8 +3526,10 @@ catch {
   # Show human-readable summary on console (Write-Warning so remote Invoke-Command with ErrorAction Stop doesn't terminate before we throw)
   $humanError = Get-HumanReadableError -ErrorMessage $_.Exception -Context "running discovery"
   Write-Warning $humanError
-  # Throw so remote caller (Invoke-MigrationDiscoveryRemotely) receives the actual error message, not just "Error: running discovery"
-  throw "Discovery failed: $errorMessage"
+  # Include stack trace so we can see which script/line actually failed (e.g. for "if is not recognized")
+  $throwMsg = "Discovery failed: $errorMessage"
+  if ($errorStackTrace) { $throwMsg += "`nScriptStackTrace: $errorStackTrace" }
+  throw $throwMsg
 }
 #endregion
 #endregion

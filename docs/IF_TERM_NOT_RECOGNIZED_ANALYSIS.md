@@ -1,5 +1,23 @@
 # Analysis: "The term 'if' is not recognized" Error
 
+## Why did this start happening? (Script worked before)
+
+Two things can explain it:
+
+1. **Code change (regression)**  
+   Commit **911ee9d** (“Enhancements for database discovery”) added a lot of new code and used the **if-as-expression** pattern (e.g. `$x = if (cond) { a } else { b }`) in both the main script and **DomainMigrationDiscovery.Helpers.psm1**. On some PowerShell hosts or in some runspaces that form is parsed so that `if` is treated as a command → “The term 'if' is not recognized.” So the script could work **before** that commit and start failing **after** it. The repo has since been updated to remove all if-as-expression; you must run the **latest** script and helper from this repo (not an old zip) so that fix is in effect.
+
+2. **Target machines in Constrained Language Mode**  
+   When you use **Invoke-MigrationDiscoveryRemotely**, the script is copied to each target and runs **on the remote machine**. The **remote** session’s language mode is what matters. If those targets are in **Constrained Language Mode** (e.g. GPO, WDAC, or AppLocker recently applied), then **any** use of the `if` keyword in the script fails there. So “every system” can mean every target is now constrained. The script cannot fix that from inside; those sessions must run in Full Language mode (policy change or run from a non-constrained context).
+
+**Quick check on one failing target (run from your jump host):**
+```powershell
+Invoke-Command -ComputerName ONE_FAILING_MACHINE -ScriptBlock { $ExecutionContext.SessionState.LanguageMode }
+```
+If the result is `ConstrainedLanguage`, the targets are locked down and the script will fail there until Full Language is allowed for that scenario.
+
+---
+
 ## Summary
 
 When running `Get-WorkstationDiscovery.ps1` (e.g. with `-ConfigFile`, `-PlantId`, `-ExcludeConfigFiles`), the script can fail with:
