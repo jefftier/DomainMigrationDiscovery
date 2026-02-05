@@ -84,6 +84,11 @@
     Useful for quick status checks or integration with other tools.
     Default: $false
 
+.PARAMETER ExcludeConfigFiles
+    Skip scanning for application configuration files (.config, .ini, .xml, .json, etc.) for domain references.
+    Use this to reduce discovery time when config file scanning is slow or not needed.
+    Default: $false
+
 .EXAMPLE
     .\Get-WorkstationDiscovery.ps1 -OldDomainFqdn "olddomain.com" -NewDomainFqdn "newdomain.com"
     
@@ -123,6 +128,11 @@
         -OldDomainFqdn "override.com"
     
     Load settings from config file, but override OldDomainFqdn with command-line value.
+
+.EXAMPLE
+    .\Get-WorkstationDiscovery.ps1 -OldDomainFqdn "olddomain.com" -NewDomainFqdn "newdomain.com" -ExcludeConfigFiles
+
+    Run discovery without scanning config files (faster when config scan is not needed).
 
 .NOTES
     - Requires PowerShell 5.1 or higher
@@ -221,7 +231,9 @@ param(
   [switch]$SlimOnlyRunningServices = $false,
   
   [Parameter(HelpMessage="Path to JSON configuration file containing domain settings and tenant maps. Command-line parameters take precedence over config file values.")]
-  [string]$ConfigFile = $null
+  [string]$ConfigFile = $null,
+
+  [switch]$ExcludeConfigFiles = $false
 )
 
 # Load helper module (Domain References functions) early so they are available to discovery logic
@@ -1911,10 +1923,17 @@ try {
   # Application Configuration Files
   # --------------------------------------------------------------------------------
   # Scan common application configuration file locations for old domain references.
-  # This runs on all systems, not just SQL servers.
-  $applicationConfigFiles = Safe-Try {
-    Get-ApplicationConfigDomainReferences -DomainMatchers $matchers -Log $script:log
-  } 'ApplicationConfigFiles'
+  # This runs on all systems, not just SQL servers. Skip when -ExcludeConfigFiles to reduce runtime.
+  if ($ExcludeConfigFiles) {
+    $applicationConfigFiles = [pscustomobject]@{ FilesWithDomainReferences = @(); FilesWithCredentials = @() }
+  } else {
+    $applicationConfigFiles = Safe-Try {
+      Get-ApplicationConfigDomainReferences -DomainMatchers $matchers -Log $script:log
+    } 'ApplicationConfigFiles'
+  }
+  if (-not $applicationConfigFiles) {
+    $applicationConfigFiles = [pscustomobject]@{ FilesWithDomainReferences = @(); FilesWithCredentials = @() }
+  }
 
   # --------------------------------------------------------------------------------
   # Oracle discovery (server + client indicators)

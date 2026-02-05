@@ -170,6 +170,7 @@ The script scans the following areas for old domain references:
 | `SlimOnlyRunningServices` | Switch | No | `$false` | Only include running services in slim mode |
 | `IncludeAppx` | Switch | No | `$false` | Include AppX packages in discovery |
 | `EmitStdOut` | Switch | No | `$false` | Emit summary JSON to stdout |
+| `ExcludeConfigFiles` | Switch | No | `$false` | Skip scanning for application config files (faster discovery) |
 | `SelfTest` | Switch | No | `$false` | Run lightweight self-test validation mode |
 | `AppDiscoveryConfigPath` | String | No | - | Path to JSON config file for app-specific discovery |
 | `ConfigFile` | String | No | - | Path to JSON configuration file for domain settings, tenant maps (CrowdStrike, Qualys), and EnCase registry paths |
@@ -244,6 +245,27 @@ Run discovery with app-specific scanning:
     -OldDomainFqdn "olddomain.com" `
     -NewDomainFqdn "newdomain.com" `
     -SelfTest
+```
+
+### Example: Skip Config File Scanning (Faster Discovery)
+
+To reduce discovery time when scanning application config files is slow or not needed:
+
+```powershell
+.\domain-discovery\Get-WorkstationDiscovery.ps1 `
+    -OldDomainFqdn "olddomain.com" `
+    -NewDomainFqdn "newdomain.com" `
+    -ExcludeConfigFiles
+```
+
+For remote runs, pass the same switch to the launcher so each remote run skips config file scanning:
+
+```powershell
+.\domain-discovery\Invoke-MigrationDiscoveryRemotely.ps1 `
+    -ServerListPath ".\servers.txt" `
+    -OldDomainFqdn "olddomain.com" `
+    -NewDomainFqdn "newdomain.com" `
+    -ExcludeConfigFiles
 ```
 
 ### Example: Using Configuration File
@@ -365,6 +387,8 @@ DEV-SERVER02
 | `OldDomainNetBIOS` | String | No | - | NetBIOS name of the old domain |
 | `NewDomainNetBIOS` | String | No | - | NetBIOS name of the new domain (not used by discovery script) |
 | `PlantId` | String | No | - | Optional plant/facility identifier |
+| `ConfigFile` | String | No | - | Path to migration config JSON (copied to each remote) |
+| `ExcludeConfigFiles` | Switch | No | `$false` | Skip config file scanning on each remote (faster discovery) |
 | `EmitStdOut` | Switch | No | `$false` | Emit summary JSON to stdout for each server |
 | `UseParallel` | Switch | No | `$false` | Execute discovery in parallel (requires PowerShell 7+) |
 | `Credential` | PSCredential | No | - | Credentials for remote access (prompts if not provided) |

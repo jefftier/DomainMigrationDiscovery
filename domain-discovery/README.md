@@ -46,7 +46,7 @@ The script scans **30+ areas** of Windows configuration for references to the ol
 | **IIS** | Sites, app pools, bindings (if installed) |
 | **SQL Server** | Logins, linked servers, jobs, config files (if installed) |
 | **Event logs** | Domain mentions (configurable lookback) |
-| **Config files** | Domain refs and credential indicators (redacted in output) |
+| **Config files** | Domain refs and credential indicators (redacted in output); can be skipped with `-ExcludeConfigFiles` for faster runs |
 | **Hard-coded refs** | Registry, files, task XML (FQDN, NetBIOS, LDAP, UNC) |
 | **Scripts** | PS1, BAT, VBS referenced by services/tasks |
 | **Security agents** | CrowdStrike, Qualys, SCCM, EnCase (tenant info) |
@@ -174,6 +174,7 @@ Example snippet:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | **ConfigFile** | string | — | Path to JSON config (domains + tenant maps). CLI params override config. |
+| **ExcludeConfigFiles** | switch | `$false` | Skip scanning for application config files (faster discovery when not needed). |
 | **IncludeAppx** | switch | `$false` | Include AppX (Store) packages in application discovery. |
 | **EmitStdOut** | switch | `$false` | Emit a summary JSON object to stdout in addition to the file. |
 | **SelfTest** | switch | `$false` | Run lightweight validation only (no full discovery). |
@@ -256,6 +257,7 @@ You will be prompted for credentials if not already running with an account that
 | **NewDomainNetBIOS** | No | — | Not used by discovery script; optional for your notes. |
 | **PlantId** | No | — | Plant/facility identifier. |
 | **ConfigFile** | No | — | Path to migration config JSON. File is copied to each remote at `C:\temp\MigrationDiscovery\config.json` and passed to the discovery script. |
+| **ExcludeConfigFiles** | No | `$false` | Skip config file scanning on each remote (faster discovery). |
 | **EmitStdOut** | No | `$false` | Emit summary JSON to stdout per server. |
 | **UseParallel** | No | `$false` | Run discovery in parallel (PowerShell 7+; throttle 10). |
 | **AttemptWinRmHeal** | No | `$false` | If WinRM connect fails with a service-type error, try to start WinRM on the remote and retry once. |

@@ -26,6 +26,7 @@ param(
     [string]$ConfigFile,      # Path to JSON configuration file for domain settings, tenant maps (CrowdStrike, Qualys), and EnCase registry paths
     
     [switch]$EmitStdOut,      # bubble up the summary object from each server
+    [switch]$ExcludeConfigFiles,  # skip config file scanning on each remote (faster discovery)
     [switch]$UseParallel,     # simple fan-out option
     [switch]$AttemptWinRmHeal, # Optional: attempt to start WinRM service if connection fails (default: false)
     [switch]$UseSmbForResults, # If set, retrieve JSON via \\server\c$ or CollectorShare; default is WinRM return (no SMB)
@@ -211,6 +212,7 @@ if ($OldDomainNetBIOS) { $scriptParams['OldDomainNetBIOS'] = $OldDomainNetBIOS }
 # This prevents PowerShell parameter binding errors on remote systems
 if ($PlantId)          { $scriptParams['PlantId'] = $PlantId }
 if ($EmitStdOut)       { $scriptParams['EmitStdOut'] = $true }
+if ($ExcludeConfigFiles) { $scriptParams['ExcludeConfigFiles'] = $true }
 
 # Handle ConfigFile parameter
 # If ConfigFile is provided, we need to copy it to each remote server
