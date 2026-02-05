@@ -672,12 +672,16 @@ function Get-HumanReadableError {
   elseif ($msgLower -match "cannot find path|path not found|does not exist|file not found") {
     return "Path not found"
   }
+  elseif ($msgLower -match "execution policy|running scripts is disabled|script.*disabled on this system") {
+    return "Execution policy blocks scripts - run Set-ExecutionPolicy RemoteSigned (or Bypass for this process)"
+  }
   else {
-    # Generic fallback - very short
+    # Generic fallback - include actual message so remote callers (e.g. Invoke-MigrationDiscoveryRemotely) see the real error
     if ($Context) {
-      return "Error: $Context"
+      $shortMsg = if ($msg.Length -gt 500) { $msg.Substring(0, 497) + "..." } else { $msg }
+      return "Error: $Context - $shortMsg"
     } else {
-      return "Unexpected error"
+      return "Unexpected error - $msg"
     }
   }
   } catch {
@@ -3250,10 +3254,9 @@ catch {
     }
   }
   
-  # Show human-readable error on console
-  $humanError = Get-HumanReadableError -ErrorMessage $_.Exception -Context "running discovery"
-  Write-Error $humanError
-  
+  # Write error JSON first so remote callers (Invoke-MigrationDiscoveryRemotely) get the file before any throw.
+  # Do not Write-Error here when running under Invoke-Command with ErrorActionPreference Stop, or the remote
+  # session terminates before we write the JSON and the caller only sees the shortened human message.
   # Generate valid JSON error structure for PowerBI reporting
   try {
     # Get basic system info for error JSON
@@ -3479,7 +3482,11 @@ catch {
     Write-Error (Get-HumanReadableError -ErrorMessage $techError -Context "writing error information")
   }
   
-  exit 1
+  # Show human-readable summary on console (Write-Warning so remote Invoke-Command with ErrorAction Stop doesn't terminate before we throw)
+  $humanError = Get-HumanReadableError -ErrorMessage $_.Exception -Context "running discovery"
+  Write-Warning $humanError
+  # Throw so remote caller (Invoke-MigrationDiscoveryRemotely) receives the actual error message, not just "Error: running discovery"
+  throw "Discovery failed: $errorMessage"
 }
 #endregion
 #endregion
