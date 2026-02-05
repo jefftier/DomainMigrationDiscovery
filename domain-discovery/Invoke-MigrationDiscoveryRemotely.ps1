@@ -965,89 +965,58 @@ Write-Host "`nStarting discovery on $($servers.Count) server(s)..." -ForegroundC
 $writeErrorLogScriptBlock = ${function:Write-ErrorLog}
 $ensureWinRmAndConnectScriptBlock = ${function:Ensure-WinRmAndConnect}
 
-# Full (PS 5.1+) path
-if ($script:CompatibilityMode -eq 'Full' -and $UseParallel) {
-    # Use Start-ThreadJob for parallel execution (PS 7+). ForEach-Object -Parallel cannot accept
-    # script block variables via $using:, so we run the same script block via thread jobs and pass
-    # all arguments (including helper script blocks) via -ArgumentList. Throttle to 10 concurrent.
-    $threadJobAvailable = $false
-    if ($script:PSMajorVersion -ge 7) {
-        try {
-            $null = Get-Command Start-ThreadJob -ErrorAction Stop
-            $threadJobAvailable = $true
-        }
-        catch {
-            $threadJobAvailable = $false
-        }
-    }
-
-    if ($threadJobAvailable) {
-        $throttleLimit = 10
-        $running = [System.Collections.ArrayList]::new()
-        foreach ($server in $servers) {
-            while ($running.Count -ge $throttleLimit) {
-                $completed = @($running | Where-Object { $_.State -ne 'Running' })
-                foreach ($j in $completed) { $null = $running.Remove($j) }
-                if ($running.Count -ge $throttleLimit) { Start-Sleep -Milliseconds 100 }
-            }
-            $job = Start-ThreadJob -ScriptBlock $InvokeDiscoveryOnServerScriptBlock -ArgumentList @(
-                $server,
-                $Credential,
-                $scriptContent,
-                $scriptParams,
-                $CollectorShare,
-                $RemoteOutputRoot,
-                $writeErrorLogScriptBlock,
-                $ensureWinRmAndConnectScriptBlock,
-                $ConfigFile,
-                $remoteConfigPath,
-                $script:CompatibilityMode,
-                [bool]$AttemptWinRmHeal.IsPresent,
-                $helperModuleContent,
-                $remoteRunDir,
-                [bool]$UseSmbForResults.IsPresent
-            )
-            $null = $running.Add($job)
-        }
-        $running | Wait-Job | Out-Null
-        $running | Remove-Job -Force -ErrorAction SilentlyContinue
-    }
-    else {
-        # Parallel not available (PS 5.1 or ThreadJob missing), fall back to sequential
-        if ($UseParallel) {
-            Write-Host "Parallel execution requires PowerShell 7+ with Start-ThreadJob. Using sequential execution." -ForegroundColor Yellow
-        }
-        foreach ($server in $servers) {
-            try {
-                & $InvokeDiscoveryOnServerScriptBlock `
-                    -ComputerName $server `
-                    -Credential $Credential `
-                    -ScriptContent $scriptContent `
-                    -ScriptParams $scriptParams `
-                    -CollectorShare $CollectorShare `
-                    -RemoteOutputRoot $RemoteOutputRoot `
-                    -WriteErrorLogFunction $writeErrorLogScriptBlock `
-                    -EnsureWinRmAndConnectFunction $ensureWinRmAndConnectScriptBlock `
-                    -ConfigFile $ConfigFile `
-                    -RemoteConfigPath $remoteConfigPath `
-                    -CompatibilityMode $script:CompatibilityMode `
-                    -AttemptWinRmHeal:$AttemptWinRmHeal `
-                    -HelperModuleContent $helperModuleContent `
-                    -RemoteRunDir $remoteRunDir `
-                    -UseSmbForResults:$UseSmbForResults
-            }
-            catch {
-                # Log any unexpected errors that escape the function
-                $errorMsg = "Unexpected error processing server: $($_.Exception.Message)"
-                Write-ErrorLog -ServerName $server -ErrorMessage $errorMsg -ErrorType "FATAL"
-                Write-Warning "[$server] $errorMsg"
-            }
-        }
+# --- Execution: parallel (PS 7+ only when ThreadJob available) or sequential ---
+# PS 5.1 and non-parallel: always use the sequential path below. Parallel is only used when
+# -UseParallel is set AND PS version is 7+ AND Start-ThreadJob/Wait-Job/Remove-Job are present
+# (so PS 5.1 and constrained runspaces never call ThreadJob and remain fully compatible).
+$useParallelThreadJob = $false
+if ($UseParallel -and $script:CompatibilityMode -eq 'Full' -and $script:PSMajorVersion -ge 7) {
+    $startThreadJobCmd = Get-Command Start-ThreadJob -ErrorAction SilentlyContinue
+    $waitJobCmd         = Get-Command Wait-Job -ErrorAction SilentlyContinue
+    $removeJobCmd       = Get-Command Remove-Job -ErrorAction SilentlyContinue
+    if ($startThreadJobCmd -and $waitJobCmd -and $removeJobCmd) {
+        $useParallelThreadJob = $true
     }
 }
+
+if ($useParallelThreadJob) {
+    # Parallel path: Start-ThreadJob with throttle (PS 7+ with ThreadJob available)
+    $throttleLimit = 10
+    $running = [System.Collections.ArrayList]::new()
+    foreach ($server in $servers) {
+        while ($running.Count -ge $throttleLimit) {
+            $completed = @($running | Where-Object { $_.State -ne 'Running' })
+            foreach ($j in $completed) { $null = $running.Remove($j) }
+            if ($running.Count -ge $throttleLimit) { Start-Sleep -Milliseconds 100 }
+        }
+        $job = Start-ThreadJob -ScriptBlock $InvokeDiscoveryOnServerScriptBlock -ArgumentList @(
+            $server,
+            $Credential,
+            $scriptContent,
+            $scriptParams,
+            $CollectorShare,
+            $RemoteOutputRoot,
+            $writeErrorLogScriptBlock,
+            $ensureWinRmAndConnectScriptBlock,
+            $ConfigFile,
+            $remoteConfigPath,
+            $script:CompatibilityMode,
+            [bool]$AttemptWinRmHeal.IsPresent,
+            $helperModuleContent,
+            $remoteRunDir,
+            [bool]$UseSmbForResults.IsPresent
+        )
+        $null = $running.Add($job)
+    }
+    $running | Wait-Job | Out-Null
+    $running | Remove-Job -Force -ErrorAction SilentlyContinue
+}
 else {
-    # Legacy path for PS 3.0–4.0 (sequential execution only)
+    # Sequential path: PS 5.1 (with or without -UseParallel), PS 3–4, or ThreadJob not available
     if ($UseParallel) {
+        Write-Host "Parallel execution requires PowerShell 7+ with Start-ThreadJob. Using sequential execution." -ForegroundColor Yellow
+    }
+    elseif ($script:CompatibilityMode -ne 'Full') {
         Write-Host "Parallel execution is not available in PowerShell versions below 5.1. Using sequential execution." -ForegroundColor Yellow
     }
     foreach ($server in $servers) {
@@ -1063,13 +1032,13 @@ else {
                 -EnsureWinRmAndConnectFunction $ensureWinRmAndConnectScriptBlock `
                 -ConfigFile $ConfigFile `
                 -RemoteConfigPath $remoteConfigPath `
+                -CompatibilityMode $script:CompatibilityMode `
                 -AttemptWinRmHeal:$AttemptWinRmHeal `
                 -HelperModuleContent $helperModuleContent `
                 -RemoteRunDir $remoteRunDir `
                 -UseSmbForResults:$UseSmbForResults
         }
         catch {
-            # Log any unexpected errors that escape the function
             $errorMsg = "Unexpected error processing server: $($_.Exception.Message)"
             Write-ErrorLog -ServerName $server -ErrorMessage $errorMsg -ErrorType "FATAL"
             Write-Warning "[$server] $errorMsg"
