@@ -1,0 +1,75 @@
+{
+  "Metadata": {
+    "ComputerName": "PC01",
+    "PlantId": "PLANT1",
+    "CollectedAt": "2025-02-05T12:00:00",
+    "OldDomainFqdn": "oldco.com",
+    "NewDomainFqdn": "newco.com",
+    "OldDomainNetBIOS": "OLDCO",
+    "Version": "1.7.0"
+  },
+  "System": {},
+  "OdbcDsn": [
+    {
+      "Name": "MyDSN",
+      "Driver": "SQL Server",
+      "Server": "sql.oldco.com",
+      "Database": "AppDb",
+      "Trusted": "yes",
+      "Scope": "Machine64",
+      "Account": "Integrated",
+      "ConnectionTarget": "sql.oldco.com\\AppDb"
+    },
+    {
+      "Name": "OtherDSN",
+      "Driver": "ODBC Driver 17 for SQL Server",
+      "Server": "sql.newco.com",
+      "Database": "OtherDb",
+      "Trusted": "",
+      "Scope": "User:S-1-5-21-xxx",
+      "Account": "svc_db",
+      "ConnectionTarget": "sql.newco.com\\OtherDb"
+    }
+  ],
+  "DatabaseConnections": [
+    {
+      "LocationType": "ODBC",
+      "Location": "ODBC DSN: MyDSN (Machine64)",
+      "ConnectionTarget": "sql.oldco.com\\AppDb",
+      "Parsed": {
+        "DataSource": "sql.oldco.com",
+        "InitialCatalog": "AppDb",
+        "UserId": "Integrated",
+        "IntegratedSecurity": true,
+        "HasPassword": false,
+        "IsOldDomainServer": true
+      }
+    },
+    {
+      "LocationType": "ODBC",
+      "Location": "ODBC DSN: OtherDSN (User:S-1-5-21-xxx)",
+      "ConnectionTarget": "sql.newco.com\\OtherDb",
+      "Parsed": {
+        "DataSource": "sql.newco.com",
+        "InitialCatalog": "OtherDb",
+        "UserId": "svc_db",
+        "IntegratedSecurity": false,
+        "HasPassword": false,
+        "IsOldDomainServer": false
+      }
+    }
+  ],
+  "Detection": {
+    "OldDomain": {
+      "OdbcOldDomain": ["MyDSN"],
+      "DatabaseConnectionsOldDomain": ["ODBC DSN: MyDSN (Machine64): sql.oldco.com"]
+    },
+    "Summary": {
+      "HasOldDomainRefs": true,
+      "Counts": {
+        "ODBC": 1,
+        "DatabaseConnections": 1
+      }
+    }
+  }
+}

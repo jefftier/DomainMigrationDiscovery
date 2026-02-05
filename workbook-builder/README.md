@@ -2,6 +2,8 @@
 
 Build a single **Excel workbook** (`.xlsx`) from domain migration discovery **JSON** files. Use the **CLI** for scripts and automation or the **GUI** for interactive use. You can also package the GUI as a standalone Windows **EXE** so others can run it without Python.
 
+**→ [Download the latest Windows EXE](/actions/workflows/build-workbook-exe.yml)** — built on every change to this folder. Open the link, then pick the latest successful run → **Artifacts** → **DomainMigrationBuilder-exe**.
+
 ---
 
 ## Get running in 2 minutes

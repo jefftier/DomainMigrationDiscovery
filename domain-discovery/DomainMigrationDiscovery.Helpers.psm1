@@ -1079,6 +1079,92 @@ WHERE srv.is_linked = 1
   return $results
 }
 
+<#
+.SYNOPSIS
+  Parses a connection string (key=value; key=value) into DataSource, InitialCatalog, UserId, IntegratedSecurity, HasPassword.
+#>
+function Parse-ConnectionStringToHash {
+  [CmdletBinding()]
+  param([Parameter(Mandatory=$false)][string]$ConnectionString)
+  $out = @{ DataSource = ''; InitialCatalog = ''; UserId = ''; IntegratedSecurity = $false; HasPassword = $false }
+  if ([string]::IsNullOrWhiteSpace($ConnectionString)) { return $out }
+  $opt = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+  foreach ($pair in ($ConnectionString -split ';')) {
+    if ($pair -match '^\s*([^=]+)=(.*)$') {
+      $k = $Matches[1].Trim().ToLowerInvariant() -replace '\s+', ''
+      $v = $Matches[2].Trim().Trim('"').Trim("'")
+      switch -Regex ($k) {
+        '^datasource$|^server$'   { $out.DataSource = $v }
+        '^initialcatalog$|^database$' { $out.InitialCatalog = $v }
+        '^userid$|^uid$|^user$' { $out.UserId = $v }
+        '^integratedsecurity$|^trusted_connection$' { $out.IntegratedSecurity = ($v -match '^(true|yes|sspi|1)$') }
+        '^password$|^pwd$'      { $out.HasPassword = $true }
+      }
+    }
+  }
+  return $out
+}
+
+<#
+.SYNOPSIS
+  Extracts and parses connection strings from a config file for DatabaseConnections.
+  Returns array of { LocationType, Location, ConnectionTarget, Parsed }.
+#>
+function Get-DatabaseConnectionsFromConfigFile {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory)]
+    [string]$FilePath,
+    [Parameter(Mandatory)]
+    $DomainMatchers,
+    [Parameter(Mandatory=$false)]
+    $Log
+  )
+  $results = @()
+  if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) { return $results }
+  try {
+    $content = Get-Content -LiteralPath $FilePath -Raw -ErrorAction Stop
+    if (-not $content -or $content -notmatch '(?i)(connectionstring|connection\s+string|data\s+source|server)\s*[=:]') { return $results }
+    $connectionStrings = @()
+    if ($content -match '(?i)connectionString\s*=\s*["'']([^"'']+)["'']') {
+      foreach ($m in ([regex]::Matches($content, '(?i)connectionString\s*=\s*["'']([^"'']+)["'']'))) {
+        $connectionStrings += $m.Groups[1].Value
+      }
+    }
+    if ($content -match '(?i)connectionstring\s*["'']\s*:\s*["'']([^"'']+)["'']') {
+      foreach ($m in ([regex]::Matches($content, '(?i)connectionstring\s*["'']\s*:\s*["'']([^"'']+)["'']'))) {
+        $connectionStrings += $m.Groups[1].Value
+      }
+    }
+    $seen = @{}
+    foreach ($cs in $connectionStrings) {
+      $cs = $cs -replace '&quot;', '"' -replace '&apos;', "'"
+      if ($seen[$cs]) { continue }; $seen[$cs] = $true
+      $parsed = Parse-ConnectionStringToHash -ConnectionString $cs
+      if ([string]::IsNullOrWhiteSpace($parsed.DataSource)) { continue }
+      $connTarget = $parsed.DataSource
+      if (-not [string]::IsNullOrWhiteSpace($parsed.InitialCatalog)) { $connTarget = "$($parsed.DataSource)\$($parsed.InitialCatalog)" }
+      $isOld = $DomainMatchers.Match($parsed.DataSource)
+      $results += [pscustomobject]@{
+        LocationType = 'Config'
+        Location = $FilePath
+        ConnectionTarget = $connTarget
+        Parsed = [pscustomobject]@{
+          DataSource = $parsed.DataSource
+          InitialCatalog = $parsed.InitialCatalog
+          UserId = $parsed.UserId
+          IntegratedSecurity = $parsed.IntegratedSecurity
+          HasPassword = $parsed.HasPassword
+          IsOldDomainServer = $isOld
+        }
+      }
+    }
+  } catch {
+    if ($Log) { $Log.Write("Get-DatabaseConnectionsFromConfigFile: $FilePath : $($_.Exception.Message)", 'WARN') }
+  }
+  return $results
+}
+
 function Get-ApplicationConfigDomainReferences {
   [CmdletBinding()]
   param(
@@ -1788,4 +1874,4 @@ function Get-RDSLicensingDiscovery {
   }
 }
 
-Export-ModuleMember -Function Hide-SensitiveText, Get-SqlServerPresence, Get-CredentialManagerDomainReferences, Get-CertificatesWithDomainReferences, Get-FirewallRulesWithDomainReferences, Get-IISDomainReferences, Get-SqlDomainReferences, Get-EventLogDomainReferences, Get-ApplicationConfigDomainReferences, Get-OracleDiscovery, Get-RDSLicensingDiscovery
+Export-ModuleMember -Function Hide-SensitiveText, Get-SqlServerPresence, Get-CredentialManagerDomainReferences, Get-CertificatesWithDomainReferences, Get-FirewallRulesWithDomainReferences, Get-IISDomainReferences, Get-SqlDomainReferences, Get-EventLogDomainReferences, Get-ApplicationConfigDomainReferences, Get-DatabaseConnectionsFromConfigFile, Get-OracleDiscovery, Get-RDSLicensingDiscovery

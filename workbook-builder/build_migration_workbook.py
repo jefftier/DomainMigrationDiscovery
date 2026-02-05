@@ -554,9 +554,12 @@ def filter_search_criteria_fields(row_dict, section_name=None):
     # Create filtered copy
     filtered = {}
     for k, v in row_dict.items():
-        # Remove search criteria fields
+        # Remove search criteria fields (keep LocationType for DatabaseConnections - it's source type ODBC/OLE DB/Config)
         if k in fields_to_remove:
-            continue
+            if k == "LocationType" and section_name == "DatabaseConnections":
+                pass  # keep it
+            else:
+                continue
         # For Encase specifically, also check prefixed field names
         if section_name == "SecurityAgents" and k.startswith("Encase_") and k.endswith("_ServiceName"):
             continue
@@ -855,6 +858,10 @@ def flatten_record(computer_name, record, sheet_rows, source_file=None, source_c
                         local_admins_old = set(detection_flags.get("LocalAdministratorsOldDomain") or [])
                         row["IsOldDomainAccount"] = (entry.get("Name") or "") in local_admins_old
                         row["NeedsAttention"] = row["IsOldDomainAccount"]
+                    elif section_name == "OdbcDsn":
+                        odbc_old = set(detection_flags.get("OdbcOldDomain") or [])
+                        row["HasOldDomainReference"] = (entry.get("Name") or "") in odbc_old
+                        row["NeedsAttention"] = row["HasOldDomainReference"]
             add_row(sheet_rows, section_name, row, include_source_section=debug_provenance)
 
     # --- Simple list sections with enhanced processing ---
@@ -941,6 +948,29 @@ def flatten_record(computer_name, record, sheet_rows, source_file=None, source_c
         "EventLogDomainReferences",
     ]:
         flatten_list_section(section)
+
+    # --- DatabaseConnections (all sources: ODBC, OLE DB, Config) - show all, ConnectionTarget prominent ---
+    db_conns = record.get("DatabaseConnections") or []
+    if isinstance(db_conns, dict):
+        db_conns = [db_conns]
+    if not isinstance(db_conns, list):
+        db_conns = []
+    for entry in db_conns:
+        if not isinstance(entry, dict):
+            continue
+        row = base.copy()
+        row["ConnectionTarget"] = entry.get("ConnectionTarget")
+        row["LocationType"] = entry.get("LocationType")
+        row["Location"] = entry.get("Location")
+        parsed = entry.get("Parsed") or {}
+        row["DataSource"] = parsed.get("DataSource")
+        row["InitialCatalog"] = parsed.get("InitialCatalog")
+        row["UserId"] = parsed.get("UserId")
+        row["IntegratedSecurity"] = parsed.get("IntegratedSecurity")
+        row["HasPassword"] = parsed.get("HasPassword")
+        row["HasOldDomainReference"] = parsed.get("IsOldDomainServer")
+        row["NeedsAttention"] = row["HasOldDomainReference"]
+        add_row(sheet_rows, "DatabaseConnections", row, include_source_section=debug_provenance)
 
     # --- SharedFolders (Shares + Errors) ---
     shared = record.get("SharedFolders") or {}
@@ -1611,6 +1641,7 @@ def write_excel(
         "MappedDrives",
         "Printers",
         "OdbcDsn",
+        "DatabaseConnections",
         "CredentialManager",
         "Certificates",
         "FirewallRules",
@@ -1795,12 +1826,12 @@ def write_excel(
 _PREFERRED_SHEET_ORDER = [
     "Summary", "Diagnostics", "Metadata", "System", "ServiceAccountCandidates",
     "Services", "ScheduledTasks", "LocalAdministrators", "Local Admin Membership",
-    "LocalGroupMembers", "MappedDrives", "Printers", "OdbcDsn", "CredentialManager",
-    "Certificates", "FirewallRules", "Profiles", "InstalledApps", "SharedFolders_Shares",
-    "SharedFolders_Errors", "DnsSuffixSearchList", "DnsAdapters", "AutoAdminLogon",
-    "EventLogDomainReferences", "ApplicationConfigFiles", "Config File Findings",
-    "Config Summary", "Oracle Summary", "Oracle Details", "RDS Licensing",
-    "SecurityAgents", "IIS", "SqlServer",
+    "LocalGroupMembers", "MappedDrives", "Printers", "OdbcDsn", "DatabaseConnections",
+    "CredentialManager", "Certificates", "FirewallRules", "Profiles", "InstalledApps",
+    "SharedFolders_Shares", "SharedFolders_Errors", "DnsSuffixSearchList", "DnsAdapters",
+    "AutoAdminLogon", "EventLogDomainReferences", "ApplicationConfigFiles",
+    "Config File Findings", "Config Summary", "Oracle Summary", "Oracle Details",
+    "RDS Licensing", "SecurityAgents", "IIS", "SqlServer",
 ]
 
 

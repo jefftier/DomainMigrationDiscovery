@@ -1557,10 +1557,141 @@ function Get-OdbcFromRegPath([string]$regPath,[string]$scope){
     foreach($k in $rootKeys){
       try {
         $p = Get-ItemProperty $k.PSPath -ErrorAction Stop
+        $driver  = [string](if ($p.PSObject.Properties['Driver']) { $p.Driver } else { '' })
+        $server  = [string](if ($p.PSObject.Properties['Server']) { $p.Server } else { '' })
+        $database= [string](if ($p.PSObject.Properties['Database']) { $p.Database } else { '' })
+        $trusted = [string](if ($p.PSObject.Properties['Trusted_Connection']) { $p.Trusted_Connection } else { '' })
+        $uid     = [string](if ($p.PSObject.Properties['UID']) { $p.UID } else { '' })
+        $user    = [string](if ($p.PSObject.Properties['User']) { $p.User } else { '' })
+        $account = ''
+        if ($trusted -match '^(yes|true|1)$') { $account = 'Integrated' }
+        elseif (-not [string]::IsNullOrWhiteSpace($uid)) { $account = $uid.Trim() }
+        elseif (-not [string]::IsNullOrWhiteSpace($user)) { $account = $user.Trim() }
+        else { $account = '' }
+        $connectionTarget = $server
+        if (-not [string]::IsNullOrWhiteSpace($database)) { $connectionTarget = "$server\$database" }
         $out += [pscustomobject]@{
-          Name=$k.PSChildName; Driver=[string]$p.Driver; Server=[string]$p.Server; Database=[string]$p.Database; Trusted=[string]$p.Trusted_Connection; Scope=$scope
+          Name=$k.PSChildName; Driver=$driver; Server=$server; Database=$database; Trusted=$trusted; Scope=$scope; Account=$account; ConnectionTarget=$connectionTarget
         }
       } catch {}
+    }
+  }
+  $out
+}
+
+<#
+.SYNOPSIS
+    Retrieves ODBC File DSN entries from a directory.
+
+.DESCRIPTION
+    Scans a directory for .dsn files and parses [ODBC] section for Driver, Server, Database, UID, Trusted_Connection.
+    Returns objects in the same shape as Get-OdbcFromRegPath for consolidation in OdbcDsn.
+
+.PARAMETER directoryPath
+    Full path to the directory containing .dsn files.
+
+.PARAMETER scope
+    Scope label (e.g., "FileDSN:Machine", "FileDSN:User:SID").
+
+.OUTPUTS
+    Array of PSCustomObject with ODBC DSN information (Name, Driver, Server, Database, Trusted, Scope, Account, ConnectionTarget).
+#>
+function Get-FileDsnFromDirectory([string]$directoryPath,[string]$scope){
+  $out = @()
+  if ([string]::IsNullOrWhiteSpace($directoryPath) -or -not (Test-Path -LiteralPath $directoryPath -PathType Container)) { return $out }
+  $dsnFiles = Get-ChildItem -LiteralPath $directoryPath -Filter '*.dsn' -File -ErrorAction SilentlyContinue
+  foreach ($f in $dsnFiles) {
+    try {
+      $content = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop
+      $driver = ''; $server = ''; $database = ''; $trusted = ''; $uid = ''; $user = ''
+      $lines = $content -split "`r?`n"
+      foreach ($line in $lines) {
+        if ($line -match '^\s*([^#;=]+)\s*=\s*(.*)\s*$') {
+          $key = $Matches[1].Trim().ToLowerInvariant(); $val = $Matches[2].Trim()
+          switch -Regex ($key) {
+            '^driver$'   { $driver   = $val }
+            '^server$'   { $server   = $val }
+            '^database$' { $database = $val }
+            '^trusted_connection$' { $trusted = $val }
+            '^uid$'      { $uid      = $val }
+            '^user$'     { $user     = $val }
+          }
+        }
+      }
+      $account = ''
+      if ($trusted -match '^(yes|true|1)$') { $account = 'Integrated' }
+      elseif (-not [string]::IsNullOrWhiteSpace($uid)) { $account = $uid.Trim() }
+      elseif (-not [string]::IsNullOrWhiteSpace($user)) { $account = $user.Trim() }
+      $connectionTarget = $server
+      if (-not [string]::IsNullOrWhiteSpace($database)) { $connectionTarget = "$server\$database" }
+      $out += [pscustomobject]@{
+        Name=$f.BaseName; Driver=$driver; Server=$server; Database=$database; Trusted=$trusted; Scope=$scope; Account=$account; ConnectionTarget=$connectionTarget
+      }
+    } catch {}
+  }
+  $out
+}
+
+<#
+.SYNOPSIS
+    Parses a .udl file and returns a connection object for DatabaseConnections.
+
+.DESCRIPTION
+    Reads OLE DB init string from .udl (after [oledb]) and parses Data Source, Initial Catalog, User ID, etc.
+
+.OUTPUTS
+    PSCustomObject with LocationType, Location, DataSource, InitialCatalog, UserId, IntegratedSecurity, HasPassword.
+#>
+function Get-UdlConnectionFromFile([string]$filePath){
+  if ([string]::IsNullOrWhiteSpace($filePath) -or -not (Test-Path -LiteralPath $filePath -PathType Leaf)) { return $null }
+  try {
+    $content = Get-Content -LiteralPath $filePath -Raw -ErrorAction Stop
+    $lines = $content -split "`r?`n"
+    $collect = $false
+    $initParts = @()
+    foreach ($line in $lines) {
+      $t = $line.Trim()
+      if ($t -match '^\[oledb\]' -or $t -match '^;') { continue }
+      if ($t -match 'Provider=' -or $t -match 'Data Source=' -or $t -match 'Initial Catalog=') { $collect = $true }
+      if ($collect) { $initParts += $t }
+    }
+    $initStr = $initParts -join ' '
+    $ds = ''; $ic = ''; $uid = ''; $integrated = ''; $hasPwd = $false
+    foreach ($pair in ($initStr -split ';')) {
+      if ($pair -match '^\s*([^=]+)=(.*)$') {
+        $k = $Matches[1].Trim().ToLowerInvariant(); $v = $Matches[2].Trim()
+        switch -Regex ($k) {
+          '^data\s*source$'   { $ds = $v }
+          '^initial\s*catalog$' { $ic = $v }
+          '^user\s*id$'        { $uid = $v }
+          '^integrated\s*security$' { $integrated = $v }
+          '^password$|^pwd$'   { $hasPwd = $true }
+        }
+      }
+    }
+    $connectionTarget = $ds
+    if (-not [string]::IsNullOrWhiteSpace($ic)) { $connectionTarget = "$ds\$ic" }
+    return [pscustomobject]@{
+      LocationType = 'File'; Location = $filePath; DataSource = $ds; InitialCatalog = $ic; UserId = $uid; IntegratedSecurity = $integrated; HasPassword = $hasPwd; ConnectionTarget = $connectionTarget
+    }
+  } catch { return $null }
+}
+
+<#
+.SYNOPSIS
+    Collects OLE DB connection info from .udl files in given directories.
+
+.OUTPUTS
+    Array of connection objects (LocationType, Location, DataSource, InitialCatalog, UserId, IntegratedSecurity, HasPassword, ConnectionTarget).
+#>
+function Get-OleDbConnectionsFromDirectories([string[]]$directoryPaths){
+  $out = @()
+  foreach ($dir in $directoryPaths) {
+    if ([string]::IsNullOrWhiteSpace($dir) -or -not (Test-Path -LiteralPath $dir -PathType Container)) { continue }
+    $udlFiles = Get-ChildItem -LiteralPath $dir -Filter '*.udl' -File -Recurse -Depth 2 -ErrorAction SilentlyContinue
+    foreach ($f in $udlFiles) {
+      $conn = Get-UdlConnectionFromFile -filePath $f.FullName
+      if ($conn) { $out += $conn }
     }
   }
   $out
@@ -1794,13 +1925,22 @@ try {
   $driveMaps = @()
 
   # --------------------------------------------------------------------------------
-  # ODBC Data Sources
+  # ODBC Data Sources (Registry + File DSN)
   # --------------------------------------------------------------------------------
   # Collect ODBC DSN entries from machine-level registry first,
-  # then per-user during profile loop
+  # then File DSN from common machine paths, then per-user during profile loop
   $odbc = @()
   $odbc += Get-OdbcFromRegPath -regPath 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\ODBC\ODBC.INI' -scope 'Machine64'
   $odbc += Get-OdbcFromRegPath -regPath 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\ODBC\ODBC.INI' -scope 'Machine32'
+  # Machine-level File DSN directories
+  $fileDsnDirs = @(
+    (Join-Path $env:ProgramData 'ODBC\Data Sources'),
+    (Join-Path $env:ProgramFiles 'Common Files\ODBC\Data Sources'),
+    (if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} 'Common Files\ODBC\Data Sources' } else { $null })
+  )
+  foreach ($dir in $fileDsnDirs) {
+    if ($dir) { $odbc += Get-FileDsnFromDirectory -directoryPath $dir -scope 'FileDSN:Machine' }
+  }
 
   # --------------------------------------------------------------------------------
   # Credential Manager (Per-Profile)
@@ -1851,8 +1991,11 @@ try {
         }
       }
 
-      # ODBC discovery
+      # ODBC discovery (registry + user File DSN)
       $odbc += Get-OdbcFromRegPath -regPath "Registry::HKEY_USERS\$sid\Software\ODBC\ODBC.INI" -scope "User:$sid"
+      $userFileDsnDir = Join-Path $prof.LocalPath 'AppData\Roaming\Microsoft\Windows\Application Data\ODBC Data Sources'
+      if (-not (Test-Path -LiteralPath $userFileDsnDir -PathType Container)) { $userFileDsnDir = Join-Path $prof.LocalPath 'Application Data\ODBC Data Sources' }
+      if (Test-Path -LiteralPath $userFileDsnDir -PathType Container) { $odbc += Get-FileDsnFromDirectory -directoryPath $userFileDsnDir -scope "FileDSN:User:$sid" }
 
       # Credential Manager discovery
       $credentialManager += Safe-Try {
@@ -1948,6 +2091,67 @@ try {
   $rdsLicensing = Safe-Try {
     Get-RDSLicensingDiscovery -Log $script:log
   } 'RDSLicensing'
+
+  # --------------------------------------------------------------------------------
+  # OLE DB / .udl connections (machine paths only)
+  # --------------------------------------------------------------------------------
+  $oleDbDirs = @(
+    $env:ProgramData,
+    (Join-Path $env:ProgramData 'ODBC'),
+    (if (Test-Path $env:ProgramFiles) { Join-Path $env:ProgramFiles 'Common Files' } else { $null })
+  )
+  $oleDbConnections = Safe-Try { Get-OleDbConnectionsFromDirectories -directoryPaths $oleDbDirs } 'OleDbConnections'
+
+  # --------------------------------------------------------------------------------
+  # DatabaseConnections (consolidated: ODBC + File DSN + OLE DB)
+  # --------------------------------------------------------------------------------
+  $databaseConnections = @()
+  foreach ($d in @($odbc)) {
+    if ($null -eq $d) { continue }
+    $ds = [string]$d.Server
+    $isOld = $matchers.Match($ds)
+    $databaseConnections += [pscustomobject]@{
+      LocationType = 'ODBC'
+      Location = "ODBC DSN: $($d.Name) ($($d.Scope))"
+      ConnectionTarget = [string]$d.ConnectionTarget
+      Parsed = [pscustomobject]@{
+        DataSource = $ds
+        InitialCatalog = [string]$d.Database
+        UserId = [string]$d.Account
+        IntegratedSecurity = ($d.Trusted -match '^(yes|true|1)$')
+        HasPassword = $false
+        IsOldDomainServer = $isOld
+      }
+    }
+  }
+  foreach ($c in @($oleDbConnections)) {
+    if ($null -eq $c) { continue }
+    $ds = [string]$c.DataSource
+    $isOld = $matchers.Match($ds)
+    $databaseConnections += [pscustomobject]@{
+      LocationType = 'OLE DB'
+      Location = $c.Location
+      ConnectionTarget = [string]$c.ConnectionTarget
+      Parsed = [pscustomobject]@{
+        DataSource = $ds
+        InitialCatalog = [string]$c.InitialCatalog
+        UserId = [string]$c.UserId
+        IntegratedSecurity = (-not [string]::IsNullOrWhiteSpace($c.IntegratedSecurity))
+        HasPassword = $c.HasPassword
+        IsOldDomainServer = $isOld
+      }
+    }
+  }
+  $configPathsForDb = @()
+  if ($applicationConfigFiles) {
+    foreach ($f in @($applicationConfigFiles.FilesWithDomainReferences)) { if ($f -and $f.FilePath) { $configPathsForDb += $f.FilePath } }
+    foreach ($f in @($applicationConfigFiles.FilesWithCredentials)) { if ($f -and $f.FilePath) { $configPathsForDb += $f.FilePath } }
+  }
+  $configPathsForDb = @($configPathsForDb | Select-Object -Unique | Select-Object -First 50)
+  foreach ($configPath in $configPathsForDb) {
+    $fromConfig = Get-DatabaseConnectionsFromConfigFile -FilePath $configPath -DomainMatchers $matchers -Log $script:log
+    $databaseConnections += @($fromConfig)
+  }
 
   # --------------------------------------------------------------------------------
   # AppX Packages (Optional)
@@ -2261,6 +2465,14 @@ try {
   }
   $appConfigOldDomain = $appConfigOldDomain | Sort-Object -Unique
 
+  $log.Write('Detect: starting database connections')
+  $databaseConnectionsOldDomain = @()
+  foreach ($dc in @($databaseConnections)) {
+    if ($null -eq $dc -or $null -eq $dc.Parsed) { continue }
+    if ($dc.Parsed.IsOldDomainServer) { $databaseConnectionsOldDomain += ("{0}: {1}" -f $dc.Location, $dc.Parsed.DataSource) }
+  }
+  $databaseConnectionsOldDomain = $databaseConnectionsOldDomain | Sort-Object -Unique
+
   $taskCombined = @($tasksWithOldAccounts + $tasksWithOldActionRefs) | Sort-Object -Unique
 
   # --------------------------------------------------------------------------------
@@ -2285,6 +2497,7 @@ try {
     SqlServerOldDomain             = @($sqlServerOldDomain)
     EventLogDomainReferences       = @($eventLogOldDomain)
     ApplicationConfigFilesOldDomain = @($appConfigOldDomain)
+    DatabaseConnectionsOldDomain   = @($databaseConnectionsOldDomain)
   }
 
   # --------------------------------------------------------------------------------
@@ -2294,7 +2507,7 @@ try {
   # Summary counts (safe)
   function Get-CountSafe { param($x) @(@($x) | Where-Object { $_ -ne $null -and $_ -ne '' } | Sort-Object -Unique).Count }
   $summary = [pscustomobject]@{
-    HasOldDomainRefs = ((Get-CountSafe $flags.ServicesRunAsOldDomain) -or (Get-CountSafe $flags.ServicesOldPathRefs) -or (Get-CountSafe $tasksWithOldAccounts) -or (Get-CountSafe $tasksWithOldActionRefs) -or (Get-CountSafe $taskCombined) -or (Get-CountSafe $flags.DriveMapsToOldDomain) -or (Get-CountSafe $flags.LocalGroupsOldDomainMembers) -or (Get-CountSafe $flags.PrintersToOldDomain) -or (Get-CountSafe $flags.OdbcOldDomain) -or (Get-CountSafe $flags.LocalAdministratorsOldDomain) -or (Get-CountSafe $flags.CredentialManagerOldDomain) -or (Get-CountSafe $flags.CertificatesOldDomain) -or (Get-CountSafe $flags.FirewallRulesOldDomain) -or (Get-CountSafe $flags.IISSitesOldDomain) -or (Get-CountSafe $flags.IISAppPoolsOldDomain) -or (Get-CountSafe $flags.SqlServerOldDomain) -or (Get-CountSafe $flags.EventLogDomainReferences) -or (Get-CountSafe $flags.ApplicationConfigFilesOldDomain))
+    HasOldDomainRefs = ((Get-CountSafe $flags.ServicesRunAsOldDomain) -or (Get-CountSafe $flags.ServicesOldPathRefs) -or (Get-CountSafe $tasksWithOldAccounts) -or (Get-CountSafe $tasksWithOldActionRefs) -or (Get-CountSafe $taskCombined) -or (Get-CountSafe $flags.DriveMapsToOldDomain) -or (Get-CountSafe $flags.LocalGroupsOldDomainMembers) -or (Get-CountSafe $flags.PrintersToOldDomain) -or (Get-CountSafe $flags.OdbcOldDomain) -or (Get-CountSafe $flags.LocalAdministratorsOldDomain) -or (Get-CountSafe $flags.CredentialManagerOldDomain) -or (Get-CountSafe $flags.CertificatesOldDomain) -or (Get-CountSafe $flags.FirewallRulesOldDomain) -or (Get-CountSafe $flags.IISSitesOldDomain) -or (Get-CountSafe $flags.IISAppPoolsOldDomain) -or (Get-CountSafe $flags.SqlServerOldDomain) -or (Get-CountSafe $flags.EventLogDomainReferences) -or (Get-CountSafe $flags.ApplicationConfigFilesOldDomain) -or (Get-CountSafe $flags.DatabaseConnectionsOldDomain))
     Counts = [pscustomobject]@{
       Services       = (Get-CountSafe $flags.ServicesRunAsOldDomain)
       ServicesPath   = (Get-CountSafe $flags.ServicesOldPathRefs)
@@ -2314,6 +2527,7 @@ try {
       SqlServer      = (Get-CountSafe $flags.SqlServerOldDomain)
       EventLogs      = (Get-CountSafe $flags.EventLogDomainReferences)
       ApplicationConfigFiles = (Get-CountSafe $flags.ApplicationConfigFilesOldDomain)
+      DatabaseConnections = (Get-CountSafe $flags.DatabaseConnectionsOldDomain)
     }
   }
 #endregion
@@ -2729,6 +2943,7 @@ function Get-SharedFoldersWithACL {
     MappedDrives  = if ($SlimOutputOnly) { $null } else { $driveMaps }
     Printers      = $printersData
     OdbcDsn       = if ($SlimOutputOnly) { $null } else { $odbc }
+    DatabaseConnections = $databaseConnections
     AutoAdminLogon= if ($SlimOutputOnly) { $null } else { $auto }
     CredentialManager = $credentialManager
     Certificates = $certificates
