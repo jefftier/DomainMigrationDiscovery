@@ -1,49 +1,68 @@
-# Domain Migration Discovery Script
+# Domain Migration Discovery
 
-A comprehensive PowerShell script for discovering domain migration readiness by scanning workstations for references to old domain configurations, credentials, certificates, and dependencies.
+A comprehensive toolkit for discovering domain migration readiness: scan workstations for old domain references, check security tool status, and build Excel reports from JSON results.
+
+## Repository structure (by function)
+
+| Function | Folder | Purpose |
+|----------|--------|---------|
+| **Domain discovery** | `domain-discovery/` | Scan workstations for old domain references (services, tasks, credentials, etc.); run locally or remotely. |
+| **Workbook builder** | `workbook-builder/` | Build Excel workbooks from discovery JSON (CLI and GUI). |
+| **Security tools status** | `security-tools-status/` | Check CrowdStrike, Qualys, SCCM, and EnCase status on remote servers (CLI and GUI). |
+
+Shared config lives in `config/` (e.g. `config/migration-config.example.json`).
 
 ## Quick Reference
 
-### Basic Discovery
+### Basic Discovery (from repo root)
 ```powershell
-.\Get-WorkstationDiscovery.ps1 -OldDomainFqdn "olddomain.com" -NewDomainFqdn "newdomain.com"
+.\domain-discovery\Get-WorkstationDiscovery.ps1 -OldDomainFqdn "olddomain.com" -NewDomainFqdn "newdomain.com"
 ```
 
 ### Using Configuration File
 ```powershell
-.\Get-WorkstationDiscovery.ps1 -ConfigFile ".\migration-config.json"
+.\domain-discovery\Get-WorkstationDiscovery.ps1 -ConfigFile ".\config\migration-config.json"
 ```
 
 ### Remote Execution (Multiple Servers)
+When running from the repo root, pass the discovery script path explicitly:
 ```powershell
-.\Invoke-MigrationDiscoveryRemotely.ps1 `
+.\domain-discovery\Invoke-MigrationDiscoveryRemotely.ps1 `
     -ServerListPath ".\servers.txt" `
+    -ScriptPath ".\domain-discovery\Get-WorkstationDiscovery.ps1" `
     -OldDomainFqdn "olddomain.com" `
     -NewDomainFqdn "newdomain.com" `
-    -ConfigFile ".\migration-config.json"
+    -ConfigFile ".\config\migration-config.json"
 ```
+If you `cd domain-discovery` first, you can omit `-ScriptPath` (default is `.\Get-WorkstationDiscovery.ps1`).
 
 ### Build Excel Report from JSON Results
 ```powershell
-python build_migration_workbook.py -i "Y:\results" -o "."
+python workbook-builder\build_migration_workbook.py -i "Y:\results" -o "."
+```
+
+### Security Tools Status (CLI or GUI)
+```powershell
+.\security-tools-status\Get-SecurityToolsStatus.ps1 -ServerListPath ".\servers.txt" -ConfigFile ".\config\migration-config.json"
+.\security-tools-status\Get-SecurityToolsStatus-GUI.ps1
 ```
 
 ### Smoke run (end-to-end, no new dependencies)
 ```powershell
 # 1. Run discovery locally (writes JSON to C:\temp\MigrationDiscovery\out)
-.\Get-WorkstationDiscovery.ps1 -OldDomainFqdn "oldco.com" -NewDomainFqdn "newco.com" -SlimOutputOnly
+.\domain-discovery\Get-WorkstationDiscovery.ps1 -OldDomainFqdn "oldco.com" -NewDomainFqdn "newco.com" -SlimOutputOnly
 
 # 2. Build workbook from that folder (adjust -i if you use a different output path)
-python build_migration_workbook.py -i "C:\temp\MigrationDiscovery\out" -o "."
+python workbook-builder\build_migration_workbook.py -i "C:\temp\MigrationDiscovery\out" -o "."
 
 # 3. Open the generated *MigrationDiscovery_*.xlsx and verify Summary, Config File Findings, Config Summary, Oracle Summary, RDS Licensing, Local Admin Membership tabs
 ```
 
-**Key Files:**
-- `Get-WorkstationDiscovery.ps1` - Main discovery script
-- `Invoke-MigrationDiscoveryRemotely.ps1` - Remote execution launcher
-- `build_migration_workbook.py` - Excel report builder
-- `migration-config.example.json` - Configuration file template
+**Key files by function:**
+- **Domain discovery:** `domain-discovery/Get-WorkstationDiscovery.ps1`, `domain-discovery/Invoke-MigrationDiscoveryRemotely.ps1`, `domain-discovery/DomainMigrationDiscovery.Helpers.psm1`
+- **Workbook builder:** `workbook-builder/build_migration_workbook.py`, `workbook-builder/gui_app.py`
+- **Security tools:** `security-tools-status/Get-SecurityToolsStatus.ps1`, `security-tools-status/Get-SecurityToolsStatus-GUI.ps1`
+- **Config:** `config/migration-config.example.json`
 
 ## Overview
 
@@ -128,7 +147,7 @@ The script scans the following areas for old domain references:
 ### Basic Usage
 
 ```powershell
-.\Get-WorkstationDiscovery.ps1 -OldDomainFqdn "olddomain.com" -NewDomainFqdn "newdomain.com"
+.\domain-discovery\Get-WorkstationDiscovery.ps1 -OldDomainFqdn "olddomain.com" -NewDomainFqdn "newdomain.com"
 ```
 
 ### Common Parameters
@@ -158,7 +177,7 @@ The script scans the following areas for old domain references:
 ### Example: Full Discovery with Central Share
 
 ```powershell
-.\Get-WorkstationDiscovery.ps1 `
+.\domain-discovery\Get-WorkstationDiscovery.ps1 `
     -OldDomainFqdn "olddomain.com" `
     -NewDomainFqdn "newdomain.com" `
     -OldDomainNetBIOS "OLDDOMAIN" `
@@ -172,7 +191,7 @@ The script scans the following areas for old domain references:
 ### Example: Slim Output with Custom Filters
 
 ```powershell
-.\Get-WorkstationDiscovery.ps1 `
+.\domain-discovery\Get-WorkstationDiscovery.ps1 `
     -OldDomainFqdn "olddomain.com" `
     -NewDomainFqdn "newdomain.com" `
     -SlimOutputOnly `
@@ -212,7 +231,7 @@ Create a JSON configuration file (`app-discovery.json`):
 Run discovery with app-specific scanning:
 
 ```powershell
-.\Get-WorkstationDiscovery.ps1 `
+.\domain-discovery\Get-WorkstationDiscovery.ps1 `
     -OldDomainFqdn "olddomain.com" `
     -NewDomainFqdn "newdomain.com" `
     -AppDiscoveryConfigPath ".\app-discovery.json"
@@ -221,7 +240,7 @@ Run discovery with app-specific scanning:
 ### Example: Self-Test Mode
 
 ```powershell
-.\Get-WorkstationDiscovery.ps1 `
+.\domain-discovery\Get-WorkstationDiscovery.ps1 `
     -OldDomainFqdn "olddomain.com" `
     -NewDomainFqdn "newdomain.com" `
     -SelfTest
@@ -236,7 +255,7 @@ The script supports loading domain settings and tenant maps from a JSON configur
 
 **Important**: Command-line parameters take precedence over configuration file values. If a parameter is explicitly provided on the command line, the config file value for that parameter is ignored.
 
-Create a JSON configuration file (`migration-config.json`):
+Create a JSON configuration file (e.g. `config/migration-config.json`; copy from `config/migration-config.example.json`):
 
 ```json
 {
@@ -281,19 +300,19 @@ Create a JSON configuration file (`migration-config.json`):
 
 Load all settings from configuration file:
 ```powershell
-.\Get-WorkstationDiscovery.ps1 -ConfigFile ".\migration-config.json"
+.\domain-discovery\Get-WorkstationDiscovery.ps1 -ConfigFile ".\config\migration-config.json"
 ```
 
 Override specific parameter (config file values used for others):
 ```powershell
-.\Get-WorkstationDiscovery.ps1 `
-    -ConfigFile ".\migration-config.json" `
+.\domain-discovery\Get-WorkstationDiscovery.ps1 `
+    -ConfigFile ".\config\migration-config.json" `
     -OldDomainFqdn "override.com"
 ```
 
 Use command-line parameters (config file ignored if all params provided):
 ```powershell
-.\Get-WorkstationDiscovery.ps1 `
+.\domain-discovery\Get-WorkstationDiscovery.ps1 `
     -OldDomainFqdn "oldco.com" `
     -NewDomainFqdn "newco.com"
 ```
@@ -306,7 +325,7 @@ Use command-line parameters (config file ignored if all params provided):
 
 ## Remote Execution
 
-For executing discovery on multiple remote workstations, use the `Invoke-MigrationDiscoveryRemotely.ps1` launcher script. This script uses PowerShell Remoting (PSRemoting) to execute the discovery script on multiple servers in parallel or sequentially.
+For executing discovery on multiple remote workstations, use the `domain-discovery/Invoke-MigrationDiscoveryRemotely.ps1` launcher script. This script uses PowerShell Remoting (PSRemoting) to execute the discovery script on multiple servers in parallel or sequentially.
 
 ### Remote Execution Requirements
 
@@ -337,7 +356,7 @@ DEV-SERVER02
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `ServerListPath` | String | Yes | - | Path to text file containing server names (one per line) |
-| `ScriptPath` | String | No | `.\Get-WorkstationDiscovery.ps1` | Path to the discovery script |
+| `ScriptPath` | String | No | `.\Get-WorkstationDiscovery.ps1` (when run from `domain-discovery/`) | Path to the discovery script |
 | `RemoteOutputRoot` | String | No | `C:\temp\MigrationDiscovery\out` | Local path on remote servers for JSON output |
 | `RemoteLogRoot` | String | No | `C:\temp\MigrationDiscovery\logs` | Local path on remote servers for log files |
 | `CollectorShare` | String | No | - | UNC path where collected JSON files will be copied (e.g., `\\fileserver\MigrationDiscovery\workstations`) |
@@ -353,7 +372,7 @@ DEV-SERVER02
 ### Example: Sequential Remote Execution
 
 ```powershell
-.\Invoke-MigrationDiscoveryRemotely.ps1 `
+.\domain-discovery\Invoke-MigrationDiscoveryRemotely.ps1 `
     -ServerListPath ".\servers.txt" `
     -OldDomainFqdn "olddomain.com" `
     -NewDomainFqdn "newdomain.com" `
@@ -364,7 +383,7 @@ DEV-SERVER02
 ### Example: Parallel Remote Execution (PowerShell 7+)
 
 ```powershell
-.\Invoke-MigrationDiscoveryRemotely.ps1 `
+.\domain-discovery\Invoke-MigrationDiscoveryRemotely.ps1 `
     -ServerListPath ".\servers.txt" `
     -OldDomainFqdn "olddomain.com" `
     -NewDomainFqdn "newdomain.com" `
@@ -1003,13 +1022,15 @@ The script includes comprehensive error handling:
 
 ## Excel Report Builder
 
-The `build_migration_workbook.py` script generates a comprehensive Excel workbook from JSON discovery results.
+The `workbook-builder/build_migration_workbook.py` script generates a comprehensive Excel workbook from JSON discovery results.
 
 ### Report Builder Usage
 
+From the repo root:
 ```powershell
-python build_migration_workbook.py -i "Y:\results" -o "."
+python workbook-builder\build_migration_workbook.py -i "Y:\results" -o "."
 ```
+Or from the `workbook-builder/` folder: `python build_migration_workbook.py -i "Y:\results" -o "."`
 
 **Parameters:**
 - `-i, --input`: Folder containing discovery JSON files (default: `Y:\results`)

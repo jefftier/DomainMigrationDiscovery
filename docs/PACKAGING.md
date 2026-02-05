@@ -1,5 +1,7 @@
 # Packaging as Windows EXE
 
+This document describes building the **workbook builder** GUI as a standalone Windows EXE. All workbook-builder scripts live in the `workbook-builder/` folder.
+
 ## Prerequisites (build machine)
 
 - **Windows** (to produce a Windows EXE that runs without Python).  
@@ -13,16 +15,24 @@
 From the project root:
 
 ```bat
+python workbook-builder\build_exe.py
+```
+
+Or from the `workbook-builder/` folder:
+
+```bat
+cd workbook-builder
 python build_exe.py
 ```
 
-Or directly:
+Or run PyInstaller directly from `workbook-builder/`:
 
 ```bat
+cd workbook-builder
 python -m PyInstaller --noconfirm --distpath dist DomainMigrationBuilder.spec
 ```
 
-Output: **`dist/DomainMigrationBuilder.exe`** (single file, no console window).
+Output: **`dist/DomainMigrationBuilder.exe`** (created in the current working directory—run from project root or from `workbook-builder/` as preferred).
 
 ## What gets bundled
 
@@ -46,17 +56,20 @@ Output: **`dist/DomainMigrationBuilder.exe`** (single file, no console window).
 ## Validation
 
 1. **Build succeeds on clean machine**  
-   On a Windows PC with only Python and the above pip packages, run `python build_exe.py`. The build should finish without errors.
+   On a Windows PC with only Python and the above pip packages, run `python workbook-builder\build_exe.py` from the project root (or `python build_exe.py` from the `workbook-builder/` folder). The build should finish without errors.
 
 2. **EXE runs without Python installed**  
-   Copy `dist/DomainMigrationBuilder.exe` to a machine (or VM) that has **no** Python installed. Double‑click the EXE (or run from cmd). The GUI should start.
+   Copy `workbook-builder/dist/DomainMigrationBuilder.exe` to a machine (or VM) that has **no** Python installed. Double‑click the EXE (or run from cmd). The GUI should start.
 
 3. **Processes sample JSON folder**  
    In the GUI, choose an input folder that contains one or more discovery JSON files, choose an output .xlsx path, click Run. The workbook should be generated (or validation report if “Validate only” is checked).
 
 ## Clean rebuild
 
+From the `workbook-builder/` folder:
+
 ```bat
+cd workbook-builder
 pyinstaller --clean DomainMigrationBuilder.spec
 ```
 
