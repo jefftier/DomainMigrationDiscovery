@@ -236,6 +236,16 @@ param(
   [switch]$ExcludeConfigFiles = $false
 )
 
+# Require Full Language mode. In Constrained/Restricted/NoLanguage mode the 'if' keyword is not recognized
+# and the script fails with "The term 'if' is not recognized as the name of a cmdlet, function...".
+# Check before loading the helper module so we fail fast with a clear message.
+$langMode = $ExecutionContext.SessionState.LanguageMode
+switch ($langMode) {
+  'ConstrainedLanguage' { Write-Error "This script requires Full Language mode. Current: $langMode. Run from a session that is not constrained (e.g. WDAC/AppLocker may be enforcing Constrained mode)."; exit 1 }
+  'RestrictedLanguage'  { Write-Error "This script requires Full Language mode. Current: $langMode."; exit 1 }
+  'NoLanguage'          { Write-Error "This script requires Full Language mode. Current: $langMode."; exit 1 }
+}
+
 # Load helper module (Domain References functions) early so they are available to discovery logic
 $helperModulePath = Join-Path $PSScriptRoot 'DomainMigrationDiscovery.Helpers.psm1'
 Import-Module $helperModulePath -Force -ErrorAction Stop
@@ -1180,7 +1190,7 @@ function Get-SCCMTenantInfo {
                                         $pattern = [regex]::new("(?i)" + [regex]::Escape($domain))
                                         if ($pattern.IsMatch($valueStr)) {
                                             # For arrays, show the full array in Value; for single values, show the string
-                                            $displayValue = if ($value -is [array]) { ($value -join ' | ') } else { $valueStr }
+                                            $displayValue = $valueStr; if ($value -is [array]) { $displayValue = ($value -join ' | ') }
                                             $null = $results.Add([pscustomobject]@{
                                                 Path = $basePath
                                                 ValueName = $valueName
@@ -1204,7 +1214,7 @@ function Get-SCCMTenantInfo {
                     try {
                         $subKey = $key.OpenSubKey($subKeyName)
                         if ($null -ne $subKey) {
-                            $newPath = if ($basePath) { "$basePath\$subKeyName" } else { $subKeyName }
+                            $newPath = $subKeyName; if ($basePath) { $newPath = "$basePath\$subKeyName" }
                             Search-RegistryRecursive -key $subKey -basePath $newPath -domains $domains -results $results
                             $subKey.Close()
                         }
@@ -1344,10 +1354,11 @@ function Get-EncaseTenantInfo {
         }
     }
     
+    $regPathVal = $null; if ($tenantKey) { $regPathVal = "HKLM:\SOFTWARE\Microsoft\$tenantKey" }
     return [pscustomobject]@{
         Installed = $installed
         ServiceName = $serviceName
-        RegPath = if ($tenantKey) { "HKLM:\SOFTWARE\Microsoft\$tenantKey" } else { $null }
+        RegPath = $regPathVal
         TenantKey = $tenantKey
         Tenant = $tenant
     }
@@ -1391,7 +1402,7 @@ function Get-SecurityAgentsTenantInfo {
     $csRegPath = 'System\\CurrentControlSet\\Services\\CSAgent\\Sim'
     $csValName = 'CU'
     $cs = Get-RegistryValueMultiView -Hive LocalMachine -Path $csRegPath -Name $csValName
-    $csHex = if ($cs) { $cs.String } else { $null }
+    $csHex = $null; if ($cs) { $csHex = $cs.String }
     
     # Determine tenant name using user-configurable mapping
     if ($null -eq $csHex) {
@@ -1406,7 +1417,7 @@ function Get-SecurityAgentsTenantInfo {
     $qRegPath = 'Software\\Qualys'
     $qValName = 'ActivationID'
     $q = Get-RegistryValueMultiView -Hive LocalMachine -Path $qRegPath -Name $qValName
-    $qStr = if ($q) { $q.String } else { $null }
+    $qStr = $null; if ($q) { $qStr = $q.String }
     
     # Determine tenant name using user-configurable mapping
     if ($null -eq $qStr) {
@@ -1422,21 +1433,26 @@ function Get-SecurityAgentsTenantInfo {
 
     # Encase
     $encaseInfo = Get-EncaseTenantInfo -Log $Log -EncaseRegistryPaths $EncaseRegistryPaths
+    $sccmOldDomainName = $null; if ($sccmInfo.Tenant -eq 'OldDomain') { $sccmOldDomainName = $OldDomainFqdn }
 
+    $csKind = $null; if ($cs) { $csKind = $cs.Kind }
+    $csRaw = $null; if ($cs -and $cs.PSObject.Properties['Raw']) { if ($cs.Kind -eq 'Binary') { $csRaw = [System.BitConverter]::ToString([byte[]]$cs.Raw) } else { $csRaw = $cs.Raw } }
+    $qKind = $null; if ($q) { $qKind = $q.Kind }
+    $qRaw = $null; if ($q -and $q.PSObject.Properties['Raw']) { $qRaw = $q.Raw }
     [pscustomobject]@{
         CrowdStrike = [pscustomobject]@{
             RegPath   = 'HKLM:\System\CurrentControlSet\Services\CSAgent\Sim'
             ValueName = $csValName
-            Kind      = if ($cs) { $cs.Kind } else { $null }
-            Raw       = if ($cs -and $cs.PSObject.Properties['Raw']) { if ($cs.Kind -eq 'Binary') { [System.BitConverter]::ToString([byte[]]$cs.Raw) } else { $cs.Raw } } else { $null }
+            Kind      = $csKind
+            Raw       = $csRaw
             String    = $csHex
             Tenant    = $csTenant
         }
         Qualys = [pscustomobject]@{
             RegPath   = 'HKLM:\Software\Qualys'
             ValueName = $qValName
-            Kind      = if ($q) { $q.Kind } else { $null }
-            Raw       = if ($q -and $q.PSObject.Properties['Raw']) { $q.Raw } else { $null }
+            Kind      = $qKind
+            Raw       = $qRaw
             String    = $qStr
             Tenant    = $qTenant
         }
@@ -1446,7 +1462,7 @@ function Get-SecurityAgentsTenantInfo {
             DomainReferences  = $sccmInfo.DomainReferences
             FoundDomains      = $sccmInfo.FoundDomains
             Tenant            = $sccmInfo.Tenant
-            OldDomainName     = if ($sccmInfo.Tenant -eq 'OldDomain') { $OldDomainFqdn } else { $null }
+            OldDomainName     = $sccmOldDomainName
             HasDomainReference = $sccmInfo.HasDomainReference
         }
         Encase = [pscustomobject]@{
@@ -2396,7 +2412,7 @@ try {
       foreach($site in @($iisConfiguration.Sites)){
         if ($null -eq $site) { continue }
         if ($site.HasDomainReference) {
-          $matchedFieldsStr = if ($site.MatchedFields) { ($site.MatchedFields -join ', ') } else { 'Unknown' }
+          $matchedFieldsStr = 'Unknown'; if ($site.MatchedFields) { $matchedFieldsStr = ($site.MatchedFields -join ', ') }
           $iisSitesOldDomain += ("{0} ({1})" -f $site.Name, $matchedFieldsStr)
         }
       }
@@ -2406,7 +2422,7 @@ try {
       foreach($pool in @($iisConfiguration.AppPools)){
         if ($null -eq $pool) { continue }
         if ($pool.HasDomainReference) {
-          $matchedFieldsStr = if ($pool.MatchedFields) { ($pool.MatchedFields -join ', ') } else { 'Unknown' }
+          $matchedFieldsStr = 'Unknown'; if ($pool.MatchedFields) { $matchedFieldsStr = ($pool.MatchedFields -join ', ') }
           $iisAppPoolsOldDomain += ("{0} ({1})" -f $pool.Name, $matchedFieldsStr)
         }
       }
@@ -2433,7 +2449,7 @@ try {
       if ($sqlInstance.LinkedServersWithDomainReferences -and $sqlInstance.LinkedServersWithDomainReferences.Count -gt 0) {
         foreach($linkedServer in @($sqlInstance.LinkedServersWithDomainReferences)){
           if ($null -eq $linkedServer) { continue }
-          $matchedFieldsStr = if ($linkedServer.MatchedFields) { ($linkedServer.MatchedFields -join ', ') } else { 'Unknown' }
+          $matchedFieldsStr = 'Unknown'; if ($linkedServer.MatchedFields) { $matchedFieldsStr = ($linkedServer.MatchedFields -join ', ') }
           $sqlServerOldDomain += ("{0}: Linked Server {1} ({2})" -f $sqlInstance.InstanceName, $linkedServer.LinkedServerName, $matchedFieldsStr)
         }
       }
@@ -2442,7 +2458,7 @@ try {
       if ($sqlInstance.ConfigFilesWithDomainReferences -and $sqlInstance.ConfigFilesWithDomainReferences.Count -gt 0) {
         foreach($configFile in @($sqlInstance.ConfigFilesWithDomainReferences)){
           if ($null -eq $configFile) { continue }
-          $pathVal = if ($configFile.PSObject.Properties['FilePath']) { $configFile.FilePath } elseif ($configFile.PSObject.Properties['FullName']) { $configFile.FullName } else { [string]$configFile }
+          $pathVal = [string]$configFile; if ($configFile.PSObject.Properties['FilePath']) { $pathVal = $configFile.FilePath } elseif ($configFile.PSObject.Properties['FullName']) { $pathVal = $configFile.FullName }
           $sqlServerOldDomain += ("{0}: Config File {1}" -f $sqlInstance.InstanceName, $pathVal)
         }
       }
@@ -2466,14 +2482,14 @@ try {
     if ($applicationConfigFiles.FilesWithDomainReferences -and $applicationConfigFiles.FilesWithDomainReferences.Count -gt 0) {
       foreach($configFile in @($applicationConfigFiles.FilesWithDomainReferences)){
         if ($null -eq $configFile) { continue }
-        $pathVal = if ($configFile.PSObject.Properties['FilePath']) { $configFile.FilePath } elseif ($configFile.PSObject.Properties['FullName']) { $configFile.FullName } else { [string]$configFile }
+        $pathVal = [string]$configFile; if ($configFile.PSObject.Properties['FilePath']) { $pathVal = $configFile.FilePath } elseif ($configFile.PSObject.Properties['FullName']) { $pathVal = $configFile.FullName }
         $appConfigOldDomain += ("Config File: {0}" -f $pathVal)
       }
     }
     if ($applicationConfigFiles.FilesWithCredentials -and $applicationConfigFiles.FilesWithCredentials.Count -gt 0) {
       foreach($configFile in @($applicationConfigFiles.FilesWithCredentials)){
         if ($null -eq $configFile) { continue }
-        $pathVal = if ($configFile.PSObject.Properties['FilePath']) { $configFile.FilePath } elseif ($configFile.PSObject.Properties['FullName']) { $configFile.FullName } else { [string]$configFile }
+        $pathVal = [string]$configFile; if ($configFile.PSObject.Properties['FilePath']) { $pathVal = $configFile.FilePath } elseif ($configFile.PSObject.Properties['FullName']) { $pathVal = $configFile.FullName }
         $appConfigOldDomain += ("Config File (Credentials): {0}" -f $pathVal)
       }
     }

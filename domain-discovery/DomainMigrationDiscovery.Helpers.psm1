@@ -82,14 +82,14 @@ function Get-CredentialManagerDomainReferences {
           $props = Get-ItemProperty -Path $vaultKey.PSPath -ErrorAction SilentlyContinue
           if ($props) {
             # Check various property names that might contain target/username
-            $target = if ($props.Target) { [string]$props.Target } 
-                     elseif ($props.Name) { [string]$props.Name }
-                     elseif ($props.Resource) { [string]$props.Resource }
-                     else { $vaultKey.PSChildName }
-            
-            $userName = if ($props.UserName) { [string]$props.UserName }
-                        elseif ($props.User) { [string]$props.User }
-                        elseif ($props.Account) { [string]$props.Account }
+            $target = $vaultKey.PSChildName
+            if ($props.Target) { $target = [string]$props.Target }
+            elseif ($props.Name) { $target = [string]$props.Name }
+            elseif ($props.Resource) { $target = [string]$props.Resource }
+            $userName = $null
+            if ($props.UserName) { $userName = [string]$props.UserName }
+            elseif ($props.User) { $userName = [string]$props.User }
+            elseif ($props.Account) { $userName = [string]$props.Account }
           } else {
             $target = $vaultKey.PSChildName
           }
@@ -101,7 +101,7 @@ function Get-CredentialManagerDomainReferences {
             if ($target -and $DomainMatchers.Match($target)) { $hasDomainRef = $true }
             if (-not $hasDomainRef -and $userName -and $DomainMatchers.Match($userName)) { $hasDomainRef = $true }
             
-            $profileName = if ($ProfileSID) { $ProfileSID } else { $env:USERNAME }
+            $profileName = $env:USERNAME; if ($ProfileSID) { $profileName = $ProfileSID }
             $results += [pscustomobject]@{
               Profile = $profileName
               Target = $target
@@ -262,12 +262,13 @@ function Get-CertificatesWithDomainReferences {
           }
           
           # Return all certificates, but flag those with domain references
+          $notAfterVal = $null; if ($cert.NotAfter) { $notAfterVal = $cert.NotAfter.ToString('o') }
           $results += [pscustomobject]@{
             Store = $storePath
             Thumbprint = $cert.Thumbprint
             Subject = $subject
             Issuer = $issuer
-            NotAfter = if ($cert.NotAfter) { $cert.NotAfter.ToString('o') } else { $null }
+            NotAfter = $notAfterVal
             HasDomainReference = $hasDomainReference
             MatchedField = $matchedField
           }
@@ -801,11 +802,8 @@ function Get-SqlDomainReferences {
     $configFilesWithDomainRefs = @()
     
     # Build connection string
-    $serverName = if ($instanceName -eq $env:COMPUTERNAME) { 
-      $env:COMPUTERNAME 
-    } else { 
-      "$env:COMPUTERNAME\$instanceName" 
-    }
+    $serverName = "$env:COMPUTERNAME\$instanceName"
+    if ($instanceName -eq $env:COMPUTERNAME) { $serverName = $env:COMPUTERNAME }
     
     # Try SMO first (SQL Server Management Objects)
     $smoAvailable = $false
@@ -1438,10 +1436,11 @@ function Get-ApplicationConfigDomainReferences {
           }
         }
         if ($hasDomainRef -or $hasCredentials) {
+          $fileSizeVal = $null; if ($fileInfo) { $fileSizeVal = $fileInfo.Length }
           $fileResult = [pscustomobject]@{
             FilePath = $configFile.FullName
             FileName = $configFile.Name
-            FileSize = if ($fileInfo) { $fileInfo.Length } else { $null }
+            FileSize = $fileSizeVal
             HasDomainReference = $hasDomainRef
             HasCredentials = $hasCredentials
             MatchedLines = $linesToStore
@@ -1584,11 +1583,13 @@ function Get-EventLogDomainReferences {
             }
             $snippet = Hide-SensitiveText -InputString $snippet
             
+            $timeCreatedVal = $null; if ($event.TimeCreated) { $timeCreatedVal = $event.TimeCreated.ToString('o') }
+            $levelDisplayVal = $null; if ($event.LevelDisplayName) { $levelDisplayVal = $event.LevelDisplayName }
             $results += [pscustomobject]@{
               LogName = $logName
-              TimeCreated = if ($event.TimeCreated) { $event.TimeCreated.ToString('o') } else { $null }
+              TimeCreated = $timeCreatedVal
               Id = $event.Id
-              LevelDisplayName = if ($event.LevelDisplayName) { $event.LevelDisplayName } else { $null }
+              LevelDisplayName = $levelDisplayVal
               MessageSnippet = $snippet
             }
             
@@ -1746,6 +1747,7 @@ function Get-OracleDiscovery {
     }
   } catch {}
 
+  $errorsOut = $null; if ($errors.Count -gt 0) { $errorsOut = $errors }
   return [pscustomobject]@{
     OracleInstalled       = $oracleInstalled
     OracleVersion         = $oracleVersion
@@ -1756,7 +1758,7 @@ function Get-OracleDiscovery {
     OracleODBCDrivers     = $oracleOdbcDrivers
     TnsnamesFiles         = $tnsnamesFiles
     SqlNetConfigPaths     = $sqlNetConfigPaths
-    Errors                = if ($errors.Count -gt 0) { $errors } else { $null }
+    Errors                = $errorsOut
   }
 }
 
@@ -1862,6 +1864,7 @@ function Get-RDSLicensingDiscovery {
     $errors += $_.Exception.Message
   }
 
+  $rdsErrorsOut = $null; if ($errors.Count -gt 0) { $rdsErrorsOut = $errors }
   return [pscustomobject]@{
     IsRDSSessionHost          = $isRdsSessionHost
     RDSRoleInstalled          = $rdsRoleInstalled
@@ -1870,7 +1873,7 @@ function Get-RDSLicensingDiscovery {
     LicenseServerConfigured   = $licenseServers
     RDSLicensingEvidence      = $evidence
     IsRDSLicensingLikelyInUse = $isLikelyInUse
-    Errors                    = if ($errors.Count -gt 0) { $errors } else { $null }
+    Errors                    = $rdsErrorsOut
   }
 }
 
