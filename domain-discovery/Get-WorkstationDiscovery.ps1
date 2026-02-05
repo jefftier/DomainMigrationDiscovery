@@ -933,11 +933,8 @@ function Get-RegistryValueMultiView {
         'Users'         { [Microsoft.Win32.RegistryHive]::Users }
         'CurrentConfig' { [Microsoft.Win32.RegistryHive]::CurrentConfig }
     }
-    $views = if ([Environment]::Is64BitOperatingSystem) {
-        @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)
-    } else {
-        @([Microsoft.Win32.RegistryView]::Registry32)
-    }
+    $views = @([Microsoft.Win32.RegistryView]::Registry32)
+    if ([Environment]::Is64BitOperatingSystem) { $views = @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32) }
     foreach ($v in $views) {
         try {
             $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey($hiveEnum, $v)
@@ -992,11 +989,15 @@ function Get-RegistryValueMultiView {
 #>
 function New-OldDomainMatchers([string]$netbios,[string]$fqdn){
   $dn = ($fqdn -split '\.' | ForEach-Object { "DC=$_" }) -join ','
+  $netbiosRegex = $null; if ($netbios) { $netbiosRegex = [regex]::new("(?i)\b$([regex]::Escape($netbios))\b") }
+  $fqdnRegex = $null; if ($fqdn) { $fqdnRegex = [regex]::new("(?i)$([regex]::Escape($fqdn))") }
+  $upnRegex = $null; if ($fqdn) { $upnRegex = [regex]::new("(?i)@$([regex]::Escape($fqdn))$") }
+  $ldapDnRegex = $null; if ($fqdn) { $ldapDnRegex = [regex]::new("(?i)$([regex]::Escape($dn))") }
   $obj = [pscustomobject]@{
-    Netbios = if ($netbios) { [regex]::new("(?i)\b$([regex]::Escape($netbios))\b") } else { $null }
-    Fqdn    = if ($fqdn)   { [regex]::new("(?i)$([regex]::Escape($fqdn))") } else { $null }
-    Upn     = if ($fqdn)   { [regex]::new("(?i)@$([regex]::Escape($fqdn))$") } else { $null }
-    LdapDn  = if ($fqdn)   { [regex]::new("(?i)$([regex]::Escape($dn))") } else { $null }
+    Netbios = $netbiosRegex
+    Fqdn    = $fqdnRegex
+    Upn     = $upnRegex
+    LdapDn  = $ldapDnRegex
   }
   $null = $obj | Add-Member -MemberType ScriptMethod -Name Match -Value {
     param([string]$s)
@@ -1502,9 +1503,10 @@ function Get-LocalAdministratorsDetailed{
         $isGroup  = ($_.ObjectClass -eq 'Group')
         $domain,$account = $null,$null
         if ($nm -like '*\\*'){ $parts = $nm -split '\\',2; $domain=$parts[0]; $account=$parts[1] }
+        $typeStr = 'Local'; if ($isDomain) { $typeStr = 'Domain' }
         [pscustomobject]@{
           Name=$nm; SID=$sid; ObjectClass=$_.ObjectClass; PrincipalSource=$_.PrincipalSource;
-          Type=if($isDomain){'Domain'}else{'Local'}; IsGroup=$isGroup; IsDomain=$isDomain; IsBuiltIn=($nm -like 'BUILTIN\\*');
+          Type=$typeStr; IsGroup=$isGroup; IsDomain=$isDomain; IsBuiltIn=($nm -like 'BUILTIN\\*');
           Domain=$domain; Account=$account; IsDomainGroupLikely=($isDomain -and $isGroup); Source='Get-LocalGroupMember'
         }
       }
@@ -1533,9 +1535,10 @@ function Get-LocalAdministratorsDetailed{
       $domain,$account = $null,$null
       if ($resolved -like '*\\*'){ $parts = $resolved -split '\\',2; $domain=$parts[0]; $account=$parts[1] }
       $isDomainResolved = ($resolved -like '*\*') -and ($resolved -notlike "$env:COMPUTERNAME\*") -and ($resolved -notlike 'BUILTIN\*')
+      $typeStr = 'Local'; if ($isDomainResolved) { $typeStr = 'Domain' }
       [pscustomobject]@{
         Name=$resolved; SID=$sidVal; ObjectClass=$class; PrincipalSource='WinNT';
-        Type=if($isDomainResolved){'Domain'}else{'Local'}; IsGroup=($class -like '*Group*'); IsDomain=$isDomainResolved; IsBuiltIn=($resolved -like 'BUILTIN\*'); Domain=$domain; Account=$account; IsDomainGroupLikely=(($resolved -like '*\*') -and ($class -like '*Group*')); Source='ADSI'
+        Type=$typeStr; IsGroup=($class -like '*Group*'); IsDomain=$isDomainResolved; IsBuiltIn=($resolved -like 'BUILTIN\*'); Domain=$domain; Account=$account; IsDomainGroupLikely=(($resolved -like '*\*') -and ($class -like '*Group*')); Source='ADSI'
       }
     }
   } catch {}
@@ -1565,12 +1568,12 @@ function Get-OdbcFromRegPath([string]$regPath,[string]$scope){
     foreach($k in $rootKeys){
       try {
         $p = Get-ItemProperty $k.PSPath -ErrorAction Stop
-        $driver  = [string](if ($p.PSObject.Properties['Driver']) { $p.Driver } else { '' })
-        $server  = [string](if ($p.PSObject.Properties['Server']) { $p.Server } else { '' })
-        $database= [string](if ($p.PSObject.Properties['Database']) { $p.Database } else { '' })
-        $trusted = [string](if ($p.PSObject.Properties['Trusted_Connection']) { $p.Trusted_Connection } else { '' })
-        $uid     = [string](if ($p.PSObject.Properties['UID']) { $p.UID } else { '' })
-        $user    = [string](if ($p.PSObject.Properties['User']) { $p.User } else { '' })
+        if ($p.PSObject.Properties['Driver']) { $driver = [string]$p.Driver } else { $driver = '' }
+        if ($p.PSObject.Properties['Server']) { $server = [string]$p.Server } else { $server = '' }
+        if ($p.PSObject.Properties['Database']) { $database = [string]$p.Database } else { $database = '' }
+        if ($p.PSObject.Properties['Trusted_Connection']) { $trusted = [string]$p.Trusted_Connection } else { $trusted = '' }
+        if ($p.PSObject.Properties['UID']) { $uid = [string]$p.UID } else { $uid = '' }
+        if ($p.PSObject.Properties['User']) { $user = [string]$p.User } else { $user = '' }
         $account = ''
         if ($trusted -match '^(yes|true|1)$') { $account = 'Integrated' }
         elseif (-not [string]::IsNullOrWhiteSpace($uid)) { $account = $uid.Trim() }
@@ -1889,7 +1892,8 @@ try {
       if ($p.LocalPath -like 'C:\\Windows\\ServiceProfiles\\*' -or $p.LocalPath -like 'C:\\Windows\\System32\\Config\\SystemProfile*') { continue }
       $lut = Convert-LastUseTime $p.LastUseTime
       if ($lut -and $lut -lt $cutoffDate) { continue }
-      $profiles += [pscustomobject]@{ SID=$p.SID; LocalPath=$p.LocalPath; LastUseTime=if($lut){$lut.ToString('o')}else{$null}; Special=$p.Special }
+      $lastUseStr = $null; if ($lut) { $lastUseStr = $lut.ToString('o') }
+      $profiles += [pscustomobject]@{ SID=$p.SID; LocalPath=$p.LocalPath; LastUseTime=$lastUseStr; Special=$p.Special }
     }
   }
 
@@ -1899,7 +1903,8 @@ try {
   # Check registry for automatic logon settings that may contain domain references.
   # Scans both 64-bit and 32-bit registry views.
   $auto = Safe-Try {
-    $views = if ([Environment]::Is64BitOperatingSystem){ @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32) } else { @([Microsoft.Win32.RegistryView]::Registry32) }
+    $views = @([Microsoft.Win32.RegistryView]::Registry32)
+    if ([Environment]::Is64BitOperatingSystem) { $views = @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32) }
     foreach($v in $views){
       $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $v)
       $key = $base.OpenSubKey('SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon')
@@ -1921,7 +1926,8 @@ try {
   # - AppX packages (if IncludeAppx is enabled)
   $apps = @()
   $apps += Safe-Try {
-    $view = if ([Environment]::Is64BitOperatingSystem){ [Microsoft.Win32.RegistryView]::Registry64 } else { [Microsoft.Win32.RegistryView]::Registry32 }
+    $view = [Microsoft.Win32.RegistryView]::Registry32
+    if ([Environment]::Is64BitOperatingSystem) { $view = [Microsoft.Win32.RegistryView]::Registry64 }
     $root64 = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
     Get-UninstallItemsFromHive -root $root64
   } 'Apps HKLM'
@@ -2103,10 +2109,11 @@ try {
   # --------------------------------------------------------------------------------
   # OLE DB / .udl connections (machine paths only)
   # --------------------------------------------------------------------------------
+  $commonFiles = $null; if (Test-Path $env:ProgramFiles) { $commonFiles = Join-Path $env:ProgramFiles 'Common Files' }
   $oleDbDirs = @(
     $env:ProgramData,
     (Join-Path $env:ProgramData 'ODBC'),
-    (if (Test-Path $env:ProgramFiles) { Join-Path $env:ProgramFiles 'Common Files' } else { $null })
+    $commonFiles
   )
   $oleDbConnections = Safe-Try { Get-OleDbConnectionsFromDirectories -directoryPaths $oleDbDirs } 'OleDbConnections'
 
@@ -2185,9 +2192,9 @@ try {
       $t = $_
       $actions = @()
       foreach($a in @($t.Actions | Where-Object { $_ -ne $null })){
-        $typeName = if ($a -is [Microsoft.Management.Infrastructure.CimInstance]) { $a.CimClass.CimClassName } else { $a.GetType().Name }
+        if ($a -is [Microsoft.Management.Infrastructure.CimInstance]) { $typeName = $a.CimClass.CimClassName } else { $typeName = $a.GetType().Name }
         $p = $a.PSObject.Properties
-        $get = { param($n) if ($p[$n]) { $p[$n].Value } else { $null } }
+        $get = { param($n) $v = $p[$n]; switch ($true) { { $null -ne $v } { $v.Value } default { $null } } }
         $exec = & $get 'Execute'; if (-not $exec) { $exec = & $get 'Path' }
         $arguments = & $get 'Arguments'
         $workdir = (& $get 'WorkingDirectory'); if (-not $workdir) { $workdir = & $get 'WorkingDir' }
@@ -2349,7 +2356,7 @@ try {
   foreach($cm in @($credentialManager)){
     if ($null -eq $cm) { continue }
     if ($cm.HasDomainReference) {
-      $entry = if ($cm.Target) { $cm.Target } else { $cm.UserName }
+      $entry = $cm.UserName; if ($cm.Target) { $entry = $cm.Target }
       if ($cm.UserName) { $entry = "{0} ({1})" -f $entry, $cm.UserName }
       $credentialManagerOldDomain += ("{0}: {1}" -f $cm.Profile, $entry)
     }
@@ -2886,7 +2893,7 @@ function Get-SharedFoldersWithACL {
     $sharedFoldersErrors = $sharedFoldersResult.Errors
   } else {
     # Fallback for old format (if Safe-Try returns null or old structure)
-    $sharedFolders = if ($sharedFoldersResult) { $sharedFoldersResult } else { @() }
+    $sharedFolders = @(); if ($sharedFoldersResult) { $sharedFolders = $sharedFoldersResult }
     $sharedFoldersErrors = @()
   }
   $dnsConfiguration = Safe-Try { Get-DnsConfigurationForMigration -DomainMatchers $matchers -Log $script:log } 'Get-DnsConfigurationForMigration'
@@ -2914,11 +2921,12 @@ function Get-SharedFoldersWithACL {
     Version           = $ScriptVersion
   }
 
+  $osVersionStr = $null; if ($os) { $osVersionStr = "$( $os.Caption) $( $os.Version) (Build $( $os.BuildNumber))" }
   $sysInfo = [pscustomobject]@{
     Hostname     = $env:COMPUTERNAME
     Manufacturer = $system.Manufacturer
     Model        = $system.Model
-    OSVersion    = if ($os) { "$( $os.Caption) $( $os.Version) (Build $( $os.BuildNumber))" } else { $null }
+    OSVersion    = $osVersionStr
     IPAddress    = $ipStr
     MACAddress   = $macStr
     LoggedInUser = $system.UserName
@@ -2927,17 +2935,24 @@ function Get-SharedFoldersWithACL {
   # Determine which data to use based on SlimOutputOnly setting
   # When SlimOutputOnly is true, use filtered data; otherwise use full data
   # This ensures the JSON structure is identical regardless of the setting
-  $installedAppsData = if ($SlimOutputOnly) { $appsFiltered } else { (@($apps) | Sort-Object DisplayName,DisplayVersion -Unique) }
-  $servicesData = if ($SlimOutputOnly) { $servicesFiltered } else { $services }
-  $scheduledTasksData = if ($SlimOutputOnly) { $tasksFiltered } else { $tasks }
-  $printersData = if ($SlimOutputOnly) { $printersFiltered } else { $printers }
+  $installedAppsData = (@($apps) | Sort-Object DisplayName,DisplayVersion -Unique); if ($SlimOutputOnly) { $installedAppsData = $appsFiltered }
+  $servicesData = $services; if ($SlimOutputOnly) { $servicesData = $servicesFiltered }
+  $scheduledTasksData = $tasks; if ($SlimOutputOnly) { $scheduledTasksData = $tasksFiltered }
+  $printersData = $printers; if ($SlimOutputOnly) { $printersData = $printersFiltered }
+  $profilesOut = $profiles; if ($SlimOutputOnly) { $profilesOut = $null }
+  $localGroupMembersOut = $localGroupMembers; if ($SlimOutputOnly) { $localGroupMembersOut = $null }
+  $mappedDrivesOut = $driveMaps; if ($SlimOutputOnly) { $mappedDrivesOut = $null }
+  $odbcOut = $odbc; if ($SlimOutputOnly) { $odbcOut = $null }
+  $autoOut = $auto; if ($SlimOutputOnly) { $autoOut = $null }
+  $oracleOut = [pscustomobject]@{ OracleInstalled = $false; OracleVersion = $null; IsOracleServerLikely = $false; OracleServices = @(); OracleHomes = @(); OracleClientInstalled = $false; OracleODBCDrivers = @(); TnsnamesFiles = @(); SqlNetConfigPaths = @(); Errors = @('Discovery not run or failed') }; if ($oracleDiscovery) { $oracleOut = $oracleDiscovery }
+  $rdsOut = [pscustomobject]@{ IsRDSSessionHost = $false; RDSRoleInstalled = $null; RdsLicensingRoleInstalled = $false; LicensingMode = 'Unknown'; LicenseServerConfigured = @(); RDSLicensingEvidence = @(); IsRDSLicensingLikelyInUse = $false; Errors = @('Discovery not run or failed') }; if ($rdsLicensing) { $rdsOut = $rdsLicensing }
 
   # Build consistent JSON structure regardless of SlimOutputOnly setting
   # Properties that are only available in full mode are set to $null in slim mode
   $result = [pscustomobject]@{
     Metadata = $metadata
     System   = $sysInfo
-    Profiles = if ($SlimOutputOnly) { $null } else { $profiles }
+    Profiles = $profilesOut
     SharedFolders = [pscustomobject]@{
       Shares = $sharedFolders
       Errors = $sharedFoldersErrors
@@ -2945,14 +2960,14 @@ function Get-SharedFoldersWithACL {
     InstalledApps  = $installedAppsData
     Services       = $servicesData
     ScheduledTasks = $scheduledTasksData
-    LocalGroupMembers    = if ($SlimOutputOnly) { $null } else { $localGroupMembers }
+    LocalGroupMembers    = $localGroupMembersOut
     # Always include LocalAdministrators so Detection.OldDomain.LocalAdministratorsOldDomain has full context and workbooks can show the Local Administrator tab
     LocalAdministrators  = $localAdministrators
-    MappedDrives  = if ($SlimOutputOnly) { $null } else { $driveMaps }
+    MappedDrives  = $mappedDrivesOut
     Printers      = $printersData
-    OdbcDsn       = if ($SlimOutputOnly) { $null } else { $odbc }
+    OdbcDsn       = $odbcOut
     DatabaseConnections = $databaseConnections
-    AutoAdminLogon= if ($SlimOutputOnly) { $null } else { $auto }
+    AutoAdminLogon= $autoOut
     CredentialManager = $credentialManager
     Certificates = $certificates
     FirewallRules = $firewallRules
@@ -2963,8 +2978,8 @@ function Get-SharedFoldersWithACL {
     SqlServer = $sqlServerConfiguration
     EventLogDomainReferences = $eventLogDomainReferences
     ApplicationConfigFiles = $applicationConfigFiles
-    Oracle = if ($oracleDiscovery) { $oracleDiscovery } else { [pscustomobject]@{ OracleInstalled = $false; OracleVersion = $null; IsOracleServerLikely = $false; OracleServices = @(); OracleHomes = @(); OracleClientInstalled = $false; OracleODBCDrivers = @(); TnsnamesFiles = @(); SqlNetConfigPaths = @(); Errors = @('Discovery not run or failed') } }
-    RDSLicensing = if ($rdsLicensing) { $rdsLicensing } else { [pscustomobject]@{ IsRDSSessionHost = $false; RDSRoleInstalled = $null; RdsLicensingRoleInstalled = $false; LicensingMode = 'Unknown'; LicenseServerConfigured = @(); RDSLicensingEvidence = @(); IsRDSLicensingLikelyInUse = $false; Errors = @('Discovery not run or failed') } }
+    Oracle = $oracleOut
+    RDSLicensing = $rdsOut
     SecurityAgents = $securityAgents
     Detection     = [pscustomobject]@{ OldDomain = $flags; Summary = $summary }
   }
@@ -3045,7 +3060,7 @@ function Get-SharedFoldersWithACL {
     }
   } catch {
     # If JSON conversion or file write fails, generate error JSON instead
-    $errorMessage = if ($jsonConversionError) { "JSON conversion failed: $jsonConversionError" } else { "Failed to write JSON file: $($_.Exception.Message)" }
+    $errorMessage = "Failed to write JSON file: $($_.Exception.Message)"; if ($jsonConversionError) { $errorMessage = "JSON conversion failed: $jsonConversionError" }
     $script:log.Write("Fatal error during JSON output: $errorMessage", 'ERROR')
     
     # Generate error JSON structure (reuse the error generation logic from catch block)
@@ -3081,11 +3096,11 @@ function Get-SharedFoldersWithACL {
         CollectedAt = (Get-Date).ToString('o')
         UserContext = $env:USERNAME
         Domain = $domain
-        OldDomainFqdn = if ($OldDomainFqdn) { $OldDomainFqdn } else { $null }
-        OldDomainNetBIOS = if ($OldDomainNetBIOS) { $OldDomainNetBIOS } else { $null }
-        NewDomainFqdn = if ($NewDomainFqdn) { $NewDomainFqdn } else { $null }
-        ProfileDays = if ($ProfileDays) { $ProfileDays } else { $null }
-        PlantId = if ($PlantId) { $PlantId } else { $null }
+        OldDomainFqdn = $OldDomainFqdn
+        OldDomainNetBIOS = $OldDomainNetBIOS
+        NewDomainFqdn = $NewDomainFqdn
+        ProfileDays = $ProfileDays
+        PlantId = $PlantId
         Version = $ScriptVersion
       }
       System = [pscustomobject]@{
@@ -3244,8 +3259,8 @@ function Get-SharedFoldersWithACL {
 }
 catch {
   $errorMessage = $_.Exception.Message
-  $errorStackTrace = if ($_.ScriptStackTrace) { $_.ScriptStackTrace } else { $null }
-  $errorInnerException = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $null }
+  $errorStackTrace = $null; if ($_.ScriptStackTrace) { $errorStackTrace = $_.ScriptStackTrace }
+  $errorInnerException = $null; if ($_.Exception.InnerException) { $errorInnerException = $_.Exception.InnerException.Message }
   
   # Log full technical details to log file
   if ($script:log) {
@@ -3298,11 +3313,11 @@ catch {
         CollectedAt = (Get-Date).ToString('o')
         UserContext = $env:USERNAME
         Domain = $domain
-        OldDomainFqdn = if ($OldDomainFqdn) { $OldDomainFqdn } else { $null }
-        OldDomainNetBIOS = if ($OldDomainNetBIOS) { $OldDomainNetBIOS } else { $null }
-        NewDomainFqdn = if ($NewDomainFqdn) { $NewDomainFqdn } else { $null }
-        ProfileDays = if ($ProfileDays) { $ProfileDays } else { $null }
-        PlantId = if ($PlantId) { $PlantId } else { $null }
+        OldDomainFqdn = $OldDomainFqdn
+        OldDomainNetBIOS = $OldDomainNetBIOS
+        NewDomainFqdn = $NewDomainFqdn
+        ProfileDays = $ProfileDays
+        PlantId = $PlantId
         Version = $ScriptVersion
       }
       System = [pscustomobject]@{
@@ -3452,7 +3467,7 @@ catch {
     if ($EmitStdOut) {
       [pscustomobject]@{
         Computer = $hostname
-        PlantId = if ($PlantId) { $PlantId } else { $null }
+        PlantId = $PlantId
         HasError = $true
         ErrorMessage = $errorMessage
         CollectedAt = (Get-Date).ToString('o')
