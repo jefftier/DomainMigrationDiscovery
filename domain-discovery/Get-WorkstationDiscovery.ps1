@@ -628,14 +628,14 @@ function Get-HumanReadableError {
   )
   
   try {
-    $msg = if ($ErrorMessage -is [System.Exception]) {
+    if ($ErrorMessage -is [System.Exception]) {
       if ($null -ne $ErrorMessage -and $null -ne $ErrorMessage.Message) {
-        $ErrorMessage.Message
+        $msg = $ErrorMessage.Message
       } else {
-        "Unknown exception"
+        $msg = "Unknown exception"
       }
     } else {
-      [string]$ErrorMessage
+      $msg = [string]$ErrorMessage
     }
     
     if ([string]::IsNullOrWhiteSpace($msg)) {
@@ -720,14 +720,14 @@ function Test-IsActionableError {
   )
   
   try {
-    $msg = if ($ErrorMessage -is [System.Exception]) {
+    if ($ErrorMessage -is [System.Exception]) {
       if ($null -ne $ErrorMessage -and $null -ne $ErrorMessage.Message) {
-        $ErrorMessage.Message
+        $msg = $ErrorMessage.Message
       } else {
-        ""
+        $msg = ""
       }
     } else {
-      [string]$ErrorMessage
+      $msg = [string]$ErrorMessage
     }
     
     if ([string]::IsNullOrWhiteSpace($msg)) {
