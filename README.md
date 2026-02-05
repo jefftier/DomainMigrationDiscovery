@@ -7,7 +7,7 @@ A comprehensive toolkit for discovering domain migration readiness: scan worksta
 | Function | Folder | Purpose |
 |----------|--------|---------|
 | **Domain discovery** | `domain-discovery/` | Scan workstations for old domain references (services, tasks, credentials, etc.); run locally or remotely. |
-| **Workbook builder** | `workbook-builder/` | Build Excel workbooks from discovery JSON (CLI and GUI). [Download Windows EXE →](/actions/workflows/build-workbook-exe.yml) |
+| **Workbook builder** | `workbook-builder/` | Build Excel workbooks from discovery JSON (CLI and GUI). [Download Windows EXE →](/releases) |
 | **Security tools status** | `security-tools-status/` | Check CrowdStrike, Qualys, SCCM, and EnCase status on remote servers (CLI and GUI). |
 
 Shared config lives in `config/` (e.g. `config/migration-config.example.json`).

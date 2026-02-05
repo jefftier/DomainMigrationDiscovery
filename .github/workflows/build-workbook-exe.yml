@@ -1,5 +1,6 @@
-# When workbook-builder/ changes: build the EXE and publish it as a workflow artifact.
-# Download: Actions → latest successful run → Artifacts → DomainMigrationBuilder-exe.
+# When workbook-builder/ changes: build the EXE, publish to Releases, and upload artifact.
+# Download: Repo Releases page (public), or Actions → run → Artifacts.
+# If release step fails with 403: Settings → Actions → General → set "Read and write" for Workflow permissions.
 
 name: Build and publish workbook-builder EXE
 
@@ -16,6 +17,8 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write
     defaults:
       run:
         working-directory: workbook-builder
@@ -42,3 +45,9 @@ jobs:
         with:
           name: DomainMigrationBuilder-exe
           path: workbook-builder/dist/DomainMigrationBuilder.exe
+
+      - name: Create GitHub Release (push only)
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "exe-${{ github.run_number }}" dist/DomainMigrationBuilder.exe --title "Build ${{ github.run_number }}" --notes "Windows EXE built from main. Download DomainMigrationBuilder.exe from the Assets below."

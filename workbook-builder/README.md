@@ -2,7 +2,7 @@
 
 Build a single **Excel workbook** (`.xlsx`) from domain migration discovery **JSON** files. Use the **CLI** for scripts and automation or the **GUI** for interactive use. You can also package the GUI as a standalone Windows **EXE** so others can run it without Python.
 
-**→ [Download the latest Windows EXE](/actions/workflows/build-workbook-exe.yml)** — built on every change to this folder. Open the link, then pick the latest successful run → **Artifacts** → **DomainMigrationBuilder-exe**.
+**→ [Download the latest Windows EXE](/releases)** — built on every change to this folder. Open the latest release and download **DomainMigrationBuilder.exe** from Assets.
 
 ---
 
@@ -71,7 +71,7 @@ The builder reads all discovery JSON files in the input folder, keeps the **late
 
 ## CI: Building and publishing the EXE on GitHub
 
-When anything under `workbook-builder/` changes on `main` (or `master`), GitHub Actions builds the Windows EXE and publishes it as a workflow artifact. To get the EXE: open the repo **Actions** tab → latest successful run → **Artifacts** → download **DomainMigrationBuilder-exe**.
+When anything under `workbook-builder/` changes on `main` (or `master`), GitHub Actions builds the Windows EXE and publishes it as a **GitHub Release** (and as a workflow artifact). Download the EXE from the repo [Releases](/releases) page — open the latest release and get **DomainMigrationBuilder.exe** from Assets.
 
 ---
 
