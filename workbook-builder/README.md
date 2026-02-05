@@ -67,12 +67,9 @@ The builder reads all discovery JSON files in the input folder, keeps the **late
 
 ---
 
-## CI: Building the EXE on GitHub
+## CI: Building and publishing the EXE on GitHub
 
-GitHub Actions build the Windows EXE when anything under `workbook-builder/` changes on `main` (or `master`):
-
-- **Build workflow** (`.github/workflows/build-workbook-exe.yml`): runs on push and pull requests that touch `workbook-builder/**`. The EXE is uploaded as a workflow **artifact** — open the run in the Actions tab and download **DomainMigrationBuilder-exe**.
-- **Release workflow** (`.github/workflows/release-workbook-exe.yml`): runs when you push a **tag** like `v1.0.0`. It builds the EXE and creates a **GitHub Release** with the EXE attached. To publish a release: `git tag v1.0.0 && git push origin v1.0.0`.
+When anything under `workbook-builder/` changes on `main` (or `master`), GitHub Actions builds the Windows EXE and publishes it as a workflow artifact. To get the EXE: open the repo **Actions** tab → latest successful run → **Artifacts** → download **DomainMigrationBuilder-exe**.
 
 ---
 

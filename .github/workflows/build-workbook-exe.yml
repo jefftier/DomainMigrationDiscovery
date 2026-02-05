@@ -1,9 +1,7 @@
-# Build DomainMigrationBuilder.exe when workbook-builder changes.
-# Runs on: push to main/master or PR when files under workbook-builder/ change.
-# Artifacts: exe is uploaded so you can download it from the Actions run.
-# For versioned releases: push a tag (e.g. v1.0.0) — see release-workbook-exe.yml.
+# When workbook-builder/ changes: build the EXE and publish it as a workflow artifact.
+# Download: Actions → latest successful run → Artifacts → DomainMigrationBuilder-exe.
 
-name: Build workbook-builder EXE
+name: Build and publish workbook-builder EXE
 
 on:
   push:
