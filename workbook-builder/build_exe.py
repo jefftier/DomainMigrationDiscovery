@@ -12,6 +12,7 @@ Optional:
   pyinstaller --clean DomainMigrationBuilder.spec   # clean build
   pyinstaller --distpath ./release DomainMigrationBuilder.spec   # custom output dir
 """
+# CI: changes here trigger the build-and-release workflow.
 import subprocess
 import sys
 from pathlib import Path
