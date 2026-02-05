@@ -980,7 +980,7 @@ if ($UseParallel -and $script:CompatibilityMode -eq 'Full' -and $script:PSMajorV
 }
 
 if ($useParallelThreadJob) {
-    # Parallel path: Start-ThreadJob with throttle (PS 7+ with ThreadJob available)
+    # Parallel path: invoke ThreadJob via command object (avoids "term not recognized" in some hosts)
     $throttleLimit = 10
     $running = [System.Collections.ArrayList]::new()
     foreach ($server in $servers) {
@@ -989,7 +989,7 @@ if ($useParallelThreadJob) {
             foreach ($j in $completed) { $null = $running.Remove($j) }
             if ($running.Count -ge $throttleLimit) { Start-Sleep -Milliseconds 100 }
         }
-        $job = Start-ThreadJob -ScriptBlock $InvokeDiscoveryOnServerScriptBlock -ArgumentList @(
+        $job = & $startThreadJobCmd -ScriptBlock $InvokeDiscoveryOnServerScriptBlock -ArgumentList @(
             $server,
             $Credential,
             $scriptContent,
@@ -1008,8 +1008,8 @@ if ($useParallelThreadJob) {
         )
         $null = $running.Add($job)
     }
-    $running | Wait-Job | Out-Null
-    $running | Remove-Job -Force -ErrorAction SilentlyContinue
+    & $waitJobCmd -Job $running | Out-Null
+    & $removeJobCmd -Job $running -Force -ErrorAction SilentlyContinue
 }
 else {
     # Sequential path: PS 5.1 (with or without -UseParallel), PS 3–4, or ThreadJob not available
