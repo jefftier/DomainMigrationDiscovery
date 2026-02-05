@@ -1968,11 +1968,13 @@ try {
   $odbc = @()
   $odbc += Get-OdbcFromRegPath -regPath 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\ODBC\ODBC.INI' -scope 'Machine64'
   $odbc += Get-OdbcFromRegPath -regPath 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\ODBC\ODBC.INI' -scope 'Machine32'
-  # Machine-level File DSN directories
+  # Machine-level File DSN directories (avoid if-as-expression for strict hosts)
+  $fileDsnDirX86 = $null
+  if (${env:ProgramFiles(x86)}) { $fileDsnDirX86 = Join-Path ${env:ProgramFiles(x86)} 'Common Files\ODBC\Data Sources' }
   $fileDsnDirs = @(
     (Join-Path $env:ProgramData 'ODBC\Data Sources'),
     (Join-Path $env:ProgramFiles 'Common Files\ODBC\Data Sources'),
-    (if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} 'Common Files\ODBC\Data Sources' } else { $null })
+    $fileDsnDirX86
   )
   foreach ($dir in $fileDsnDirs) {
     if ($dir) { $odbc += Get-FileDsnFromDirectory -directoryPath $dir -scope 'FileDSN:Machine' }
