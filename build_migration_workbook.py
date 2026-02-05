@@ -316,15 +316,34 @@ MAX_EXCEL_CELL_LEN = 32767
 # Truncation suffix (Unicode ellipsis)
 _TRUNCATE_SUFFIX = "\u2026TRUNCATED"  # …TRUNCATED
 
-# Control characters disallowed in Excel XML: \x00-\x08, \x0B, \x0C, \x0E-\x1F
+# Control characters disallowed in Excel XML: \x00-\x08, \x0B, \x0C, \x0E-\x1F, \x7F (DEL)
+# Matches openpyxl ILLEGAL_CHARACTERS_RE plus \x7F for full XML 1.0 safety
 _EXCEL_ILLEGAL_CONTROL_RE = None
 
 
 def _get_excel_illegal_control_re():
     global _EXCEL_ILLEGAL_CONTROL_RE
     if _EXCEL_ILLEGAL_CONTROL_RE is None:
-        _EXCEL_ILLEGAL_CONTROL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+        try:
+            from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE as _OPENPYXL_RE
+            # Use openpyxl's pattern and add \x7F (DEL) for XML 1.0
+            _EXCEL_ILLEGAL_CONTROL_RE = re.compile(
+                _OPENPYXL_RE.pattern + r"|\x7F"
+            )
+        except Exception:
+            _EXCEL_ILLEGAL_CONTROL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
     return _EXCEL_ILLEGAL_CONTROL_RE
+
+
+def _sanitize_string_for_excel_header(s: str, max_len: Optional[int] = None) -> str:
+    """Strip illegal control chars from a string used as sheet name or column header."""
+    if not s or not isinstance(s, str):
+        return s
+    re_illegal = _get_excel_illegal_control_re()
+    out = re_illegal.sub("", s)
+    if max_len is not None and len(out) > max_len:
+        out = out[:max_len]
+    return out
 
 
 def _escape_excel_formula(value: str) -> str:
@@ -1616,13 +1635,41 @@ def write_excel(
     written = 0
     sanitization_modified_count = 0
 
-    def apply_sanitize_counted(series: Any, counter: list) -> Any:
-        def one(val: Any) -> Any:
+    def _is_string_like_column(ser: Any) -> bool:
+        """True if column may contain string values written as text to Excel."""
+        if ser.dtype == object:
+            return True
+        try:
+            return pd.api.types.is_string_dtype(ser)
+        except Exception:
+            return False
+
+    def apply_sanitize_logged(
+        series: Any, sheet_name: str, col_name: str, df_for_source: Any, counter: list
+    ) -> Any:
+        """Apply sanitization per cell and log each change for the log output."""
+        new_vals = []
+        has_source = "SourceFile" in df_for_source.columns
+        for idx in range(len(series)):
+            val = series.iloc[idx]
             out, modified = _sanitize_for_excel_track(val)
+            new_vals.append(out)
             if modified:
                 counter[0] += 1
-            return out
-        return series.apply(one)
+                source = (
+                    df_for_source.iloc[idx]["SourceFile"]
+                    if has_source
+                    else None
+                )
+                if source is None or (isinstance(source, float) and pd.isna(source)):
+                    source_str = "N/A"
+                else:
+                    source_str = str(source)
+                _log(
+                    f"Sanitized: sheet={sheet_name!r} column={col_name!r} row={idx + 1} "
+                    f"(source_file={source_str})"
+                )
+        return pd.Series(new_vals, index=series.index, name=series.name)
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         for sheet_name in final_sheet_order:
@@ -1659,12 +1706,16 @@ def write_excel(
                     )
                 raise RuntimeError(msg)
 
-            # Apply Excel-safe sanitization to ALL object columns immediately before to_excel
+            # Apply Excel-safe sanitization to ALL string-like columns immediately before to_excel
             mod_count = [0]
             for col in df.columns:
-                if df[col].dtype == object:
-                    df[col] = apply_sanitize_counted(df[col], mod_count)
+                if _is_string_like_column(df[col]):
+                    df[col] = apply_sanitize_logged(
+                        df[col], sheet_name, col, df, mod_count
+                    )
             sanitization_modified_count += mod_count[0]
+            if mod_count[0] > 0:
+                _log(f"Sheet {sheet_name!r}: {mod_count[0]} cell(s) sanitized for Excel.")
 
             core_cols = ["ComputerName", "PlantId", "CollectedAt"]
             if sheet_name == "Summary":
@@ -1703,9 +1754,21 @@ def write_excel(
             ordered.extend(cols)
             df = df[ordered]
 
-            safe_name = sheet_name[:31]
+            # Sanitize column names (headers) so they don't contain illegal Excel chars
+            sanitized_cols = [_sanitize_string_for_excel_header(str(c)) for c in df.columns]
+            if sanitized_cols != list(df.columns):
+                rename_map = {old: new for old, new in zip(df.columns, sanitized_cols) if old != new}
+                if rename_map:
+                    df = df.rename(columns=rename_map)
+                    for old_c, new_c in rename_map.items():
+                        _log(f"Sanitized column name: sheet={sheet_name!r} {old_c!r} -> {new_c!r}")
+
+            # Sanitize sheet name: illegal control chars and Excel-disallowed : \ / ? * [ ]
+            safe_name = _sanitize_string_for_excel_header(sheet_name, max_len=31)
             for ch in r'[]:*?/\\':
                 safe_name = safe_name.replace(ch, "_")
+            if safe_name != sheet_name:
+                _log(f"Sanitized sheet name: {sheet_name!r} -> {safe_name!r}")
 
             df.to_excel(writer, sheet_name=safe_name, index=False)
             written += 1
