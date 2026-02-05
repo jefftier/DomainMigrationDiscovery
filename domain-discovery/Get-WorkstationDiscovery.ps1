@@ -678,7 +678,11 @@ function Get-HumanReadableError {
   else {
     # Generic fallback - include actual message so remote callers (e.g. Invoke-MigrationDiscoveryRemotely) see the real error
     if ($Context) {
-      $shortMsg = if ($msg.Length -gt 500) { $msg.Substring(0, 497) + "..." } else { $msg }
+      if ($msg.Length -gt 500) {
+        $shortMsg = $msg.Substring(0, 497) + "..."
+      } else {
+        $shortMsg = $msg
+      }
       return "Error: $Context - $shortMsg"
     } else {
       return "Unexpected error - $msg"
