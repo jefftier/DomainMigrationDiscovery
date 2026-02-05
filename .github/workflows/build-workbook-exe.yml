@@ -1,0 +1,46 @@
+# Build DomainMigrationBuilder.exe when workbook-builder changes.
+# Runs on: push to main/master or PR when files under workbook-builder/ change.
+# Artifacts: exe is uploaded so you can download it from the Actions run.
+# For versioned releases: push a tag (e.g. v1.0.0) — see release-workbook-exe.yml.
+
+name: Build workbook-builder EXE
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'workbook-builder/**'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'workbook-builder/**'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: workbook-builder
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pandas openpyxl PySide6
+
+      - name: Build EXE
+        run: python build_exe.py
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DomainMigrationBuilder-exe
+          path: workbook-builder/dist/DomainMigrationBuilder.exe
