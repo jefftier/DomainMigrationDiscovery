@@ -15,6 +15,9 @@ import csv
 import os
 import re
 import sys
+import threading
+from dataclasses import dataclass
+from typing import Any, Callable, List, NamedTuple, Optional, Tuple
 
 # Check Python version before heavier imports so we can show a clear message
 if sys.version_info < (3, 8):
@@ -27,10 +30,24 @@ import json
 import argparse
 import datetime
 from collections import defaultdict
-from typing import List, NamedTuple, Optional
 
 # Minimum Python version required (3.8+ for datetime.fromisoformat behavior and modern pandas/openpyxl)
 _REQUIRED_PYTHON_VERSION = (3, 8)
+
+
+class CancelledError(Exception):
+    """Raised when the build is cancelled via cancel_event."""
+
+
+@dataclass
+class BuildResult:
+    """Result of build_workbook()."""
+
+    workbook_path: Optional[str]
+    report_path: Optional[str]
+    warnings: int
+    errors: int
+    cancelled: bool
 
 
 def _check_python_version():
@@ -74,7 +91,7 @@ def _check_dependencies():
 
 
 _check_dependencies()
-import pandas as pd
+import pandas as pd  # noqa: E402
 
 DEFAULT_INPUT_FOLDER = "results"
 
@@ -103,11 +120,19 @@ def parse_args():
              "If omitted, will infer from JSON Metadata.PlantId.",
     )
     parser.add_argument(
+        "--include-sourcefile",
+        action="store_true",
+        default=False,
+        dest="include_sourcefile",
+        help="Include SourceFile (and SourceComputerKey, SourceSection) in every sheet for traceability. "
+             "When off, provenance appears only in the Diagnostics sheet.",
+    )
+    parser.add_argument(
         "--debug-provenance",
         action="store_true",
         default=False,
-        help="Include SourceFile (and SourceComputerKey, SourceSection) in every sheet. "
-             "When off, provenance appears only in the Diagnostics sheet.",
+        dest="debug_provenance",
+        help="Alias for --include-sourcefile (include SourceFile in every sheet).",
     )
     parser.add_argument(
         "--validate-only",
@@ -148,13 +173,21 @@ def safe_iso_parse(value):
         return None
 
 
-def _load_json_file(fpath: str, strict_json: bool = False):
+def _load_json_file(
+    fpath: str,
+    strict_json: bool = False,
+    log_cb: Optional[Callable[[str], None]] = None,
+):
     """
     Load a JSON file with encoding fallback. Tries utf-8, then utf-8-sig.
     If decoding fails and not strict_json, falls back to cp1252 with errors="replace"
-    and logs a WARNING. On JSON parse failure, logs file path, exception type, and
+    and logs via log_cb. On JSON parse failure, logs file path, exception type, and
     a small excerpt around the error. Returns the parsed dict or None on any failure.
     """
+    def _log(msg: str) -> None:
+        if log_cb:
+            log_cb(msg)
+
     content = None
     for encoding in ("utf-8", "utf-8-sig"):
         try:
@@ -163,22 +196,19 @@ def _load_json_file(fpath: str, strict_json: bool = False):
             break
         except UnicodeDecodeError:
             continue
-    if content is None and not strict_json:
+    if content is None and strict_json:
+        raise ValueError(
+            f"Could not decode {fpath!r} as UTF-8. Use default encoding (omit --strict-json) or fix the file."
+        )
+    if content is None:
         try:
             with open(fpath, "r", encoding="cp1252", errors="replace") as f:
                 content = f.read()
-            print(
-                f"WARNING: Decoded {fpath} using cp1252 (replace); file was not valid UTF-8.",
-                file=sys.stderr,
-            )
+            _log(f"WARNING: Decoded {fpath} using cp1252 (replace); file was not valid UTF-8.")
         except Exception as e:
-            print(f"WARNING: Could not decode {fpath}: {type(e).__name__}: {e}", file=sys.stderr)
+            _log(f"WARNING: Could not decode {fpath}: {type(e).__name__}: {e}")
             return None
     if content is None:
-        print(
-            f"WARNING: Could not decode {fpath} as UTF-8. Use --strict-json to avoid fallback.",
-            file=sys.stderr,
-        )
         return None
 
     try:
@@ -193,35 +223,46 @@ def _load_json_file(fpath: str, strict_json: bool = False):
         if end < len(content):
             excerpt = excerpt + "..."
         excerpt_repr = repr(excerpt)
-        print(
-            f"WARNING: JSON parse failed for {fpath}: {type(e).__name__}: {e}",
-            file=sys.stderr,
-        )
-        print(f"  Excerpt around error (pos={e.pos}): {excerpt_repr}", file=sys.stderr)
+        _log(f"WARNING: JSON parse failed for {fpath}: {type(e).__name__}: {e}")
+        _log(f"  Excerpt around error (pos={e.pos}): {excerpt_repr}")
         return None
     except Exception as e:
-        print(
-            f"WARNING: JSON parse failed for {fpath}: {type(e).__name__}: {e}",
-            file=sys.stderr,
-        )
+        _log(f"WARNING: JSON parse failed for {fpath}: {type(e).__name__}: {e}")
         return None
 
 
-def load_latest_records(input_folder, explicit_plant_id=None, strict_json: bool = False):
+def load_latest_records(
+    input_folder: str,
+    explicit_plant_id: Optional[str] = None,
+    strict_json: bool = False,
+    cancel_event: Optional[threading.Event] = None,
+    log_cb: Optional[Callable[[str], None]] = None,
+):
     """
     Load all JSON files, group by ComputerName, and keep the latest snapshot
-    (by Metadata.CollectedAt). Returns dict: {computerName: data}.
+    (by Metadata.CollectedAt). Returns (records_with_provenance, plant_ids_seen).
     Optionally filter by PlantId if explicit_plant_id is provided.
+    Raises CancelledError if cancel_event is set.
+
+    Each record in records_with_provenance is a dict with:
+      - computer_key: str
+      - data: parsed JSON dict
+      - path: str  (full file path of the source JSON; preserved for provenance/traceability)
     """
     latest_by_computer = {}
     plant_ids_seen = set()
+    ev = cancel_event or threading.Event()
 
     for root, _, files in os.walk(input_folder):
+        if ev.is_set():
+            raise CancelledError()
         for fname in files:
+            if ev.is_set():
+                raise CancelledError()
             if not fname.lower().endswith(".json"):
                 continue
             fpath = os.path.join(root, fname)
-            data = _load_json_file(fpath, strict_json=strict_json)
+            data = _load_json_file(fpath, strict_json=strict_json, log_cb=log_cb)
             if data is None:
                 continue
 
@@ -232,7 +273,6 @@ def load_latest_records(input_folder, explicit_plant_id=None, strict_json: bool 
             collected_dt = safe_iso_parse(collected_raw)
 
             if explicit_plant_id and plant_id and plant_id != explicit_plant_id:
-                # Skip records from other plants if a specific plant is requested
                 continue
 
             if plant_id:
@@ -246,10 +286,8 @@ def load_latest_records(input_folder, explicit_plant_id=None, strict_json: bool 
                     "path": fpath,
                 }
             else:
-                # Keep the latest CollectedAt; if parsing fails, keep the first
                 prev_dt = existing.get("collected_dt")
                 if prev_dt is None and collected_dt is None:
-                    # Arbitrary; keep existing
                     continue
                 if prev_dt is None and collected_dt is not None:
                     latest_by_computer[comp_name] = {
@@ -264,9 +302,7 @@ def load_latest_records(input_folder, explicit_plant_id=None, strict_json: bool 
                             "collected_dt": collected_dt,
                             "path": fpath,
                         }
-                # else: collected_dt is None and prev_dt is not None -> keep existing
 
-    # Retain path (and key) for each record so provenance is available downstream
     records_with_provenance = [
         {"computer_key": k, "data": v["data"], "path": v["path"]}
         for k, v in latest_by_computer.items()
@@ -277,8 +313,12 @@ def load_latest_records(input_folder, explicit_plant_id=None, strict_json: bool 
 # Excel cell character limit (openpyxl/Excel)
 MAX_EXCEL_CELL_LEN = 32767
 
+# Truncation suffix (Unicode ellipsis)
+_TRUNCATE_SUFFIX = "\u2026TRUNCATED"  # …TRUNCATED
+
 # Control characters disallowed in Excel XML: \x00-\x08, \x0B, \x0C, \x0E-\x1F
 _EXCEL_ILLEGAL_CONTROL_RE = None
+
 
 def _get_excel_illegal_control_re():
     global _EXCEL_ILLEGAL_CONTROL_RE
@@ -287,12 +327,12 @@ def _get_excel_illegal_control_re():
     return _EXCEL_ILLEGAL_CONTROL_RE
 
 
-def escape_excel_formula(value):
+def _escape_excel_formula(value: str) -> str:
     """
     Prevent Excel formula injection: prefix string with apostrophe if it starts
     with =, +, -, or @ so the cell is treated as text, not a formula.
     """
-    if value is None or not isinstance(value, str):
+    if not value:
         return value
     s = value.strip()
     if s and s[0] in ("=", "+", "-", "@"):
@@ -300,47 +340,70 @@ def escape_excel_formula(value):
     return value
 
 
-def sanitize_for_excel(value):
+def sanitize_for_excel(value: Any) -> Any:
     """
     Make a value safe for Excel/openpyxl: strip illegal control chars, normalize
-    newlines, apply formula escaping, and truncate long strings. Prevents
+    newlines, escape formula injection, truncate long strings. Prevents
     openpyxl.utils.exceptions.IllegalCharacterError.
+
+    - None -> None
+    - str: remove [\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F], normalize newlines to \\n,
+      escape = + - @ at start, truncate to 32,767 chars and append '…TRUNCATED'
+    - dict/list: json.dumps then sanitize the string
+    - else: return value unchanged
+    """
+    out, _ = _sanitize_for_excel_track(value)
+    return out
+
+
+def _sanitize_for_excel_track(value: Any) -> Tuple[Any, bool]:
+    """
+    Same as sanitize_for_excel but returns (sanitized_value, was_modified).
+    Used to count how many values were changed for BuildResult.warnings.
     """
     if value is None:
-        return None
+        return None, False
     if isinstance(value, str):
         re_illegal = _get_excel_illegal_control_re()
         s = re_illegal.sub("", value)
         s = s.replace("\r\n", "\n").replace("\r", "\n")
+        truncated = False
         if len(s) > MAX_EXCEL_CELL_LEN:
-            suffix = "...TRUNCATED"
-            s = s[: MAX_EXCEL_CELL_LEN - len(suffix)] + suffix
-        return escape_excel_formula(s)
+            s = s[: MAX_EXCEL_CELL_LEN - len(_TRUNCATE_SUFFIX)] + _TRUNCATE_SUFFIX
+            truncated = True
+        s = _escape_excel_formula(s)
+        modified = s != value or truncated
+        return s, modified
     if isinstance(value, (dict, list)):
         s = json.dumps(value, ensure_ascii=False)
-        return sanitize_for_excel(s)
-    return value
+        out, inner_modified = _sanitize_for_excel_track(s)
+        return out, inner_modified
+    return value, False
 
 
-# Maximum length of value_repr in Issue (sample for report)
-_ISSUE_VALUE_REPR_MAX = 200
+# Maximum length of value_repr in preflight report (first ~100 chars)
+_PREFLIGHT_VALUE_REPR_MAX = 100
 
 
-class ExcelIllegalIssue(NamedTuple):
-    """One cell that contained Excel-illegal control characters."""
+class ExcelPreflightIssue(NamedTuple):
+    """
+    One preflight issue: illegal control characters or value exceeding Excel cell length.
+    Used for diagnostics report and fail-fast.
+    """
 
     sheet_name: str
     column: str
     row_index: int  # 0-based
-    computer_name: Optional[str]
+    value_repr: str  # repr of first ~100 chars
     source_file: Optional[str]
-    value_repr: str  # repr of a small slice
-    illegal_count: int
-    illegal_codepoints: str  # comma-separated hex, e.g. "0x0,0x1"
+    issue_kind: str  # "illegal_control" | "cell_length"
+    illegal_count: int  # 0 for cell_length issues
+    illegal_codepoints: str  # "" for cell_length issues
+    cell_length: int  # actual length when issue_kind=="cell_length"; 0 otherwise
 
 
 def _string_for_validation(value):  # noqa: C901
-    """Return string form of value for illegal-char check (str or json.dumps)."""
+    """Return string form of value for illegal-char/length check (str or json.dumps)."""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -350,17 +413,25 @@ def _string_for_validation(value):  # noqa: C901
     return str(value)
 
 
-def find_illegal_excel_chars(
-    df, sheet_name: str
-) -> List[ExcelIllegalIssue]:
+def _get_source_file_from_row(df, row_index: int) -> Optional[str]:
+    """Return SourceFile from row if column present."""
+    if "SourceFile" not in df.columns:
+        return None
+    sf = df.iloc[row_index]["SourceFile"]
+    if sf is None or (isinstance(sf, float) and pd.isna(sf)):
+        return None
+    return str(sf)
+
+
+def find_excel_issues(df: Any, sheet_name: str) -> List[ExcelPreflightIssue]:
     """
-    Scan a DataFrame (before sanitization) for Excel-illegal control characters.
-    Returns list of issues with sheet/col/row, computer_name/source_file when present,
-    value_repr (small slice), and illegal count/codepoints.
+    Preflight validation: detect issues BEFORE writing Excel.
+    - Excel-illegal control characters [\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]
+    - Values exceeding Excel cell length (32767)
+    Returns list of issues with sheet_name, column, row_index, value_repr (~100 chars), SourceFile if present.
     """
     re_illegal = _get_excel_illegal_control_re()
-    issues: List[ExcelIllegalIssue] = []
-    has_computer = "ComputerName" in df.columns
+    issues: List[ExcelPreflightIssue] = []
     has_source = "SourceFile" in df.columns
 
     for col in df.columns:
@@ -369,63 +440,75 @@ def find_illegal_excel_chars(
         for row_index in range(len(df)):
             val = df.iloc[row_index][col]
             s = _string_for_validation(val)
-            if not s:
-                continue
-            matches = re_illegal.findall(s)
-            if not matches:
-                continue
-            illegal_count = len(matches)
-            codepoints = ",".join(sorted(set(hex(ord(m)) for m in matches)))
-            sample = s[:_ISSUE_VALUE_REPR_MAX]
-            if len(s) > _ISSUE_VALUE_REPR_MAX:
+            source_file = _get_source_file_from_row(df, row_index) if has_source else None
+            sample = s[:_PREFLIGHT_VALUE_REPR_MAX]
+            if len(s) > _PREFLIGHT_VALUE_REPR_MAX:
                 sample += "..."
             value_repr = repr(sample)
-            computer_name = None
-            if has_computer:
-                cn = df.iloc[row_index]["ComputerName"]
-                if cn is not None and not (isinstance(cn, float) and pd.isna(cn)):
-                    computer_name = str(cn)
-            source_file = None
-            if has_source:
-                sf = df.iloc[row_index]["SourceFile"]
-                if sf is not None and not (isinstance(sf, float) and pd.isna(sf)):
-                    source_file = str(sf)
-            issues.append(
-                ExcelIllegalIssue(
-                    sheet_name=sheet_name,
-                    column=col,
-                    row_index=row_index,
-                    computer_name=computer_name,
-                    source_file=source_file,
-                    value_repr=value_repr,
-                    illegal_count=illegal_count,
-                    illegal_codepoints=codepoints,
+
+            # 1) Excel-illegal control characters
+            matches = re_illegal.findall(s)
+            if matches:
+                illegal_count = len(matches)
+                codepoints = ",".join(sorted(set(hex(ord(m)) for m in matches)))
+                issues.append(
+                    ExcelPreflightIssue(
+                        sheet_name=sheet_name,
+                        column=col,
+                        row_index=row_index,
+                        value_repr=value_repr,
+                        source_file=source_file,
+                        issue_kind="illegal_control",
+                        illegal_count=illegal_count,
+                        illegal_codepoints=codepoints,
+                        cell_length=0,
+                    )
                 )
-            )
+
+            # 2) Value exceeding Excel cell length
+            if len(s) > MAX_EXCEL_CELL_LEN:
+                issues.append(
+                    ExcelPreflightIssue(
+                        sheet_name=sheet_name,
+                        column=col,
+                        row_index=row_index,
+                        value_repr=value_repr,
+                        source_file=source_file,
+                        issue_kind="cell_length",
+                        illegal_count=0,
+                        illegal_codepoints="",
+                        cell_length=len(s),
+                    )
+                )
+
     return issues
 
 
-def write_sanitize_report_csv(issues: List[ExcelIllegalIssue], report_path: str) -> None:
-    """Write issues to a CSV report (sheet/row/col + source file + sample value)."""
+def write_sanitize_report_csv(
+    issues: List[ExcelPreflightIssue], report_path: str
+) -> None:
+    """Write preflight issues to <output>_excel_sanitize_report.csv."""
     if not issues:
         return
     with open(report_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow([
             "sheet_name", "column", "row_index", "row_display",
-            "computer_name", "source_file", "value_repr", "illegal_count", "illegal_codepoints",
+            "source_file", "value_repr", "issue_kind",
+            "illegal_count", "illegal_codepoints", "cell_length",
         ])
         for i in issues:
             w.writerow([
                 i.sheet_name,
                 i.column,
                 i.row_index,
-                i.row_index + 1,  # 1-based for display
-                i.computer_name or "",
+                i.row_index + 1,
                 i.source_file or "",
                 i.value_repr,
+                i.issue_kind,
                 i.illegal_count,
                 i.illegal_codepoints,
+                i.cell_length,
             ])
 
 
@@ -1461,25 +1544,32 @@ def flatten_record(computer_name, record, sheet_rows, source_file=None, source_c
 
 
 def write_excel(
-    sheet_rows,
-    output_path,
+    sheet_rows: dict,
+    output_path: str,
     fail_fast: bool = False,
     report_path: Optional[str] = None,
     emit_sanitize_report: bool = False,
-):
+    cancel_event: Optional[threading.Event] = None,
+    log_cb: Optional[Callable[[str], None]] = None,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+) -> Tuple[List[ExcelPreflightIssue], int]:
     """
     Write sheet_rows (dict of sheet_name -> list[dict]) to an XLSX file.
-    Before writing, validates each sheet for Excel-illegal characters; if fail_fast
-    and any issue is found, exits with a clear message. After sanitizing and writing,
-    if any issues were found, report_path is set, and emit_sanitize_report is True
-    (e.g. --debug), writes a CSV report.
+    Before writing each sheet, runs preflight validation (find_excel_issues): detects
+    Excel-illegal control characters and values exceeding cell length. If fail_fast and
+    any issue is found, raises RuntimeError. All object columns are sanitized immediately
+    before to_excel(). If any issues were found and emit_sanitize_report, writes
+    <output>_excel_sanitize_report.csv. Returns (issues, sanitization_modified_count).
     """
-    # Ensure output directory exists
+    def _log(msg: str) -> None:
+        if log_cb:
+            log_cb(msg)
+
+    ev = cancel_event or threading.Event()
     output_dir = os.path.dirname(output_path)
-    if output_dir:  # Only create if there's actually a directory path
+    if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    # Define sheet order - Summary first for quick overview; Diagnostics for provenance/errors
     preferred_order = [
         "Summary",
         "Diagnostics",
@@ -1516,81 +1606,91 @@ def write_excel(
         "SqlServer",
     ]
 
-    # Get all sheet names, prioritizing preferred order
     all_sheets = set(sheet_rows.keys())
     ordered_sheets = [s for s in preferred_order if s in all_sheets]
     remaining_sheets = sorted(all_sheets - set(preferred_order))
     final_sheet_order = ordered_sheets + remaining_sheets
+    total_sheets = len([s for s in final_sheet_order if sheet_rows.get(s)])
 
-    all_issues: List[ExcelIllegalIssue] = []
+    all_issues: List[ExcelPreflightIssue] = []
+    written = 0
+    sanitization_modified_count = 0
+
+    def apply_sanitize_counted(series: Any, counter: list) -> Any:
+        def one(val: Any) -> Any:
+            out, modified = _sanitize_for_excel_track(val)
+            if modified:
+                counter[0] += 1
+            return out
+        return series.apply(one)
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         for sheet_name in final_sheet_order:
+            if ev.is_set():
+                raise CancelledError()
             rows = sheet_rows.get(sheet_name, [])
             if not rows:
                 continue
             df = pd.DataFrame(rows)
 
-            # Validate for illegal chars before sanitizing (for report / fail-fast)
-            sheet_issues = find_illegal_excel_chars(df, sheet_name)
+            # Preflight validation before writing each sheet
+            sheet_issues = find_excel_issues(df, sheet_name)
             all_issues.extend(sheet_issues)
             if fail_fast and sheet_issues:
                 first = sheet_issues[0]
-                value_preview = (first.value_repr[:80] + "...") if len(first.value_repr) > 80 else first.value_repr
-                msg = (
-                    f"fail-fast: illegal Excel character(s) at sheet={first.sheet_name!r} "
-                    f"row={first.row_index + 1} col={first.column!r} "
-                    f"(illegal_count={first.illegal_count}). "
-                    f"source_file={first.source_file or 'N/A'} "
-                    f"value_repr={value_preview}"
+                value_preview = (
+                    (first.value_repr[:80] + "...") if len(first.value_repr) > 80 else first.value_repr
                 )
-                print(msg, file=sys.stderr)
-                sys.exit(1)
+                if first.issue_kind == "illegal_control":
+                    msg = (
+                        f"fail-fast: illegal Excel character(s) at sheet={first.sheet_name!r} "
+                        f"row={first.row_index + 1} col={first.column!r} "
+                        f"(illegal_count={first.illegal_count}). "
+                        f"source_file={first.source_file or 'N/A'} "
+                        f"value_repr={value_preview}"
+                    )
+                else:
+                    msg = (
+                        f"fail-fast: cell length exceeded at sheet={first.sheet_name!r} "
+                        f"row={first.row_index + 1} col={first.column!r} "
+                        f"(cell_length={first.cell_length}, max={MAX_EXCEL_CELL_LEN}). "
+                        f"source_file={first.source_file or 'N/A'} "
+                        f"value_repr={value_preview}"
+                    )
+                raise RuntimeError(msg)
 
-            # Sanitize all object columns: strip illegal control chars, normalize newlines,
-            # formula escaping, truncation (prevents IllegalCharacterError and formula injection)
+            # Apply Excel-safe sanitization to ALL object columns immediately before to_excel
+            mod_count = [0]
             for col in df.columns:
                 if df[col].dtype == object:
-                    df[col] = df[col].apply(sanitize_for_excel)
+                    df[col] = apply_sanitize_counted(df[col], mod_count)
+            sanitization_modified_count += mod_count[0]
 
-            # Core columns first if they exist (no Domain in base, only in Metadata)
             core_cols = ["ComputerName", "PlantId", "CollectedAt"]
-            # For Summary sheet, put key metrics first
             if sheet_name == "Summary":
-                summary_cols = ["HasOldDomainRefs", "PotentialServiceAccounts",
-                               "SqlServerInstalled", "SqlServerVersion",
-                               "IsOracleServerLikely", "OracleVersion",
-                               "RdsLicensingRoleInstalled",
-                               "CrowdStrike_Tenant",
-                               "Qualys_Tenant",
-                               "SCCM_Tenant", "SCCM_HasDomainReference", "SCCM_AllowedMPs", "SCCM_AllowedMPDomains",
-                               "Encase_Installed", "Encase_Tenant"]
+                summary_cols = [
+                    "HasOldDomainRefs", "PotentialServiceAccounts",
+                    "SqlServerInstalled", "SqlServerVersion",
+                    "IsOracleServerLikely", "OracleVersion",
+                    "RdsLicensingRoleInstalled",
+                    "CrowdStrike_Tenant", "Qualys_Tenant",
+                    "SCCM_Tenant", "SCCM_HasDomainReference", "SCCM_AllowedMPs", "SCCM_AllowedMPDomains",
+                    "Encase_Installed", "Encase_Tenant",
+                ]
                 core_cols = core_cols + [c for c in summary_cols if c in df.columns]
-            # For Diagnostics sheet, provenance first for traceability
             elif sheet_name == "Diagnostics":
                 core_cols = ["SourceFile", "SourceComputerKey", "ComputerName", "CollectedAt", "PlantId"]
-            # For Metadata sheet, include domain info
             elif sheet_name == "Metadata":
-                core_cols = ["ComputerName", "PlantId", "Domain", "OldDomainFqdn",
-                            "OldDomainNetBIOS", "NewDomainFqdn", "CollectedAt"]
-            # For ServiceAccountCandidates, put actionable columns first
+                core_cols = [
+                    "ComputerName", "PlantId", "Domain", "OldDomainFqdn",
+                    "OldDomainNetBIOS", "NewDomainFqdn", "CollectedAt",
+                ]
             elif sheet_name == "ServiceAccountCandidates":
                 action_cols = [
-                    "SourceType",
-                    "NeedsAttention",
-                    "IsOldDomainAccount",
-                    "IsDomainAccount",
-                    "AccountName",
-                    "AccountDomain",
-                    "AccountValue",
-                    # Context columns vary by source type
-                    "ServiceName",
-                    "DisplayName",
-                    "TaskPath",
-                    "AppPoolName",
-                    "InstanceName",
-                    "GroupName",
-                    "Target",
+                    "SourceType", "NeedsAttention", "IsOldDomainAccount", "IsDomainAccount",
+                    "AccountName", "AccountDomain", "AccountValue",
+                    "ServiceName", "DisplayName", "TaskPath", "AppPoolName",
+                    "InstanceName", "GroupName", "Target",
                 ]
                 core_cols = core_cols + [c for c in action_cols if c in df.columns]
 
@@ -1603,21 +1703,211 @@ def write_excel(
             ordered.extend(cols)
             df = df[ordered]
 
-            # Excel sheet names max 31 chars, no []:*?/\ etc.
             safe_name = sheet_name[:31]
             for ch in r'[]:*?/\\':
                 safe_name = safe_name.replace(ch, "_")
 
             df.to_excel(writer, sheet_name=safe_name, index=False)
+            written += 1
+            if progress_cb:
+                progress_cb(written, total_sheets)
 
     if all_issues and report_path and emit_sanitize_report:
         write_sanitize_report_csv(all_issues, report_path)
-        print(f"Sanitize report ({len(all_issues)} issue(s)): {report_path}", file=sys.stderr)
+        _log(f"Sanitize report ({len(all_issues)} issue(s)): {report_path}")
 
-    print(f"Wrote Excel workbook: {output_path}")
+    _log(f"Wrote Excel workbook: {output_path}")
+    return all_issues, sanitization_modified_count
 
 
-def main():
+# Sheet order used for validation and writing
+_PREFERRED_SHEET_ORDER = [
+    "Summary", "Diagnostics", "Metadata", "System", "ServiceAccountCandidates",
+    "Services", "ScheduledTasks", "LocalAdministrators", "Local Admin Membership",
+    "LocalGroupMembers", "MappedDrives", "Printers", "OdbcDsn", "CredentialManager",
+    "Certificates", "FirewallRules", "Profiles", "InstalledApps", "SharedFolders_Shares",
+    "SharedFolders_Errors", "DnsSuffixSearchList", "DnsAdapters", "AutoAdminLogon",
+    "EventLogDomainReferences", "ApplicationConfigFiles", "Config File Findings",
+    "Config Summary", "Oracle Summary", "Oracle Details", "RDS Licensing",
+    "SecurityAgents", "IIS", "SqlServer",
+]
+
+
+def build_workbook(
+    input_folder: str,
+    output_path: str,
+    *,
+    validate_only: bool = False,
+    sanitize: bool = False,
+    include_sourcefile: bool = False,
+    fail_fast: bool = False,
+    strict_json: bool = False,
+    cancel_event: Optional[threading.Event] = None,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+    log_cb: Optional[Callable[[str], None]] = None,
+    status_cb: Optional[Callable[[str], None]] = None,
+) -> BuildResult:
+    """
+    Build migration discovery workbook from JSON snapshots (GUI-safe).
+    All long-running loops check cancel_event; progress/log/status go only through callbacks.
+    """
+    warnings_count = [0]  # mutable so inner callbacks can increment
+
+    def _log(msg: str) -> None:
+        if msg.strip().startswith("WARNING") or "WARNING:" in msg:
+            warnings_count[0] += 1
+        if log_cb:
+            log_cb(msg)
+
+    def _status(msg: str) -> None:
+        if status_cb:
+            status_cb(msg)
+
+    ev = cancel_event or threading.Event()
+    workbook_path: Optional[str] = None
+    report_path: Optional[str] = None
+    errors_count = 0
+
+    try:
+        _status("Loading JSON files...")
+        records_with_provenance, plant_ids_seen = load_latest_records(
+            input_folder,
+            explicit_plant_id=None,
+            strict_json=strict_json,
+            cancel_event=ev,
+            log_cb=_log,
+        )
+
+        if not records_with_provenance:
+            _log("No JSON records found in input folder.")
+            return BuildResult(
+                workbook_path=None,
+                report_path=None,
+                warnings=warnings_count[0],
+                errors=0,
+                cancelled=False,
+            )
+
+        _status("Building sheet data...")
+        sheet_rows = defaultdict(list)
+        total = len(records_with_provenance)
+        for idx, item in enumerate(records_with_provenance):
+            if ev.is_set():
+                raise CancelledError()
+            if progress_cb and total:
+                progress_cb(idx, total)
+            comp_key = item["computer_key"]
+            record = item["data"]
+            path = item["path"]
+            flatten_record(
+                comp_key,
+                record,
+                sheet_rows,
+                source_file=path,
+                source_computer_key=comp_key,
+                debug_provenance=include_sourcefile,
+            )
+
+        for item in records_with_provenance:
+            if ev.is_set():
+                raise CancelledError()
+            meta = (item["data"] or {}).get("Metadata") or {}
+            sheet_rows["Diagnostics"].append({
+                "SourceFile": item["path"],
+                "SourceComputerKey": item["computer_key"],
+                "ComputerName": meta.get("ComputerName", item["computer_key"]),
+                "CollectedAt": meta.get("CollectedAt"),
+                "PlantId": meta.get("PlantId"),
+            })
+
+        output_dir = os.path.dirname(output_path)
+        base_name = os.path.splitext(os.path.basename(output_path))[0]
+        sanitize_report_path = os.path.join(
+            output_dir, base_name + "_excel_sanitize_report.csv"
+        )
+        validate_report_path = os.path.join(output_dir, "excel_validate_report.csv")
+
+        if validate_only:
+            _status("Validating sheets...")
+            all_sheets = set(sheet_rows.keys())
+            ordered_sheets = [s for s in _PREFERRED_SHEET_ORDER if s in all_sheets]
+            remaining_sheets = sorted(all_sheets - set(_PREFERRED_SHEET_ORDER))
+            final_sheet_order = ordered_sheets + remaining_sheets
+            all_issues = []
+            for sheet_name in final_sheet_order:
+                if ev.is_set():
+                    raise CancelledError()
+                rows = sheet_rows.get(sheet_name, [])
+                if not rows:
+                    continue
+                df = pd.DataFrame(rows)
+                all_issues.extend(find_excel_issues(df, sheet_name))
+            if all_issues:
+                write_sanitize_report_csv(all_issues, validate_report_path)
+                _log(f"Validation found {len(all_issues)} issue(s). Report: {validate_report_path}")
+                return BuildResult(
+                    workbook_path=None,
+                    report_path=validate_report_path,
+                    warnings=warnings_count[0],
+                    errors=len(all_issues),
+                    cancelled=False,
+                )
+            _log("Validation completed: no illegal Excel characters found.")
+            return BuildResult(
+                workbook_path=None,
+                report_path=None,
+                warnings=warnings_count[0],
+                errors=0,
+                cancelled=False,
+            )
+
+        _status("Writing workbook...")
+        workbook_path = output_path
+        report_path = sanitize_report_path if sanitize else None
+        all_issues, sanitization_count = write_excel(
+            sheet_rows,
+            output_path,
+            fail_fast=fail_fast,
+            report_path=sanitize_report_path,
+            emit_sanitize_report=sanitize,
+            cancel_event=ev,
+            log_cb=_log,
+            progress_cb=progress_cb,
+        )
+        warnings_count[0] += sanitization_count
+        errors_count = len(all_issues)
+        return BuildResult(
+            workbook_path=workbook_path,
+            report_path=report_path if all_issues and sanitize else None,
+            warnings=warnings_count[0],
+            errors=errors_count,
+            cancelled=False,
+        )
+
+    except CancelledError:
+        return BuildResult(
+            workbook_path=workbook_path if workbook_path else None,
+            report_path=report_path,
+            warnings=warnings_count[0],
+            errors=errors_count,
+            cancelled=True,
+        )
+    except RuntimeError as e:
+        if "fail-fast" in str(e):
+            if log_cb:
+                log_cb(str(e))
+            return BuildResult(
+                workbook_path=None,
+                report_path=None,
+                warnings=warnings_count[0],
+                errors=1,
+                cancelled=False,
+            )
+        raise
+
+
+def main() -> None:
+    """Thin CLI wrapper: parse args, call build_workbook(), print summary."""
     args = parse_args()
 
     input_path = os.path.abspath(os.path.normpath(args.input))
@@ -1630,18 +1920,21 @@ def main():
         print("Input folder not found: {}".format(args.input))
         sys.exit(1)
 
-    records_with_provenance, plant_ids_seen = load_latest_records(
-        input_path, explicit_plant_id=args.plant_id, strict_json=args.strict_json
-    )
-
-    if not records_with_provenance:
-        print(f"No JSON records found in {input_path}")
-        return
-
-    # Decide PlantId to use in file name
+    # Build output path (same logic as before)
     if args.plant_id:
         plant_for_name = args.plant_id
     else:
+        # Need to load once to get plant_ids for naming; use minimal load without callbacks
+        recs, plant_ids_seen = load_latest_records(
+            input_path,
+            explicit_plant_id=args.plant_id,
+            strict_json=args.strict_json,
+            cancel_event=None,
+            log_cb=None,
+        )
+        if not recs:
+            print(f"No JSON records found in {input_path}")
+            sys.exit(1)
         non_empty = {p for p in plant_ids_seen if p}
         if len(non_empty) == 1:
             plant_for_name = next(iter(non_empty))
@@ -1653,78 +1946,41 @@ def main():
     today_str = datetime.date.today().strftime("%Y%m%d")
     filename = f"{plant_for_name}_MigrationDiscovery_{today_str}.xlsx"
     output_path = os.path.join(args.output_dir, filename)
-    report_path = os.path.join(
-        args.output_dir,
-        os.path.splitext(filename)[0] + "_excel_sanitize_report.csv",
-    )
 
-    # Collect rows for each sheet (provenance included before writing so downstream reports can use it)
-    sheet_rows = defaultdict(list)
+    cancel_ev = threading.Event()
 
-    for item in records_with_provenance:
-        comp_key = item["computer_key"]
-        record = item["data"]
-        path = item["path"]
-        flatten_record(
-            comp_key,
-            record,
-            sheet_rows,
-            source_file=path,
-            source_computer_key=comp_key,
-            debug_provenance=args.debug_provenance,
-        )
+    def cli_log(msg: str) -> None:
+        print(msg, file=sys.stderr)
 
-    # Diagnostics sheet: one row per loaded record with SourceFile/SourceComputerKey for traceability
-    # (when --debug-provenance is off, this is the only sheet with SourceFile; when on, it's redundant but consistent)
-    for item in records_with_provenance:
-        meta = (item["data"] or {}).get("Metadata") or {}
-        sheet_rows["Diagnostics"].append({
-            "SourceFile": item["path"],
-            "SourceComputerKey": item["computer_key"],
-            "ComputerName": meta.get("ComputerName", item["computer_key"]),
-            "CollectedAt": meta.get("CollectedAt"),
-            "PlantId": meta.get("PlantId"),
-        })
+    def cli_status(msg: str) -> None:
+        print(msg, file=sys.stderr)
 
-    if args.validate_only:
-        # Scan all sheets, emit report CSV, do not write XLSX; exit non-zero if issues found
-        preferred_order = [
-            "Summary", "Diagnostics", "Metadata", "System", "ServiceAccountCandidates",
-            "Services", "ScheduledTasks", "LocalAdministrators", "Local Admin Membership",
-            "LocalGroupMembers", "MappedDrives", "Printers", "OdbcDsn", "CredentialManager",
-            "Certificates", "FirewallRules", "Profiles", "InstalledApps", "SharedFolders_Shares",
-            "SharedFolders_Errors", "DnsSuffixSearchList", "DnsAdapters", "AutoAdminLogon",
-            "EventLogDomainReferences", "ApplicationConfigFiles", "Config File Findings",
-            "Config Summary", "Oracle Summary", "Oracle Details", "RDS Licensing",
-            "SecurityAgents", "IIS", "SqlServer",
-        ]
-        all_sheets = set(sheet_rows.keys())
-        ordered_sheets = [s for s in preferred_order if s in all_sheets]
-        remaining_sheets = sorted(all_sheets - set(preferred_order))
-        final_sheet_order = ordered_sheets + remaining_sheets
-        all_issues: List[ExcelIllegalIssue] = []
-        for sheet_name in final_sheet_order:
-            rows = sheet_rows.get(sheet_name, [])
-            if not rows:
-                continue
-            df = pd.DataFrame(rows)
-            all_issues.extend(find_illegal_excel_chars(df, sheet_name))
-        validate_report_path = os.path.join(args.output_dir, "excel_validate_report.csv")
-        if all_issues:
-            write_sanitize_report_csv(all_issues, validate_report_path)
-            print(f"Validation found {len(all_issues)} issue(s). Report: {validate_report_path}", file=sys.stderr)
-            sys.exit(1)
-        print("Validation completed: no illegal Excel characters found.")
-        return
-
-    write_excel(
-        sheet_rows,
+    include_sourcefile = args.include_sourcefile or args.debug_provenance
+    result = build_workbook(
+        input_path,
         output_path,
+        validate_only=args.validate_only,
+        sanitize=args.debug,
+        include_sourcefile=include_sourcefile,
         fail_fast=args.fail_fast,
-        report_path=report_path,
-        emit_sanitize_report=args.debug,
+        strict_json=args.strict_json,
+        cancel_event=cancel_ev,
+        progress_cb=None,
+        log_cb=cli_log,
+        status_cb=cli_status,
     )
 
-
-if __name__ == "__main__":
-    main()
+    if result.cancelled:
+        print("Cancelled.", file=sys.stderr)
+        sys.exit(130)
+    if result.errors and args.validate_only:
+        print(f"Validation failed: {result.errors} issue(s).", file=sys.stderr)
+        sys.exit(1)
+    if result.workbook_path:
+        print(f"Wrote: {result.workbook_path}")
+    print(f"Warnings: {result.warnings}, Errors: {result.errors}")
+    if result.errors and not args.validate_only:
+        sys.exit(1)
+    if result.report_path:
+        print(f"Report: {result.report_path}", file=sys.stderr)
+    sys.exit(0)
