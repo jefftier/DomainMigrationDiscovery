@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Build a single Windows EXE for Domain Migration Builder (PyInstaller).
+Build a Windows EXE for Domain Migration Builder (PyInstaller).
 
 Usage (on Windows, with Python 3.8+ and deps installed):
   pip install pyinstaller pandas openpyxl PySide6
