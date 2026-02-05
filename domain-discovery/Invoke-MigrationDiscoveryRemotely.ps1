@@ -967,41 +967,56 @@ $ensureWinRmAndConnectScriptBlock = ${function:Ensure-WinRmAndConnect}
 
 # Full (PS 5.1+) path
 if ($script:CompatibilityMode -eq 'Full' -and $UseParallel) {
-    # PowerShell 7+ ForEach-Object -Parallel (only available in PS 7+)
-    # Check if -Parallel parameter is available
-    $parallelAvailable = $false
-    try {
-        $null = Get-Command ForEach-Object -ParameterName Parallel -ErrorAction Stop
-        $parallelAvailable = $true
+    # Use Start-ThreadJob for parallel execution (PS 7+). ForEach-Object -Parallel cannot accept
+    # script block variables via $using:, so we run the same script block via thread jobs and pass
+    # all arguments (including helper script blocks) via -ArgumentList. Throttle to 10 concurrent.
+    $threadJobAvailable = $false
+    if ($script:PSMajorVersion -ge 7) {
+        try {
+            $null = Get-Command Start-ThreadJob -ErrorAction Stop
+            $threadJobAvailable = $true
+        }
+        catch {
+            $threadJobAvailable = $false
+        }
     }
-    catch {
-        $parallelAvailable = $false
-    }
-    
-    if ($parallelAvailable) {
-        # ScriptParams already contains EmitStdOut if it was set, so it's available via $using:scriptParams
-        $servers | ForEach-Object -Parallel {
-            & $using:InvokeDiscoveryOnServerScriptBlock `
-                -ComputerName $_ `
-                -Credential $using:Credential `
-                -ScriptContent $using:scriptContent `
-                -ScriptParams $using:scriptParams `
-                -CollectorShare $using:CollectorShare `
-                -RemoteOutputRoot $using:RemoteOutputRoot `
-                -WriteErrorLogFunction $using:writeErrorLogScriptBlock `
-                -EnsureWinRmAndConnectFunction $using:ensureWinRmAndConnectScriptBlock `
-                -ConfigFile $using:ConfigFile `
-                -RemoteConfigPath $using:remoteConfigPath `
-                -CompatibilityMode $using:script:CompatibilityMode `
-                -AttemptWinRmHeal:$using:AttemptWinRmHeal `
-                -HelperModuleContent $using:helperModuleContent `
-                -RemoteRunDir $using:remoteRunDir `
-                -UseSmbForResults:$using:UseSmbForResults
-        } -ThrottleLimit 10
+
+    if ($threadJobAvailable) {
+        $throttleLimit = 10
+        $running = [System.Collections.ArrayList]::new()
+        foreach ($server in $servers) {
+            while ($running.Count -ge $throttleLimit) {
+                $completed = @($running | Where-Object { $_.State -ne 'Running' })
+                foreach ($j in $completed) { $null = $running.Remove($j) }
+                if ($running.Count -ge $throttleLimit) { Start-Sleep -Milliseconds 100 }
+            }
+            $job = Start-ThreadJob -ScriptBlock $InvokeDiscoveryOnServerScriptBlock -ArgumentList @(
+                $server,
+                $Credential,
+                $scriptContent,
+                $scriptParams,
+                $CollectorShare,
+                $RemoteOutputRoot,
+                $writeErrorLogScriptBlock,
+                $ensureWinRmAndConnectScriptBlock,
+                $ConfigFile,
+                $remoteConfigPath,
+                $script:CompatibilityMode,
+                [bool]$AttemptWinRmHeal.IsPresent,
+                $helperModuleContent,
+                $remoteRunDir,
+                [bool]$UseSmbForResults.IsPresent
+            )
+            $null = $running.Add($job)
+        }
+        $running | Wait-Job | Out-Null
+        $running | Remove-Job -Force -ErrorAction SilentlyContinue
     }
     else {
-        # Parallel not available, fall back to sequential
-        Write-Host "ForEach-Object -Parallel not available. Using sequential execution." -ForegroundColor Yellow
+        # Parallel not available (PS 5.1 or ThreadJob missing), fall back to sequential
+        if ($UseParallel) {
+            Write-Host "Parallel execution requires PowerShell 7+ with Start-ThreadJob. Using sequential execution." -ForegroundColor Yellow
+        }
         foreach ($server in $servers) {
             try {
                 & $InvokeDiscoveryOnServerScriptBlock `

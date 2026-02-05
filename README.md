@@ -439,7 +439,7 @@ DEV-SERVER02
 
 - The launcher script will prompt for credentials if not already running with appropriate permissions
 - Remote servers must have the discovery script accessible (either locally or via a network share)
-- The `-UseParallel` switch uses PowerShell 7+ `ForEach-Object -Parallel` with a throttle limit of 10 concurrent executions
+- The `-UseParallel` switch uses PowerShell 7+ `Start-ThreadJob` with a throttle limit of 10 concurrent executions
 - If a server is unreachable or discovery fails, execution continues with the remaining servers
 - JSON files are copied using `Copy-Item -FromSession` or via C$ admin share access
 - The script automatically retrieves the actual computer name from remote systems to match JSON filenames
