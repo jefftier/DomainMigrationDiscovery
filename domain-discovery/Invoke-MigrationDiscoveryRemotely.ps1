@@ -33,6 +33,10 @@ param(
     [System.Management.Automation.PSCredential]$Credential  # Optional: if not provided, will prompt or use current user
 )
 
+# Ensure core cmdlets (Get-Date, Write-Host, Test-Path, Write-Error, etc.) are available in constrained or minimal runspaces.
+$null = Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue
+$null = Import-Module Microsoft.PowerShell.Management -ErrorAction SilentlyContinue
+
 # PowerShell version compatibility bootstrap
 if (-not $PSVersionTable -or -not $PSVersionTable.PSVersion) {
     Write-Error "Unable to determine PowerShell version. This script requires at least PowerShell 3.0."
@@ -133,16 +137,16 @@ function Write-ErrorLog {
         $script:ErrorLogPath = Join-Path $resultsDir "error.log"
     }
     
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    # Use .NET for timestamp so error logging works even when Get-Date is not available (constrained runspace)
+    $timestamp = [DateTime]::Now.ToString("yyyy-MM-dd HH:mm:ss")
     $logEntry = "[$timestamp] [$ServerName] [$ErrorType] $ErrorMessage"
-    
+
     try {
         Add-Content -Path $script:ErrorLogPath -Value $logEntry -ErrorAction SilentlyContinue
     }
     catch {
-        # If we can't write to the log file, at least try to write to console
-        Write-Warning "Failed to write to error log: $($_.Exception.Message)"
-        Write-Warning $logEntry
+        try { Write-Warning "Failed to write to error log: $($_.Exception.Message)" } catch { [Console]::Error.WriteLine("Failed to write to error log") }
+        try { Write-Warning $logEntry } catch { [Console]::Error.WriteLine($logEntry) }
     }
 }
 
@@ -291,7 +295,7 @@ function Get-WinRmFailureCategory {
 # WinRM Auto-Heal Behavior:
 # - When -AttemptWinRmHeal is NOT provided: Tests WinRM connectivity once. If it fails, logs the error and returns.
 # - When -AttemptWinRmHeal IS provided: Tests WinRM connectivity. If it fails with a WinRM service error (not auth/network),
-#   attempts to start the WinRM service on the remote system using: Get-Service -Name winrm -ComputerName $ComputerName | Set-Service -Status Running
+#   attempts to start the WinRM service on the remote system (PS 5.1: Get-Service/Set-Service -ComputerName; PS 6+: Get-CimInstance/Invoke-CimMethod)
 #   After starting the service, waits 5 seconds, verifies the service is running, then retries the connectivity test once.
 #   Authentication errors and network errors are never healed - only WinRM service errors are candidates for healing.
 #
@@ -394,41 +398,71 @@ function Ensure-WinRmAndConnect {
                 return $result
             }
             
-            # Step 4: Attempt to start WinRM service
-            Write-Host "[$ComputerName] Attempting to start WinRM service via Get-Service -Name winrm -ComputerName $ComputerName | Set-Service -Status Running..." -ForegroundColor Yellow
+            # Step 4: Attempt to start WinRM service on remote computer
+            # PS 5.1: Get-Service/Set-Service support -ComputerName. PS 6+ (Core/7): -ComputerName removed; use CIM.
+            Write-Host "[$ComputerName] Attempting to start WinRM service on remote computer..." -ForegroundColor Yellow
             $serviceStarted = $false
-            
+
             try {
-                # Use the exact command that works manually
-                # Get-Service -Name winrm -ComputerName $ComputerName | Set-Service -Status Running
-                $service = Get-Service -Name winrm -ComputerName $ComputerName -ErrorAction Stop
-                
-                if ($service.Status -eq 'Running') {
-                    Write-Host "[$ComputerName] WinRM service is already running." -ForegroundColor Green
-                    $serviceStarted = $true
-                }
-                else {
-                    # Execute the exact pipeline command
-                    Get-Service -Name winrm -ComputerName $ComputerName | Set-Service -Status Running -ErrorAction Stop
-                    
-                    # Wait a short period for the service to start
-                    Start-Sleep -Seconds 10
-                    
-                    # Re-check the service status
-                    $serviceCheck = Get-Service -Name winrm -ComputerName $ComputerName -ErrorAction Stop
-                    if ($serviceCheck.Status -eq 'Running') {
-                        Write-Host "[$ComputerName] WinRM service successfully started; retrying WinRM connectivity..." -ForegroundColor Green
+                if ($PSVersionTable.PSVersion.Major -le 5) {
+                    # Windows PowerShell 5.1: use *-Service -ComputerName
+                    $service = Get-Service -Name winrm -ComputerName $ComputerName -ErrorAction Stop
+                    if ($service.Status -eq 'Running') {
+                        Write-Host "[$ComputerName] WinRM service is already running." -ForegroundColor Green
                         $serviceStarted = $true
                     }
                     else {
-                        $errorMsg = "WinRM heal failed; service not running after attempt. Status: $($serviceCheck.Status)"
-                        Write-Warning "[$ComputerName] WinRM heal failed"
-                        if ($WriteErrorLogFunction) {
-                            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "WINRM_HEAL_ERROR"
+                        Get-Service -Name winrm -ComputerName $ComputerName | Set-Service -Status Running -ErrorAction Stop
+                        Start-Sleep -Seconds 10
+                        $serviceCheck = Get-Service -Name winrm -ComputerName $ComputerName -ErrorAction Stop
+                        if ($serviceCheck.Status -eq 'Running') {
+                            Write-Host "[$ComputerName] WinRM service successfully started; retrying WinRM connectivity..." -ForegroundColor Green
+                            $serviceStarted = $true
                         }
-                        $result.ErrorCategory = $failureCategory
-                        $result.ErrorMessage = $errorMsg
-                        return $result
+                        else {
+                            $errorMsg = "WinRM heal failed; service not running after attempt. Status: $($serviceCheck.Status)"
+                            Write-Warning "[$ComputerName] WinRM heal failed"
+                            if ($WriteErrorLogFunction) {
+                                & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "WINRM_HEAL_ERROR"
+                            }
+                            $result.ErrorCategory = $failureCategory
+                            $result.ErrorMessage = $errorMsg
+                            return $result
+                        }
+                    }
+                }
+                else {
+                    # PowerShell 6+ (Core/7): -ComputerName removed from *-Service; use CIM (works on Windows)
+                    $cimParams = @{
+                        ClassName    = 'Win32_Service'
+                        Filter       = "Name='winrm'"
+                        ComputerName = $ComputerName
+                        ErrorAction  = 'Stop'
+                    }
+                    if ($Credential) { $cimParams['Credential'] = $Credential }
+                    $svc = Get-CimInstance @cimParams
+                    if ($svc.State -eq 'Running') {
+                        Write-Host "[$ComputerName] WinRM service is already running." -ForegroundColor Green
+                        $serviceStarted = $true
+                    }
+                    else {
+                        $null = Invoke-CimMethod -InputObject $svc -MethodName StartService -ErrorAction Stop
+                        Start-Sleep -Seconds 10
+                        $svcCheck = Get-CimInstance @cimParams
+                        if ($svcCheck.State -eq 'Running') {
+                            Write-Host "[$ComputerName] WinRM service successfully started; retrying WinRM connectivity..." -ForegroundColor Green
+                            $serviceStarted = $true
+                        }
+                        else {
+                            $errorMsg = "WinRM heal failed; service not running after attempt. State: $($svcCheck.State)"
+                            Write-Warning "[$ComputerName] WinRM heal failed"
+                            if ($WriteErrorLogFunction) {
+                                & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "WINRM_HEAL_ERROR"
+                            }
+                            $result.ErrorCategory = $failureCategory
+                            $result.ErrorMessage = $errorMsg
+                            return $result
+                        }
                     }
                 }
             }
@@ -558,6 +592,10 @@ $InvokeDiscoveryOnServerScriptBlock = {
         [string]$RemoteRunDir,
         [switch]$UseSmbForResults
     )
+
+    # Ensure core cmdlets (Get-Date, Write-Host, Test-Path, etc.) are available when this block runs in a thread-job runspace (PS 7 parallel).
+    $null = Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue
+    $null = Import-Module Microsoft.PowerShell.Management -ErrorAction SilentlyContinue
 
     # Determine compatibility mode locally (don't rely on script-level variables)
     if (-not $CompatibilityMode) {
