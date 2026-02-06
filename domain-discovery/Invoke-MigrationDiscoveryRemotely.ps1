@@ -1056,7 +1056,7 @@ if (-not $useParallelThreadJob -or $parallelFailed) {
         }
         catch {
             $errorMsg = "Unexpected error processing server: $($_.Exception.Message)"
-            Write-ErrorLog -ServerName $server -ErrorMessage $errorMsg -ErrorType "FATAL"
+            & $writeErrorLogScriptBlock -ServerName $server -ErrorMessage $errorMsg -ErrorType "FATAL"
             Write-Warning "[$server] $errorMsg"
         }
     }
