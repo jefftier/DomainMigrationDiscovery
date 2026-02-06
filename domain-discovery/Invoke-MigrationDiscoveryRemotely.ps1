@@ -696,6 +696,7 @@ $InvokeDiscoveryOnServerScriptBlock = {
         $remoteScriptBlock = {
             param($HelperModuleContent, $RemoteRunDir, $ScriptContent, $ScriptParams, $RemoteOutputRoot)
             $ErrorActionPreference = 'Stop'
+            try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force -ErrorAction Stop } catch { }
             if (-not (Test-Path -LiteralPath $RemoteRunDir)) {
                 New-Item -Path $RemoteRunDir -ItemType Directory -Force | Out-Null
             }
@@ -800,6 +801,7 @@ $InvokeDiscoveryOnServerScriptBlock = {
     $remoteScriptBlock = {
         param($HelperModuleContent, $RemoteRunDir, $ScriptContent, $ScriptParams)
         $ErrorActionPreference = 'Stop'
+        try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force -ErrorAction Stop } catch { }
         if (-not (Test-Path -LiteralPath $RemoteRunDir)) {
             New-Item -Path $RemoteRunDir -ItemType Directory -Force | Out-Null
         }
