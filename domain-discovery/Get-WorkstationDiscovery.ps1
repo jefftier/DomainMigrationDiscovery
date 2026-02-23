@@ -1247,12 +1247,12 @@ function Get-SCCMTenantInfo {
         
         if ($foundDomains.Count -gt 0) {
             $hasDomainReference = $true
-            # Determine tenant: if OldDomain found, report as "OldDomain", if NewDomain found, report as "NewDomain"
+            # Determine tenant: report actual domain FQDN when found
             # If both found, prioritize NewDomain
             if ($foundDomains -contains $NewDomainFqdn) {
-                $sccmTenant = 'NewDomain'
+                $sccmTenant = $NewDomainFqdn
             } elseif ($foundDomains -contains $OldDomainFqdn) {
-                $sccmTenant = 'OldDomain'
+                $sccmTenant = $OldDomainFqdn
             } else {
                 # Found a domain but it's not one we're tracking - report the first found
                 $sccmTenant = $foundDomains[0]
@@ -1439,7 +1439,7 @@ function Get-SecurityAgentsTenantInfo {
 
     # Encase
     $encaseInfo = Get-EncaseTenantInfo -Log $Log -EncaseRegistryPaths $EncaseRegistryPaths
-    $sccmOldDomainName = $null; if ($sccmInfo.Tenant -eq 'OldDomain') { $sccmOldDomainName = $OldDomainFqdn }
+    $sccmOldDomainName = $null; if ($sccmInfo.Tenant -eq $OldDomainFqdn) { $sccmOldDomainName = $OldDomainFqdn }
 
     $csKind = $null; if ($cs) { $csKind = $cs.Kind }
     $csRaw = $null; if ($cs -and $cs.PSObject.Properties['Raw']) { if ($cs.Kind -eq 'Binary') { $csRaw = [System.BitConverter]::ToString([byte[]]$cs.Raw) } else { $csRaw = $cs.Raw } }
@@ -2153,7 +2153,6 @@ try {
     $questODMAD = [pscustomobject]@{
       Installed    = $false
       AgentVersion = $null
-      InstallPath  = $null
       OtherValues  = $null
       Errors       = @('Discovery not run or failed')
     }
@@ -2569,6 +2568,31 @@ try {
   }
 
   # --------------------------------------------------------------------------------
+  # Summary: last reboot and installed .NET versions
+  # --------------------------------------------------------------------------------
+  $lastRebootTime = $null
+  if ($os -and $os.LastBootUpTime) { $lastRebootTime = $os.LastBootUpTime.ToString('o') }
+  $installedDotNetVersions = @()
+  try {
+    $ndpPaths = @(
+      'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP',
+      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\NET Framework Setup\NDP'
+    )
+    foreach ($ndpRoot in $ndpPaths) {
+      if (-not (Test-Path -LiteralPath $ndpRoot -ErrorAction SilentlyContinue)) { continue }
+      Get-ChildItem -Path $ndpRoot -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+        try {
+          $version = (Get-ItemProperty -LiteralPath $_.PSPath -Name Version -ErrorAction SilentlyContinue).Version
+          if ($version) { $installedDotNetVersions += $version }
+        } catch { }
+      }
+    }
+    $installedDotNetVersions = @($installedDotNetVersions | Sort-Object -Unique)
+  } catch {
+    if ($script:log) { $script:log.Write("Get .NET versions: $($_.Exception.Message)", 'WARN') }
+  }
+
+  # --------------------------------------------------------------------------------
   # Build Summary Object
   # --------------------------------------------------------------------------------
   # Create summary with counts and overall detection status
@@ -2576,6 +2600,8 @@ try {
   function Get-CountSafe { param($x) @(@($x) | Where-Object { $_ -ne $null -and $_ -ne '' } | Sort-Object -Unique).Count }
   $summary = [pscustomobject]@{
     HasOldDomainRefs = ((Get-CountSafe $flags.ServicesRunAsOldDomain) -or (Get-CountSafe $flags.ServicesOldPathRefs) -or (Get-CountSafe $tasksWithOldAccounts) -or (Get-CountSafe $tasksWithOldActionRefs) -or (Get-CountSafe $taskCombined) -or (Get-CountSafe $flags.DriveMapsToOldDomain) -or (Get-CountSafe $flags.LocalGroupsOldDomainMembers) -or (Get-CountSafe $flags.PrintersToOldDomain) -or (Get-CountSafe $flags.OdbcOldDomain) -or (Get-CountSafe $flags.LocalAdministratorsOldDomain) -or (Get-CountSafe $flags.CredentialManagerOldDomain) -or (Get-CountSafe $flags.CertificatesOldDomain) -or (Get-CountSafe $flags.FirewallRulesOldDomain) -or (Get-CountSafe $flags.IISSitesOldDomain) -or (Get-CountSafe $flags.IISAppPoolsOldDomain) -or (Get-CountSafe $flags.SqlServerOldDomain) -or (Get-CountSafe $flags.EventLogDomainReferences) -or (Get-CountSafe $flags.ApplicationConfigFilesOldDomain) -or (Get-CountSafe $flags.DatabaseConnectionsOldDomain))
+    LastRebootTime = $lastRebootTime
+    InstalledDotNetVersions = $installedDotNetVersions
     Counts = [pscustomobject]@{
       Services       = (Get-CountSafe $flags.ServicesRunAsOldDomain)
       ServicesPath   = (Get-CountSafe $flags.ServicesOldPathRefs)
@@ -3034,7 +3060,7 @@ function Get-SharedFoldersWithACL {
     Oracle = $oracleOut
     RDSLicensing = $rdsOut
     PhysicalDisks = if ($physicalDisks) { $physicalDisks } else { [pscustomobject]@{ Disks = @(); Errors = @('Discovery not run or failed') } }
-    QuestODMAD = if ($questODMAD) { $questODMAD } else { [pscustomobject]@{ Installed = $false; AgentVersion = $null; InstallPath = $null; OtherValues = $null; Errors = @('Discovery not run or failed') } }
+    QuestODMAD = if ($questODMAD) { $questODMAD } else { [pscustomobject]@{ Installed = $false; AgentVersion = $null; OtherValues = $null; Errors = @('Discovery not run or failed') } }
     SecurityAgents = $securityAgents
     Detection     = [pscustomobject]@{ OldDomain = $flags; Summary = $summary }
   }
@@ -3193,7 +3219,7 @@ function Get-SharedFoldersWithACL {
       Oracle = [pscustomobject]@{ OracleInstalled = $false; OracleVersion = $null; IsOracleServerLikely = $false; OracleServices = @(); OracleHomes = @(); OracleClientInstalled = $false; OracleODBCDrivers = @(); TnsnamesFiles = @(); SqlNetConfigPaths = @(); Errors = $null }
       RDSLicensing = [pscustomobject]@{ IsRDSSessionHost = $false; RDSRoleInstalled = $null; RdsLicensingRoleInstalled = $false; LicensingMode = 'Unknown'; LicenseServerConfigured = @(); RDSLicensingEvidence = @(); IsRDSLicensingLikelyInUse = $false; Errors = $null }
       PhysicalDisks = [pscustomobject]@{ Disks = @(); Errors = $null }
-      QuestODMAD = [pscustomobject]@{ Installed = $false; AgentVersion = $null; InstallPath = $null; OtherValues = $null; Errors = $null }
+      QuestODMAD = [pscustomobject]@{ Installed = $false; AgentVersion = $null; OtherValues = $null; Errors = $null }
       SecurityAgents = [pscustomobject]@{
         CrowdStrike = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }
         Qualys = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }
@@ -3208,6 +3234,8 @@ function Get-SharedFoldersWithACL {
         OldDomain = @{}
         Summary = [pscustomobject]@{
           HasOldDomainRefs = $false
+          LastRebootTime = $null
+          InstalledDotNetVersions = @()
           Counts = [pscustomobject]@{
             Services = 0; ServicesPath = 0; TaskPrincipals = 0; TaskActions = 0; Tasks = 0
             DriveMaps = 0; LocalGroups = 0; Printers = 0; ODBC = 0; LocalAdmins = 0
@@ -3267,6 +3295,8 @@ function Get-SharedFoldersWithACL {
       CrowdStrikeTenant = $securityAgents.CrowdStrike.Tenant
       QualysTenant      = $securityAgents.Qualys.Tenant
       SCCMTenant        = $securityAgents.SCCM.Tenant
+      LastRebootTime    = $summary.LastRebootTime
+      InstalledDotNetVersions = $summary.InstalledDotNetVersions
       CountServices     = $summary.Counts.Services
       CountServicesPath = $summary.Counts.ServicesPath
       CountTaskPrincipals = $summary.Counts.TaskPrincipals
@@ -3424,7 +3454,7 @@ catch {
       Oracle = [pscustomobject]@{ OracleInstalled = $false; OracleVersion = $null; IsOracleServerLikely = $false; OracleServices = @(); OracleHomes = @(); OracleClientInstalled = $false; OracleODBCDrivers = @(); TnsnamesFiles = @(); SqlNetConfigPaths = @(); Errors = $null }
       RDSLicensing = [pscustomobject]@{ IsRDSSessionHost = $false; RDSRoleInstalled = $null; RdsLicensingRoleInstalled = $false; LicensingMode = 'Unknown'; LicenseServerConfigured = @(); RDSLicensingEvidence = @(); IsRDSLicensingLikelyInUse = $false; Errors = $null }
       PhysicalDisks = [pscustomobject]@{ Disks = @(); Errors = $null }
-      QuestODMAD = [pscustomobject]@{ Installed = $false; AgentVersion = $null; InstallPath = $null; OtherValues = $null; Errors = $null }
+      QuestODMAD = [pscustomobject]@{ Installed = $false; AgentVersion = $null; OtherValues = $null; Errors = $null }
       SecurityAgents = [pscustomobject]@{
         CrowdStrike = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }
         Qualys = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }
@@ -3445,6 +3475,8 @@ catch {
         OldDomain = @{}
         Summary = [pscustomobject]@{
           HasOldDomainRefs = $false
+          LastRebootTime = $null
+          InstalledDotNetVersions = @()
           Counts = [pscustomobject]@{
             Services = 0
             ServicesPath = 0

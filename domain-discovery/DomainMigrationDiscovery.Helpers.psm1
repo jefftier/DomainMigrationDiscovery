@@ -1877,7 +1877,7 @@ function Get-RDSLicensingDiscovery {
   }
 }
 
-}
+
 
 function Get-PhysicalDisksDiscovery {
   [CmdletBinding()]
@@ -1950,7 +1950,6 @@ function Get-QuestODMADDiscovery {
   param([Parameter(Mandatory = $false)] $Log)
   $installed = $false
   $agentVersion = $null
-  $installPath = $null
   $otherValues = @{}
   $errors = @()
   $regPaths = @(
@@ -1973,8 +1972,6 @@ function Get-QuestODMADDiscovery {
           $installed = $true
           $agentVersion = $key.GetValue($versionValueName)
           if ($agentVersion) { $agentVersion = [string]$agentVersion }
-          $installPath = $key.GetValue('InstallPath')
-          if ($installPath) { $installPath = [string]$installPath }
           foreach ($valueName in $key.GetValueNames()) {
             if ($valueName -eq $versionValueName) { continue }
             $val = $key.GetValue($valueName)
@@ -2001,8 +1998,6 @@ function Get-QuestODMADDiscovery {
             $installed = $true
             $agentVersion = $key.GetValue($versionValueName)
             if ($agentVersion) { $agentVersion = [string]$agentVersion }
-            $installPath = $key.GetValue('InstallPath')
-            if ($installPath) { $installPath = [string]$installPath }
             foreach ($valueName in $key.GetValueNames()) {
               if ($valueName -eq $versionValueName) { continue }
               $val = $key.GetValue($valueName)
@@ -2029,7 +2024,6 @@ function Get-QuestODMADDiscovery {
   return [pscustomobject]@{
     Installed     = $installed
     AgentVersion  = $agentVersion
-    InstallPath   = $installPath
     OtherValues   = if ($otherValues.Count -gt 0) { $otherValues } else { $null }
     Errors        = if ($errors.Count -gt 0) { $errors } else { $null }
   }

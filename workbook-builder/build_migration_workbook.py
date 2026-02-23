@@ -750,6 +750,9 @@ def flatten_record(computer_name, record, sheet_rows, source_file=None, source_c
     row_det = base.copy()
     row_det["HasOldDomainRefs"] = summary.get("HasOldDomainRefs")
     row_det["PotentialServiceAccounts"] = potential_service_account_count
+    row_det["LastRebootTime"] = summary.get("LastRebootTime")
+    _dotnet = summary.get("InstalledDotNetVersions")
+    row_det["InstalledDotNetVersions"] = "; ".join(_dotnet) if isinstance(_dotnet, list) and _dotnet else None
     
     # Add security agent status information (output data only, no issue flags)
     row_det["CrowdStrike_Tenant"] = crowdstrike.get("Tenant")
@@ -820,7 +823,6 @@ def flatten_record(computer_name, record, sheet_rows, source_file=None, source_c
         _quest = {}
     row_det["QuestODMAD_Installed"] = _quest.get("Installed", False)
     row_det["QuestODMAD_Version"] = _quest.get("AgentVersion")
-    row_det["QuestODMAD_InstallPath"] = _quest.get("InstallPath")
     ov = _quest.get("OtherValues")
     row_det["QuestODMAD_OtherValues"] = json.dumps(ov) if isinstance(ov, dict) and ov else None
 
@@ -1808,6 +1810,7 @@ def write_excel(
             if sheet_name == "Summary":
                 summary_cols = [
                     "HasOldDomainRefs", "PotentialServiceAccounts",
+                    "LastRebootTime", "InstalledDotNetVersions",
                     "SqlServerInstalled", "SqlServerVersion",
                     "IsOracleServerLikely", "OracleVersion",
                     "RdsLicensingRoleInstalled",

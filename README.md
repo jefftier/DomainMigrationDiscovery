@@ -1074,7 +1074,8 @@ The Excel workbook includes the following sheets:
      - `SCCM_Tenant`, `SCCM_HasDomainReference`, and `SCCM_Issue`
      - `Encase_Installed`, `Encase_Tenant`, and `Encase_Issue`
    - **Physical disks**: `PhysicalDisks_Count`, `PhysicalDisks_TotalCapacityGB`, `PhysicalDisks_TotalFreeGB`
-   - **Quest ODMAD agent**: `QuestODMAD_Installed`, `QuestODMAD_Version`, `QuestODMAD_InstallPath`, `QuestODMAD_OtherValues` (other registry values if present)
+   - **Summary**: `LastRebootTime`, `InstalledDotNetVersions` (installed .NET Framework versions)
+   - **Quest ODMAD agent**: `QuestODMAD_Installed`, `QuestODMAD_Version`, `QuestODMAD_OtherValues` (other registry values if present)
    - Count columns for each discovery category
 
 2. **Metadata** - Complete metadata including domain information (OldDomainFqdn, OldDomainNetBIOS, NewDomainFqdn)
