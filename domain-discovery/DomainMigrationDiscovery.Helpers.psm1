@@ -1877,4 +1877,162 @@ function Get-RDSLicensingDiscovery {
   }
 }
 
-Export-ModuleMember -Function Hide-SensitiveText, Get-SqlServerPresence, Get-CredentialManagerDomainReferences, Get-CertificatesWithDomainReferences, Get-FirewallRulesWithDomainReferences, Get-IISDomainReferences, Get-SqlDomainReferences, Get-EventLogDomainReferences, Get-ApplicationConfigDomainReferences, Get-DatabaseConnectionsFromConfigFile, Get-OracleDiscovery, Get-RDSLicensingDiscovery
+}
+
+function Get-PhysicalDisksDiscovery {
+  [CmdletBinding()]
+  param([Parameter(Mandatory = $false)] $Log)
+  $disks = @()
+  $errors = @()
+  try {
+    $physicalDrives = Get-CimInstance Win32_DiskDrive -ErrorAction SilentlyContinue
+    if (-not $physicalDrives) {
+      $physicalDrives = Get-WmiObject -Class Win32_DiskDrive -ErrorAction SilentlyContinue
+    }
+    if (-not $physicalDrives) {
+      $errors += 'Win32_DiskDrive not available'
+      return [pscustomobject]@{
+        Disks  = @()
+        Errors = $errors
+      }
+    }
+    foreach ($d in @($physicalDrives)) {
+      $sizeBytes = [uint64]$d.Size
+      $freeBytes = [uint64]0
+      try {
+        $partitions = Get-CimAssociatedInstance -InputObject $d -ResultClassName Win32_DiskPartition -ErrorAction SilentlyContinue
+        if (-not $partitions) {
+          $partitions = Get-WmiObject -Query "ASSOCIATORS OF {Win32_DiskDrive.DeviceID='$($d.DeviceID.Replace('\','\\'))'} WHERE ResultClass=Win32_DiskPartition" -ErrorAction SilentlyContinue
+        }
+        foreach ($p in @($partitions)) {
+          $logicals = Get-CimAssociatedInstance -InputObject $p -ResultClassName Win32_LogicalDisk -ErrorAction SilentlyContinue
+          if (-not $logicals) {
+            $logicals = Get-WmiObject -Query "ASSOCIATORS OF {Win32_DiskPartition.DeviceID='$($p.DeviceID.Replace('\','\\'))'} WHERE ResultClass=Win32_LogicalDisk" -ErrorAction SilentlyContinue
+          }
+          foreach ($l in @($logicals)) {
+            if ($null -ne $l.FreeSpace) { $freeBytes += [uint64]$l.FreeSpace }
+          }
+        }
+      } catch {
+        $errors += "Disk $($d.DeviceID) free space: $($_.Exception.Message)"
+      }
+      $sizeGB = if ($sizeBytes -gt 0) { [math]::Round($sizeBytes / 1GB, 2) } else { $null }
+      $freeGB = if ($freeBytes -gt 0 -or $sizeBytes -gt 0) { [math]::Round($freeBytes / 1GB, 2) } else { $null }
+      $disks += [pscustomobject]@{
+        DeviceID   = $d.DeviceID
+        Model      = $d.Model
+        SizeBytes  = $sizeBytes
+        FreeBytes  = $freeBytes
+        SizeGB     = $sizeGB
+        FreeSpaceGB = $freeGB
+      }
+    }
+  } catch {
+    $errors += $_.Exception.Message
+    if ($Log) { $Log.Write("Get-PhysicalDisksDiscovery: $($_.Exception.Message)", 'ERROR') }
+  }
+  return [pscustomobject]@{
+    Disks  = $disks
+    Errors = if ($errors.Count -gt 0) { $errors } else { $null }
+  }
+}
+
+function Get-QuestODMADDiscovery {
+  <#
+  .SYNOPSIS
+    Detects Quest On Demand Migration For Active Directory (ODMAD) device agent and reads version and related registry data.
+  .DESCRIPTION
+    Checks HKLM\SOFTWARE\WOW6432Node\Quest\On Demand Migration For Active Directory\ODMAD_AD (64-bit OS) and
+    HKLM\SOFTWARE\Quest\On Demand Migration For Active Directory\ODMAD_AD (32-bit or native). Reads AgentVersion (REG_SZ)
+    and any other values under that key for reporting.
+  #>
+  [CmdletBinding()]
+  param([Parameter(Mandatory = $false)] $Log)
+  $installed = $false
+  $agentVersion = $null
+  $installPath = $null
+  $otherValues = @{}
+  $errors = @()
+  $regPaths = @(
+    'SOFTWARE\WOW6432Node\Quest\On Demand Migration For Active Directory\ODMAD_AD',
+    'SOFTWARE\Quest\On Demand Migration For Active Directory\ODMAD_AD'
+  )
+  $versionValueName = 'AgentVersion'
+  try {
+    $view64 = [Microsoft.Win32.RegistryView]::Registry64
+    try {
+      $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view64)
+    } catch {
+      $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Default)
+    }
+    foreach ($path in $regPaths) {
+      try {
+        $key = $baseKey.OpenSubKey($path)
+        if (-not $key) { continue }
+        try {
+          $installed = $true
+          $agentVersion = $key.GetValue($versionValueName)
+          if ($agentVersion) { $agentVersion = [string]$agentVersion }
+          $installPath = $key.GetValue('InstallPath')
+          if ($installPath) { $installPath = [string]$installPath }
+          foreach ($valueName in $key.GetValueNames()) {
+            if ($valueName -eq $versionValueName) { continue }
+            $val = $key.GetValue($valueName)
+            if ($null -ne $val) {
+              if ($val -is [byte[]]) { $otherValues[$valueName] = [Convert]::ToBase64String($val) }
+              else { $otherValues[$valueName] = $val }
+            }
+          }
+          break
+        } finally {
+          $key.Close()
+        }
+      } catch {
+        $errors += "Registry $path : $($_.Exception.Message)"
+      }
+    }
+    if (-not $installed) {
+      $baseKey32 = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
+      foreach ($path in $regPaths) {
+        try {
+          $key = $baseKey32.OpenSubKey($path)
+          if (-not $key) { continue }
+          try {
+            $installed = $true
+            $agentVersion = $key.GetValue($versionValueName)
+            if ($agentVersion) { $agentVersion = [string]$agentVersion }
+            $installPath = $key.GetValue('InstallPath')
+            if ($installPath) { $installPath = [string]$installPath }
+            foreach ($valueName in $key.GetValueNames()) {
+              if ($valueName -eq $versionValueName) { continue }
+              $val = $key.GetValue($valueName)
+              if ($null -ne $val) {
+                if ($val -is [byte[]]) { $otherValues[$valueName] = [Convert]::ToBase64String($val) }
+                else { $otherValues[$valueName] = $val }
+              }
+            }
+            break
+          } finally {
+            $key.Close()
+          }
+        } catch {
+          $errors += "Registry32 $path : $($_.Exception.Message)"
+        }
+      }
+      $baseKey32.Dispose()
+    }
+    $baseKey.Dispose()
+  } catch {
+    $errors += $_.Exception.Message
+    if ($Log) { $Log.Write("Get-QuestODMADDiscovery: $($_.Exception.Message)", 'ERROR') }
+  }
+  return [pscustomobject]@{
+    Installed     = $installed
+    AgentVersion  = $agentVersion
+    InstallPath   = $installPath
+    OtherValues   = if ($otherValues.Count -gt 0) { $otherValues } else { $null }
+    Errors        = if ($errors.Count -gt 0) { $errors } else { $null }
+  }
+}
+
+Export-ModuleMember -Function Hide-SensitiveText, Get-SqlServerPresence, Get-CredentialManagerDomainReferences, Get-CertificatesWithDomainReferences, Get-FirewallRulesWithDomainReferences, Get-IISDomainReferences, Get-SqlDomainReferences, Get-EventLogDomainReferences, Get-ApplicationConfigDomainReferences, Get-DatabaseConnectionsFromConfigFile, Get-OracleDiscovery, Get-RDSLicensingDiscovery, Get-PhysicalDisksDiscovery, Get-QuestODMADDiscovery

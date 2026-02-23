@@ -2131,6 +2131,35 @@ try {
   } 'RDSLicensing'
 
   # --------------------------------------------------------------------------------
+  # Physical disks (capacity and free space per disk)
+  # --------------------------------------------------------------------------------
+  $physicalDisks = Safe-Try {
+    Get-PhysicalDisksDiscovery -Log $script:log
+  } 'PhysicalDisks'
+  if (-not $physicalDisks) {
+    $physicalDisks = [pscustomobject]@{
+      Disks  = @()
+      Errors = @('Discovery not run or failed')
+    }
+  }
+
+  # --------------------------------------------------------------------------------
+  # Quest On Demand Migration For Active Directory (ODMAD) agent
+  # --------------------------------------------------------------------------------
+  $questODMAD = Safe-Try {
+    Get-QuestODMADDiscovery -Log $script:log
+  } 'QuestODMAD'
+  if (-not $questODMAD) {
+    $questODMAD = [pscustomobject]@{
+      Installed    = $false
+      AgentVersion = $null
+      InstallPath  = $null
+      OtherValues  = $null
+      Errors       = @('Discovery not run or failed')
+    }
+  }
+
+  # --------------------------------------------------------------------------------
   # OLE DB / .udl connections (machine paths only)
   # --------------------------------------------------------------------------------
   $commonFiles = $null; if (Test-Path $env:ProgramFiles) { $commonFiles = Join-Path $env:ProgramFiles 'Common Files' }
@@ -3004,6 +3033,8 @@ function Get-SharedFoldersWithACL {
     ApplicationConfigFiles = $applicationConfigFiles
     Oracle = $oracleOut
     RDSLicensing = $rdsOut
+    PhysicalDisks = if ($physicalDisks) { $physicalDisks } else { [pscustomobject]@{ Disks = @(); Errors = @('Discovery not run or failed') } }
+    QuestODMAD = if ($questODMAD) { $questODMAD } else { [pscustomobject]@{ Installed = $false; AgentVersion = $null; InstallPath = $null; OtherValues = $null; Errors = @('Discovery not run or failed') } }
     SecurityAgents = $securityAgents
     Detection     = [pscustomobject]@{ OldDomain = $flags; Summary = $summary }
   }
@@ -3161,6 +3192,8 @@ function Get-SharedFoldersWithACL {
       SqlServerVersion   = $null
       Oracle = [pscustomobject]@{ OracleInstalled = $false; OracleVersion = $null; IsOracleServerLikely = $false; OracleServices = @(); OracleHomes = @(); OracleClientInstalled = $false; OracleODBCDrivers = @(); TnsnamesFiles = @(); SqlNetConfigPaths = @(); Errors = $null }
       RDSLicensing = [pscustomobject]@{ IsRDSSessionHost = $false; RDSRoleInstalled = $null; RdsLicensingRoleInstalled = $false; LicensingMode = 'Unknown'; LicenseServerConfigured = @(); RDSLicensingEvidence = @(); IsRDSLicensingLikelyInUse = $false; Errors = $null }
+      PhysicalDisks = [pscustomobject]@{ Disks = @(); Errors = $null }
+      QuestODMAD = [pscustomobject]@{ Installed = $false; AgentVersion = $null; InstallPath = $null; OtherValues = $null; Errors = $null }
       SecurityAgents = [pscustomobject]@{
         CrowdStrike = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }
         Qualys = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }
@@ -3256,6 +3289,9 @@ function Get-SharedFoldersWithACL {
       SlimServices        = $SlimCounts.Services
       SlimTasks           = $SlimCounts.Tasks
       SlimPrinters        = $SlimCounts.Printers
+      PhysicalDisksCount   = if ($physicalDisks -and $physicalDisks.Disks) { @($physicalDisks.Disks).Count } else { 0 }
+      QuestODMADInstalled = if ($questODMAD) { $questODMAD.Installed } else { $false }
+      QuestODMADVersion   = if ($questODMAD) { $questODMAD.AgentVersion } else { $null }
       CollectedAt         = (Get-Date).ToString('o')
       Version             = $ScriptVersion
     } | ConvertTo-Json -Compress | Write-Output
@@ -3387,6 +3423,8 @@ catch {
       SqlServerVersion   = $null
       Oracle = [pscustomobject]@{ OracleInstalled = $false; OracleVersion = $null; IsOracleServerLikely = $false; OracleServices = @(); OracleHomes = @(); OracleClientInstalled = $false; OracleODBCDrivers = @(); TnsnamesFiles = @(); SqlNetConfigPaths = @(); Errors = $null }
       RDSLicensing = [pscustomobject]@{ IsRDSSessionHost = $false; RDSRoleInstalled = $null; RdsLicensingRoleInstalled = $false; LicensingMode = 'Unknown'; LicenseServerConfigured = @(); RDSLicensingEvidence = @(); IsRDSLicensingLikelyInUse = $false; Errors = $null }
+      PhysicalDisks = [pscustomobject]@{ Disks = @(); Errors = $null }
+      QuestODMAD = [pscustomobject]@{ Installed = $false; AgentVersion = $null; InstallPath = $null; OtherValues = $null; Errors = $null }
       SecurityAgents = [pscustomobject]@{
         CrowdStrike = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }
         Qualys = [pscustomobject]@{ Tenant = $null; TenantId = $null; HasDomainReference = $false }

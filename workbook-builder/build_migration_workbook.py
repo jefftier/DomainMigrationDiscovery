@@ -803,6 +803,27 @@ def flatten_record(computer_name, record, sheet_rows, source_file=None, source_c
     _rds = record.get("RDSLicensing")
     row_det["RdsLicensingRoleInstalled"] = _rds.get("RdsLicensingRoleInstalled", False) if isinstance(_rds, dict) else False
 
+    # Physical disks summary (count, total capacity, total free)
+    _phys = record.get("PhysicalDisks") or {}
+    disks_list = _phys.get("Disks") if isinstance(_phys, dict) else []
+    if not isinstance(disks_list, list):
+        disks_list = []
+    row_det["PhysicalDisks_Count"] = len(disks_list)
+    total_cap = sum((d.get("SizeBytes") or 0) for d in disks_list if isinstance(d, dict))
+    total_free = sum((d.get("FreeBytes") or 0) for d in disks_list if isinstance(d, dict))
+    row_det["PhysicalDisks_TotalCapacityGB"] = round(total_cap / (1024 ** 3), 2) if total_cap else None
+    row_det["PhysicalDisks_TotalFreeGB"] = round(total_free / (1024 ** 3), 2) if total_free else None
+
+    # Quest On Demand Migration For Active Directory (ODMAD) agent
+    _quest = record.get("QuestODMAD") or {}
+    if not isinstance(_quest, dict):
+        _quest = {}
+    row_det["QuestODMAD_Installed"] = _quest.get("Installed", False)
+    row_det["QuestODMAD_Version"] = _quest.get("AgentVersion")
+    row_det["QuestODMAD_InstallPath"] = _quest.get("InstallPath")
+    ov = _quest.get("OtherValues")
+    row_det["QuestODMAD_OtherValues"] = json.dumps(ov) if isinstance(ov, dict) and ov else None
+
     for k, v in counts.items():
         # Prefix with Count_ to make it obvious in Excel
         col_name = f"Count_{k}"
@@ -1114,6 +1135,32 @@ def flatten_record(computer_name, record, sheet_rows, source_file=None, source_c
         row_rds["IsRDSLicensingLikelyInUse"] = False
         row_rds["Errors"] = ""
     add_row(sheet_rows, "RDS Licensing", row_rds, include_source_section=debug_provenance)
+
+    # --- Physical Disks (one row per disk per computer) ---
+    phys = record.get("PhysicalDisks")
+    disks_list = (phys.get("Disks") or []) if isinstance(phys, dict) else []
+    if not isinstance(disks_list, list):
+        disks_list = []
+    for disk in disks_list:
+        if not isinstance(disk, dict):
+            continue
+        row_disk = base.copy()
+        row_disk["DeviceID"] = disk.get("DeviceID")
+        row_disk["Model"] = disk.get("Model")
+        row_disk["SizeBytes"] = disk.get("SizeBytes")
+        row_disk["FreeBytes"] = disk.get("FreeBytes")
+        row_disk["SizeGB"] = disk.get("SizeGB")
+        row_disk["FreeSpaceGB"] = disk.get("FreeSpaceGB")
+        add_row(sheet_rows, "PhysicalDisks", row_disk, include_source_section=debug_provenance)
+    if not disks_list:
+        row_disk = base.copy()
+        row_disk["DeviceID"] = None
+        row_disk["Model"] = None
+        row_disk["SizeBytes"] = None
+        row_disk["FreeBytes"] = None
+        row_disk["SizeGB"] = None
+        row_disk["FreeSpaceGB"] = None
+        add_row(sheet_rows, "PhysicalDisks", row_disk, include_source_section=debug_provenance)
 
     # --- Oracle discovery (Summary + Details; always one row per computer) ---
     oracle = record.get("Oracle")
@@ -1659,6 +1706,7 @@ def write_excel(
         "Oracle Summary",
         "Oracle Details",
         "RDS Licensing",
+        "PhysicalDisks",
         "SecurityAgents",
         "IIS",
         "SqlServer",

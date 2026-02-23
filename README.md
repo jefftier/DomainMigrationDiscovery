@@ -1073,6 +1073,8 @@ The Excel workbook includes the following sheets:
      - `Qualys_Tenant` and `Qualys_Issue`
      - `SCCM_Tenant`, `SCCM_HasDomainReference`, and `SCCM_Issue`
      - `Encase_Installed`, `Encase_Tenant`, and `Encase_Issue`
+   - **Physical disks**: `PhysicalDisks_Count`, `PhysicalDisks_TotalCapacityGB`, `PhysicalDisks_TotalFreeGB`
+   - **Quest ODMAD agent**: `QuestODMAD_Installed`, `QuestODMAD_Version`, `QuestODMAD_InstallPath`, `QuestODMAD_OtherValues` (other registry values if present)
    - Count columns for each discovery category
 
 2. **Metadata** - Complete metadata including domain information (OldDomainFqdn, OldDomainNetBIOS, NewDomainFqdn)
@@ -1132,13 +1134,15 @@ The Excel workbook includes the following sheets:
 
 28. **RDS Licensing** - RDS/RDP licensing: IsRDSSessionHost, LicensingMode, LicenseServerConfigured, IsRDSLicensingLikelyInUse, RDSLicensingEvidence
 
-29. **Local Admin Membership** - One row per local Administrators group member (GroupName=Administrators, MemberName, MemberType, DomainOrScope, SID, Source). Every computer appears; errors captured.
+29. **PhysicalDisks** - One row per physical disk per computer: DeviceID, Model, SizeBytes, FreeBytes, SizeGB, FreeSpaceGB
 
-30. **SecurityAgents** - Security agent information (CrowdStrike, Qualys, SCCM, EnCase)
+30. **Local Admin Membership** - One row per local Administrators group member (GroupName=Administrators, MemberName, MemberType, DomainOrScope, SID, Source). Every computer appears; errors captured.
 
-31. **IIS** - IIS configuration (raw JSON)
+31. **SecurityAgents** - Security agent information (CrowdStrike, Qualys, SCCM, EnCase)
 
-32. **SqlServer** - SQL Server configuration (raw JSON)
+32. **IIS** - IIS configuration (raw JSON)
+
+33. **SqlServer** - SQL Server configuration (raw JSON)
 
 ### Report Builder Features
 

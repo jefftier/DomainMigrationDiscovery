@@ -11,7 +11,10 @@
         'Get-SqlDomainReferences',
         'Get-EventLogDomainReferences',
         'Get-ApplicationConfigDomainReferences',
+        'Get-DatabaseConnectionsFromConfigFile',
         'Get-OracleDiscovery',
-        'Get-RDSLicensingDiscovery'
+        'Get-RDSLicensingDiscovery',
+        'Get-PhysicalDisksDiscovery',
+        'Get-QuestODMADDiscovery'
     )
 }
