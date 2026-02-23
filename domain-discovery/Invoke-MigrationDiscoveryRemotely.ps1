@@ -318,7 +318,14 @@ function Ensure-WinRmAndConnect {
         
         [System.Management.Automation.PSCredential]$Credential,
         
-        [scriptblock]$WriteErrorLogFunction
+        [scriptblock]$WriteErrorLogFunction,
+
+        # When set, skip the initial connectivity test and run the remote scriptblock directly.
+        # Use when the caller has already established WinRM (e.g. same session after config copy).
+        [switch]$SkipConnectivityTest,
+
+        # When SkipConnectivityTest is set, optionally provide the actual computer name from a prior test.
+        [string]$ActualComputerNameFromPriorTest = $null
     )
     
     # Result object to return
@@ -330,11 +337,16 @@ function Ensure-WinRmAndConnect {
         ActualComputerName = $null
     }
     
-    # Step 1: Initial WinRM connectivity check
-    Write-Host "[$ComputerName] Testing WinRM connectivity..." -ForegroundColor Yellow
+    # Step 1: Initial WinRM connectivity check (skip if caller already established connectivity)
     $connectivityTestPassed = $false
-    $actualComputerName = $null
-    
+    $actualComputerName = $ActualComputerNameFromPriorTest
+
+    if ($SkipConnectivityTest) {
+        $connectivityTestPassed = $true
+        if (-not $actualComputerName) { $actualComputerName = $ComputerName }
+    }
+    else {
+    Write-Host "[$ComputerName] Testing WinRM connectivity..." -ForegroundColor Yellow
     try {
         $testParams = @{
             ComputerName = $ComputerName
@@ -513,6 +525,7 @@ function Ensure-WinRmAndConnect {
                 }
             }
         }
+    }
     }
     
     # Step 6: If connectivity test passed, run the main remote script
@@ -735,7 +748,9 @@ $InvokeDiscoveryOnServerScriptBlock = {
             -RemoteScriptArguments $remoteScriptArguments `
             -AttemptWinRmHeal:$false `
             -Credential $Credential `
-            -WriteErrorLogFunction $WriteErrorLogFunction
+            -WriteErrorLogFunction $WriteErrorLogFunction `
+            -SkipConnectivityTest `
+            -ActualComputerNameFromPriorTest $actualComputerName
 
         if (-not $discoveryResult.Success) {
             return
@@ -823,7 +838,9 @@ $InvokeDiscoveryOnServerScriptBlock = {
         -RemoteScriptArguments $remoteScriptArguments `
         -AttemptWinRmHeal:$false `
         -Credential $Credential `
-        -WriteErrorLogFunction $WriteErrorLogFunction
+        -WriteErrorLogFunction $WriteErrorLogFunction `
+        -SkipConnectivityTest `
+        -ActualComputerNameFromPriorTest $actualComputerName
 
     if (-not $discoveryResult.Success) {
         return
