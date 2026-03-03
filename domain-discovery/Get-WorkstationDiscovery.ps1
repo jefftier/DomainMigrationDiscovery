@@ -911,9 +911,9 @@ function Get-UninstallItemsFromHive([Microsoft.Win32.RegistryKey]$root){
     Boolean indicating if the hive was loaded (true) or already existed (false).
 #>
 function Load-UserHive([string]$sid,[string]$ntuserPath){
-  $loadTimeoutSeconds = 30
+  $loadTimeoutSeconds = 15
   if (-not (Test-Path "Registry::HKEY_USERS\$sid") -and (Test-Path $ntuserPath)){
-    for($i=0; $i -lt 3; $i++){
+    for($i=0; $i -lt 2; $i++){
       $psi = New-Object System.Diagnostics.ProcessStartInfo
       $psi.FileName = 'reg.exe'
       $psi.Arguments = "load `"HKU\$sid`" `"$ntuserPath`""
@@ -2097,10 +2097,12 @@ try {
       if (-not (Test-Path -LiteralPath $userFileDsnDir -PathType Container)) { $userFileDsnDir = Join-Path $prof.LocalPath 'Application Data\ODBC Data Sources' }
       if (Test-Path -LiteralPath $userFileDsnDir -PathType Container) { $odbc += Get-FileDsnFromDirectory -directoryPath $userFileDsnDir -scope "FileDSN:User:$sid" }
 
-      # Credential Manager discovery
-      $credentialManager += Safe-Try {
-        Get-CredentialManagerDomainReferences -ProfileSID $sid -DomainMatchers $matchers -Log $script:log
-      } "CredentialManager for $sid"
+      # Credential Manager discovery only when we loaded this profile's hive (avoid Get-ChildItem -Recurse on unloaded/stale HKU\$sid which can hang)
+      if ($loaded -eq $true) {
+        $credentialManager += Safe-Try {
+          Get-CredentialManagerDomainReferences -ProfileSID $sid -DomainMatchers $matchers -Log $script:log
+        } "CredentialManager for $sid"
+      }
     }
     finally {
       Remove-Variable p,sk,subkeys,letterKey,props -ErrorAction SilentlyContinue
