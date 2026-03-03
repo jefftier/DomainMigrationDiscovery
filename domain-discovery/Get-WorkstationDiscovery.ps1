@@ -1267,7 +1267,7 @@ function Get-SCCMTenantInfo {
             }
         }
         
-        $resultsList = [System.Collections.ArrayList]::new()
+        $resultsList = New-Object System.Collections.ArrayList
         Search-RegistryRecursive -key $ccmKey -basePath $sccmRegPath -domains $searchDomains -results $resultsList
         $domainReferences = $resultsList.ToArray()
         $ccmKey.Close()

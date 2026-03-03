@@ -1043,7 +1043,7 @@ if ($useParallelThreadJob) {
     $parallelFailed = $false
     try {
         $throttleLimit = 10
-        $running = [System.Collections.ArrayList]::new()
+        $running = New-Object System.Collections.ArrayList
         foreach ($server in $servers) {
             while ($running.Count -ge $throttleLimit) {
                 $completed = @($running | Where-Object { $_.State -ne 'Running' })

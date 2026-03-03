@@ -297,7 +297,7 @@ Runs lightweight checks (e.g. local admin discovery, service account parsing, re
 
 ## Requirements and permissions
 
-- **PowerShell:** 5.1 or higher (3.0+ for minimal use; some features need 5.1+).
+- **PowerShell:** 5.1 or higher (3.0+ for minimal use; some features need 5.1+). Scripts are compatible with PowerShell 3/4 and .NET 4.0 (no `[Type]::new()`; regex and collections use compatible syntax).
 - **OS:** Windows 7 / Server 2008 R2 or later.
 - **Permissions:** Local Administrator for full discovery; read access to user profile dirs; write access to OutputRoot and LogRoot.
 - **Remote:** WinRM enabled on targets; account with local admin on all target servers; network to WinRM (typically 5985/5986).
@@ -314,5 +314,8 @@ Runs lightweight checks (e.g. local admin discovery, service account parsing, re
 | Remote “script not found” | Pass correct `-ScriptPath` from repo root (e.g. `.\domain-discovery\Get-WorkstationDiscovery.ps1`) or run from `domain-discovery` and omit it. |
 | Remote WinRM failures | Ensure WinRM is enabled and reachable; use `-AttemptWinRmHeal` only when the failure is due to WinRM service not running. |
 | Slow run | Large profile count, many services/tasks, or slow network shares increase run time; use `-SlimOutputOnly` and consider `-SlimOnlyRunningServices`. |
+| Discovery seems to hang | Check the log: each step logs `Discover: starting &lt;section&gt;` (e.g. FirewallRules, Certificates). The last line shows where it is; long-running steps use timeouts and will continue or log a timeout. |
+| "property 'state' cannot be found" (firewall) | Helper adds a defensive `.State` when missing. Ensure latest `DomainMigrationDiscovery.Helpers.psm1`. |
+| "Regex does not contain a method new" | Script uses `[regex]"pattern"` for PS 3/4. Update to latest discovery script. |
 
 For more detail on JSON schema, detection logic, and workbook integration, see the main [README](../README.md) in the repository root.

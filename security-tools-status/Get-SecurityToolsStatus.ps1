@@ -509,7 +509,7 @@ function Get-SCCMTenantInfo {
                                     $valueStr = [string]$valueToCheck
                                     
                                     foreach ($domain in $domains) {
-                                        $pattern = [regex]::new("(?i)" + [regex]::Escape($domain))
+                                        $pattern = [regex]("(?i)" + [regex]::Escape($domain))
                                         if ($pattern.IsMatch($valueStr)) {
                                             $displayValue = if ($value -is [array]) { ($value -join ' | ') } else { $valueStr }
                                             $null = $results.Add([pscustomobject]@{
@@ -541,7 +541,7 @@ function Get-SCCMTenantInfo {
             } catch {}
         }
         
-        $resultsList = [System.Collections.ArrayList]::new()
+        $resultsList = New-Object System.Collections.ArrayList
         Search-RegistryRecursive -key $ccmKey -basePath $sccmRegPath -domains $searchDomains -results $resultsList
         $domainReferences = $resultsList.ToArray()
         $ccmKey.Close()
@@ -1165,7 +1165,7 @@ function Get-SCCMTenantInfo {
                                     $valueStr = [string]$valueToCheck
                                     
                                     foreach ($domain in $domains) {
-                                        $pattern = [regex]::new("(?i)" + [regex]::Escape($domain))
+                                        $pattern = [regex]("(?i)" + [regex]::Escape($domain))
                                         if ($pattern.IsMatch($valueStr)) {
                                             $displayValue = if ($value -is [array]) { ($value -join ' | ') } else { $valueStr }
                                             $null = $results.Add([pscustomobject]@{
@@ -1197,7 +1197,7 @@ function Get-SCCMTenantInfo {
             } catch {}
         }
         
-        $resultsList = [System.Collections.ArrayList]::new()
+        $resultsList = New-Object System.Collections.ArrayList
         Search-RegistryRecursive -key $ccmKey -basePath $sccmRegPath -domains $searchDomains -results $resultsList
         $domainReferences = $resultsList.ToArray()
         $ccmKey.Close()

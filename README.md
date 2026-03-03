@@ -134,6 +134,10 @@ The script scans the following areas for old domain references:
   - Read access to user profile directories
   - Write access to output and log directories
 
+### PowerShell 3/4 compatibility
+
+The domain discovery and remote-invoke scripts are written to run on PowerShell 3.0 and 4.0 (e.g. Windows 7/8, Server 2008 R2/2012) where .NET 4.0 is in use. They avoid APIs that require .NET 4.5+ (such as `[Type]::new()`). Regex creation uses the `[regex]"pattern"` cast; collections use `New-Object System.Collections.ArrayList`. Parallel remote execution (`-UseParallel`) requires PowerShell 7+ and uses the `Invoke-MigrationDiscoveryRemotely.PS7.ps1` launcher.
+
 ## Installation
 
 1. Clone or download this repository
@@ -1014,13 +1018,14 @@ Apps with no hits are still included with empty `Hits` arrays so Power BI can sh
 
 ## Performance Considerations
 
-- **Profile Processing**: User profiles are processed efficiently with batched hive operations
+- **Profile Processing**: User profiles are processed efficiently with batched hive operations. Non-interactive profiles (e.g. NT SERVICE, IIS app pools) are skipped; registry hive load/unload use timeouts to avoid hangs.
 - **Large Systems**: On systems with many profiles or services, execution may take several minutes
 - **Network Shares**: Accessing network shares may add latency if shares are slow or unavailable
 - **Parallel Execution**: Remote execution supports parallel processing (PowerShell 7+) with throttle limit of 10 concurrent executions
 - **App-Specific Discovery**: Deep registry and folder scanning may add time; use targeted configs
 - **Script Discovery**: Limited to files referenced by services/tasks and well-known directories to avoid full disk scans
 - **File Size Limits**: Config files larger than 5MB are skipped to avoid memory issues
+- **Timeouts**: Long-running or blocking operations (credential manager registry recurse, cmdkey, firewall rules, registry hive load/unload) use timeouts; on timeout the step is logged and discovery continues
 
 ## Error Handling
 
@@ -1033,6 +1038,7 @@ The script includes comprehensive error handling:
 - Execution continues even if individual servers fail
 - App-specific discovery failures are logged but don't stop overall execution
 - Database connection parsing errors are logged but don't stop discovery
+- **Section logging**: The log records `Discover: starting &lt;section&gt;` (e.g. Certificates, FirewallRules, EventLogReferences) before each major step so you can see where discovery is if it runs slowly or appears to hang
 
 ## Security Notes
 
@@ -1167,6 +1173,13 @@ Current version: **2.0.0**
 
 ### Recent Changes (Latest Update)
 
+- **Discovery robustness and compatibility**:
+  - Registry hive load/unload use timeouts; non-interactive profiles (NT SERVICE, IIS app pools) and `.old` profile SIDs are skipped to avoid hangs
+  - Credential Manager (current user): registry recurse and cmdkey run with timeouts
+  - Firewall discovery runs in a job with a 90s timeout to prevent indefinite block on some systems
+  - NetFirewallRule objects get a defensive `.State` property when missing (for job runspace compatibility)
+  - PowerShell 3/4 compatible: no `[Type]::new()`; use `[regex]"pattern"` and `New-Object System.Collections.ArrayList` where needed
+  - Section logging (`Discover: starting X`) added so logs show progress through each discovery step
 - **Report Builder Enhancements**:
   - Added security agent outputs (CrowdStrike, Qualys, SCCM, EnCase) to Summary tab with issue flags
   - Removed redundant domain columns from all tabs except Metadata
