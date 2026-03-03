@@ -2138,9 +2138,32 @@ try {
   # Firewall Rules
   # --------------------------------------------------------------------------------
   if ($script:log) { $script:log.Write('Discover: starting FirewallRules', 'INFO') }
-  # Scan Windows Firewall rules for old domain references in service names, etc.
+  # Scan Windows Firewall rules for old domain references. Run in job with timeout - Get-NetFirewallRule can hang on some systems.
   $firewallRules = Safe-Try {
-    Get-FirewallRulesWithDomainReferences -DomainMatchers $matchers -Log $script:log
+    $fwTimeoutSeconds = 90
+    $job = Start-Job -ScriptBlock {
+      param($modPath, $fqdn, $netbios)
+      Import-Module $modPath -Force
+      $dn = ($fqdn -split '\.' | ForEach-Object { "DC=$_" }) -join ','
+      $nb = $null; if ($netbios) { $nb = [regex]::new("(?i)\b$([regex]::Escape($netbios))\b") }
+      $fq = $null; if ($fqdn) { $fq = [regex]::new("(?i)$([regex]::Escape($fqdn))") }
+      $up = $null; if ($fqdn) { $up = [regex]::new("(?i)@$([regex]::Escape($fqdn))$") }
+      $ld = $null; if ($fqdn) { $ld = [regex]::new("(?i)$([regex]::Escape($dn))") }
+      $matchers = [pscustomobject]@{ Netbios = $nb; Fqdn = $fq; Upn = $up; LdapDn = $ld }
+      $matchers | Add-Member -MemberType ScriptMethod -Name Match -Value { param([string]$s); if ([string]::IsNullOrWhiteSpace($s)) { return $false }; foreach ($r in @($this.Netbios, $this.Fqdn, $this.Upn, $this.LdapDn)) { if ($r -and $r.IsMatch($s)) { return $true } }; return $false } -PassThru | Out-Null
+      Get-FirewallRulesWithDomainReferences -DomainMatchers $matchers -Log $null
+    } -ArgumentList $helperModulePath, $OldDomainFqdn, $OldDomainNetBIOS
+    $null = Wait-Job $job -Timeout $fwTimeoutSeconds
+    if ((Get-Job $job -ErrorAction SilentlyContinue).State -eq 'Running') {
+      Stop-Job $job -ErrorAction SilentlyContinue
+      Remove-Job $job -Force -ErrorAction SilentlyContinue
+      if ($script:log) { $script:log.Write("FirewallRules: timed out after ${fwTimeoutSeconds}s", 'WARN') }
+      $null
+    } else {
+      $out = Receive-Job $job -ErrorAction SilentlyContinue
+      Remove-Job $job -Force -ErrorAction SilentlyContinue
+      $out
+    }
   } 'FirewallRules'
 
   # --------------------------------------------------------------------------------
