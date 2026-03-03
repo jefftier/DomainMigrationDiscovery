@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 3.0
 <#
 .SYNOPSIS
     Discovers domain migration readiness by scanning workstations for old domain references.
@@ -261,27 +261,34 @@ Import-Module $helperModulePath -Force -ErrorAction Stop
 # ============================================================================
 # PowerShell version compatibility check
 if (-not $PSVersionTable -or -not $PSVersionTable.PSVersion) {
-    $techError = "Unable to determine PowerShell version. This script requires at least PowerShell 5.1."
+    $techError = "Unable to determine PowerShell version. This script requires at least PowerShell 3.0."
     Write-Error (Get-HumanReadableError -ErrorMessage $techError -Context "checking PowerShell version")
     exit 1
 }
 
 $script:PSMajorVersion = $PSVersionTable.PSVersion.Major
 
-if ($script:PSMajorVersion -lt 5) {
-    $techError = "This script requires PowerShell 5.1 or higher. Current version: $($PSVersionTable.PSVersion)"
+if ($script:PSMajorVersion -lt 3) {
+    $techError = "This script requires PowerShell 3.0 or higher. Current version: $($PSVersionTable.PSVersion)"
     Write-Error (Get-HumanReadableError -ErrorMessage $techError -Context "checking PowerShell version")
     exit 1
 }
 
-# Set compatibility mode (for error handling and encoding)
+# Set compatibility mode: Full (PS 5+) for efficiency and completeness; Legacy3to4 (PS 3-4) with same output schema, unavailable sections marked
 if ($script:PSMajorVersion -lt 5) {
     $script:CompatibilityMode = 'Legacy3to4'
 } else {
     $script:CompatibilityMode = 'Full'
 }
 
-Set-StrictMode -Version Latest
+# Track sections that could not be gathered due to version restrictions (PS 3/4); same output structure with empty or placeholder data
+$script:UnavailableSections = @()
+
+if ($script:CompatibilityMode -eq 'Full') {
+    Set-StrictMode -Version Latest
+} else {
+    Set-StrictMode -Off
+}
 $ErrorActionPreference = 'Stop'
 #endregion
 
@@ -1889,14 +1896,32 @@ try {
   # --------------------------------------------------------------------------------
   # System Information
   # --------------------------------------------------------------------------------
-  # Collect basic system information: computer system, OS, network adapters
-  $system = Safe-Try { Get-CimInstance Win32_ComputerSystem } 'Win32_ComputerSystem'
+  # Collect basic system information: computer system, OS, network adapters. Use PS 5+ when available for efficiency and completeness.
+  if ($script:CompatibilityMode -eq 'Full') {
+    $system = Safe-Try { Get-CimInstance Win32_ComputerSystem } 'Win32_ComputerSystem'
+    $os     = Safe-Try { Get-CimInstance Win32_OperatingSystem } 'Win32_OperatingSystem'
+    $netIPv4  = Safe-Try { Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue } 'Get-NetIPAddress'
+    $adapters = Safe-Try { Get-NetAdapter -ErrorAction SilentlyContinue } 'Get-NetAdapter'
+    $ipStr = (@($netIPv4) | Where-Object { $_.IPAddress -and $_.IPAddress -ne '127.0.0.1' -and $_.IPAddress -notlike '169.254.*' } | Select-Object -ExpandProperty IPAddress -Unique) -join ', '
+    $macStr = (@($adapters) | Where-Object { $_.Status -eq 'Up' -and $_.MacAddress } | Select-Object -ExpandProperty MacAddress -Unique) -join ', '
+  } else {
+    $system = Safe-Try { Get-WmiObject -Class Win32_ComputerSystem } 'Win32_ComputerSystem'
+    $os     = Safe-Try { Get-WmiObject -Class Win32_OperatingSystem } 'Win32_OperatingSystem'
+    $ipStr = ''; $macStr = ''
+    try {
+      $adaptersWmi = Get-WmiObject -Class Win32_NetworkAdapterConfiguration -Filter "IPEnabled=true" -ErrorAction SilentlyContinue
+      if ($adaptersWmi) {
+        $ipList = @($adaptersWmi | ForEach-Object { $_.IPAddress } | Where-Object { $_ -and $_ -ne '127.0.0.1' -and $_ -notlike '169.254.*' } | Select-Object -Unique)
+        $ipStr = ($ipList -join ', ')
+        $macList = @($adaptersWmi | ForEach-Object { $_.MACAddress } | Where-Object { $_ } | Select-Object -Unique)
+        $macStr = ($macList -join ', ')
+      }
+    } catch {
+      if ($script:log) { $script:log.Write("WMI network adapters: $($_.Exception.Message)", 'WARN') }
+      $script:UnavailableSections += 'NetworkAdapterDetails (IP/MAC via WMI failed)'
+    }
+  }
   $securityAgents = Get-SecurityAgentsTenantInfo -Log $script:log -OldDomainFqdn $OldDomainFqdn -NewDomainFqdn $NewDomainFqdn -EncaseRegistryPaths $EncaseRegistryPaths
-  $os     = Safe-Try { Get-CimInstance Win32_OperatingSystem } 'Win32_OperatingSystem'
-  $netIPv4  = Safe-Try { Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue } 'Get-NetIPAddress'
-  $adapters = Safe-Try { Get-NetAdapter -ErrorAction SilentlyContinue } 'Get-NetAdapter'
-  $ipStr = (@($netIPv4) | Where-Object { $_.IPAddress -and $_.IPAddress -ne '127.0.0.1' -and $_.IPAddress -notlike '169.254.*' } | Select-Object -ExpandProperty IPAddress -Unique) -join ', '
-  $macStr = (@($adapters) | Where-Object { $_.Status -eq 'Up' -and $_.MacAddress } | Select-Object -ExpandProperty MacAddress -Unique) -join ', '
 
   # --------------------------------------------------------------------------------
   # User Profiles (Recent Activity Only)
@@ -1906,7 +1931,12 @@ try {
   # Profiles are used later for per-user registry hive scanning.
   $profiles = @()
   $cutoffDate = (Get-Date).AddDays(-1 * [math]::Abs($ProfileDays))
-  $profileCim = Safe-Try { Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue } 'Win32_UserProfile'
+  $profileCim = $null
+  if ($script:CompatibilityMode -eq 'Full') {
+    $profileCim = Safe-Try { Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue } 'Win32_UserProfile'
+  } else {
+    $profileCim = Safe-Try { Get-WmiObject -Class Win32_UserProfile -ErrorAction SilentlyContinue } 'Win32_UserProfile'
+  }
   if ($profileCim){
     foreach($p in $profileCim){
       if ([string]::IsNullOrWhiteSpace($p.LocalPath)) { continue }
@@ -2234,37 +2264,43 @@ try {
   # --------------------------------------------------------------------------------
   # Services & Scheduled Tasks
   # --------------------------------------------------------------------------------
-  # Collect Windows services and scheduled tasks information.
-  # These are scanned for old domain references in service accounts and task actions.
-  $services = Safe-Try { Get-CimInstance Win32_Service | Select-Object Name,DisplayName,State,StartMode,StartName,PathName } 'Services'
+  # Collect Windows services and scheduled tasks. Use CIM when available (PS 3+); for tasks use Get-ScheduledTask on PS 5+ for completeness, schtasks fallback on PS 3/4.
+  if ($script:CompatibilityMode -eq 'Full') {
+    $services = Safe-Try { Get-CimInstance Win32_Service | Select-Object Name,DisplayName,State,StartMode,StartName,PathName } 'Services'
+  } else {
+    $services = Safe-Try { Get-WmiObject -Class Win32_Service | Select-Object Name,DisplayName,State,StartMode,StartName,PathName } 'Services'
+  }
   if (-not $services) { $services = @() }
 
   $tasks = @()
-  $tasks = Safe-Try {
-    Get-ScheduledTask | ForEach-Object {
-      $t = $_
-      $actions = @()
-      foreach($a in @($t.Actions | Where-Object { $_ -ne $null })){
-        if ($a -is [Microsoft.Management.Infrastructure.CimInstance]) { $typeName = $a.CimClass.CimClassName } else { $typeName = $a.GetType().Name }
-        $p = $a.PSObject.Properties
-        $get = { param($n) $v = $p[$n]; switch ($true) { { $null -ne $v } { $v.Value } default { $null } } }
-        $exec = & $get 'Execute'; if (-not $exec) { $exec = & $get 'Path' }
-        $arguments = & $get 'Arguments'
-        $workdir = (& $get 'WorkingDirectory'); if (-not $workdir) { $workdir = & $get 'WorkingDir' }
-        if ($exec){
-          $actions += [pscustomobject]@{ ActionType='Exec'; Execute=$exec; Arguments=$arguments; WorkingDir=$workdir; Summary=$null; ClassId=$null; Data=$null }
+  if ($script:CompatibilityMode -eq 'Full' -and (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) {
+    $tasks = Safe-Try {
+      Get-ScheduledTask | ForEach-Object {
+        $t = $_
+        $actions = @()
+        foreach($a in @($t.Actions | Where-Object { $_ -ne $null })){
+          if ($a -is [Microsoft.Management.Infrastructure.CimInstance]) { $typeName = $a.CimClass.CimClassName } else { $typeName = $a.GetType().Name }
+          $p = $a.PSObject.Properties
+          $get = { param($n) $v = $p[$n]; switch ($true) { { $null -ne $v } { $v.Value } default { $null } } }
+          $exec = & $get 'Execute'; if (-not $exec) { $exec = & $get 'Path' }
+          $arguments = & $get 'Arguments'
+          $workdir = (& $get 'WorkingDirectory'); if (-not $workdir) { $workdir = & $get 'WorkingDir' }
+          if ($exec){
+            $actions += [pscustomobject]@{ ActionType='Exec'; Execute=$exec; Arguments=$arguments; WorkingDir=$workdir; Summary=$null; ClassId=$null; Data=$null }
+          }
+          elseif ($typeName -match 'ComHandler'){
+            $actions += [pscustomobject]@{ ActionType='ComHandler'; Execute=$null; Arguments=$null; WorkingDir=$null; ClassId=(& $get 'ClassId'); Data=(& $get 'Data'); Summary=$null }
+          }
+          else {
+            $actions += [pscustomobject]@{ ActionType=$typeName; Execute=$null; Arguments=$null; WorkingDir=$null; Summary=($a | Out-String).Trim(); ClassId=$null; Data=$null }
+          }
         }
-        elseif ($typeName -match 'ComHandler'){
-          $actions += [pscustomobject]@{ ActionType='ComHandler'; Execute=$null; Arguments=$null; WorkingDir=$null; ClassId=(& $get 'ClassId'); Data=(& $get 'Data'); Summary=$null }
-        }
-        else {
-          $actions += [pscustomobject]@{ ActionType=$typeName; Execute=$null; Arguments=$null; WorkingDir=$null; Summary=($a | Out-String).Trim(); ClassId=$null; Data=$null }
-        }
+        [pscustomobject]@{ Path = $t.TaskPath + $t.TaskName; UserId=$t.Principal.UserId; LogonType=[string]$t.Principal.LogonType; RunLevel=[string]$t.Principal.RunLevel; Enabled=$t.Settings.Enabled; Actions=$actions }
       }
-      [pscustomobject]@{ Path = $t.TaskPath + $t.TaskName; UserId=$t.Principal.UserId; LogonType=[string]$t.Principal.LogonType; RunLevel=[string]$t.Principal.RunLevel; Enabled=$t.Settings.Enabled; Actions=$actions }
-    }
-  } 'ScheduledTasks'
+    } 'ScheduledTasks'
+  }
   if (-not $tasks -or $tasks.Count -eq 0){
+    if ($script:CompatibilityMode -eq 'Legacy3to4') { $script:UnavailableSections += 'ScheduledTasks (full detail; used schtasks fallback)' }
     $tasks = Safe-Try {
       $csv = schtasks.exe /Query /FO CSV /V | ConvertFrom-Csv
       $csv | ForEach-Object { [pscustomobject]@{ Path = $_.'TaskName'; UserId = $_.'Run As User'; LogonType = $_.'Logon Mode'; RunLevel = $_.'Run Level'; Enabled = $_.'Scheduled Task State' -eq 'Enabled'; Actions = @([pscustomobject]@{ ActionType='Exec'; Execute=$_."Task To Run"; Arguments=$null; WorkingDir=$null; Summary=$null; ClassId=$null; Data=$null }) } }
@@ -2999,6 +3035,9 @@ function Get-SharedFoldersWithACL {
     ProfileDays       = $ProfileDays
     PlantId           = $PlantId
     Version           = $ScriptVersion
+    PowerShellVersion = $PSVersionTable.PSVersion.ToString()
+    CompatibilityMode = $script:CompatibilityMode
+    UnavailableSections = @($script:UnavailableSections)
   }
 
   $osVersionStr = $null; if ($os) { $osVersionStr = "$( $os.Caption) $( $os.Version) (Build $( $os.BuildNumber))" }
@@ -3184,6 +3223,9 @@ function Get-SharedFoldersWithACL {
         ProfileDays = $ProfileDays
         PlantId = $PlantId
         Version = $ScriptVersion
+        PowerShellVersion = if ($PSVersionTable -and $PSVersionTable.PSVersion) { $PSVersionTable.PSVersion.ToString() } else { $null }
+        CompatibilityMode = if ($script:CompatibilityMode) { $script:CompatibilityMode } else { $null }
+        UnavailableSections = @(if ($script:UnavailableSections) { $script:UnavailableSections } else { @() })
       }
       System = [pscustomobject]@{
         Hostname = $hostname
@@ -3410,6 +3452,9 @@ catch {
         ProfileDays = $ProfileDays
         PlantId = $PlantId
         Version = $ScriptVersion
+        PowerShellVersion = if ($PSVersionTable -and $PSVersionTable.PSVersion) { $PSVersionTable.PSVersion.ToString() } else { $null }
+        CompatibilityMode = if ($script:CompatibilityMode) { $script:CompatibilityMode } else { $null }
+        UnavailableSections = @(if ($script:UnavailableSections) { $script:UnavailableSections } else { @() })
       }
       System = [pscustomobject]@{
         Hostname = $hostname

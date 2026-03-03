@@ -2,7 +2,8 @@
 Build migration discovery Excel workbook from JSON snapshots.
 
 Internal note - JSON schema keys relevant to enhancements (Phase 0):
-- Metadata: ComputerName, PlantId, CollectedAt, Version, Domain, OldDomainFqdn, NewDomainFqdn, OldDomainNetBIOS
+- Metadata: ComputerName, PlantId, CollectedAt, Version, Domain, OldDomainFqdn, NewDomainFqdn, OldDomainNetBIOS,
+  PowerShellVersion, CompatibilityMode, UnavailableSections (PS 3/4 runs; sections not gathered are listed)
 - ApplicationConfigFiles: FilesWithDomainReferences, FilesWithCredentials (each file: FilePath, FileName, MatchedLines, TotalDomainMatches, CredentialPatterns, HasDomainReference, HasCredentials). MatchedLines = raw text; must be redacted.
 - EventLogDomainReferences: list of { LogName, TimeCreated, Id, MessageSnippet }. MessageSnippet = raw text; must be redacted.
 - SqlServer.ConfigFilesWithDomainReferences (per instance): MatchedLines = raw text; must be redacted.
@@ -831,6 +832,15 @@ def flatten_record(computer_name, record, sheet_rows, source_file=None, source_c
         col_name = f"Count_{k}"
         row_det[col_name] = v
 
+    # PowerShell version / compatibility: when discovery ran on PS 3/4, some sections may be unavailable
+    row_det["PowerShellVersion"] = meta.get("PowerShellVersion")
+    row_det["CompatibilityMode"] = meta.get("CompatibilityMode")
+    unavailable = meta.get("UnavailableSections")
+    if isinstance(unavailable, list) and unavailable:
+        row_det["UnavailableSections"] = "; ".join(str(x) for x in unavailable)
+    else:
+        row_det["UnavailableSections"] = "" if not unavailable else str(unavailable)
+
     add_row(sheet_rows, "Summary", row_det, include_source_section=debug_provenance)
 
     # --- Metadata (one row per computer) ---
@@ -840,10 +850,13 @@ def flatten_record(computer_name, record, sheet_rows, source_file=None, source_c
     row_meta["OldDomainFqdn"] = old_domain_fqdn
     row_meta["OldDomainNetBIOS"] = old_domain_netbios
     row_meta["NewDomainFqdn"] = new_domain_fqdn
-    # Include all metadata fields explicitly
+    # Include all metadata fields explicitly; format list values (e.g. UnavailableSections) for Excel
     for k, v in meta.items():
         if k not in row_meta:
-            row_meta[k] = v
+            if isinstance(v, list):
+                row_meta[k] = "; ".join(str(x) for x in v) if v else ""
+            else:
+                row_meta[k] = v
     add_row(sheet_rows, "Metadata", row_meta, include_source_section=debug_provenance)
 
     # --- System (one row per computer) ---
@@ -1810,6 +1823,7 @@ def write_excel(
             if sheet_name == "Summary":
                 summary_cols = [
                     "HasOldDomainRefs", "PotentialServiceAccounts",
+                    "PowerShellVersion", "CompatibilityMode", "UnavailableSections",
                     "LastRebootTime", "InstalledDotNetVersions",
                     "SqlServerInstalled", "SqlServerVersion",
                     "IsOracleServerLikely", "OracleVersion",
@@ -1825,6 +1839,7 @@ def write_excel(
                 core_cols = [
                     "ComputerName", "PlantId", "Domain", "OldDomainFqdn",
                     "OldDomainNetBIOS", "NewDomainFqdn", "CollectedAt",
+                    "PowerShellVersion", "CompatibilityMode", "UnavailableSections",
                 ]
             elif sheet_name == "ServiceAccountCandidates":
                 action_cols = [
