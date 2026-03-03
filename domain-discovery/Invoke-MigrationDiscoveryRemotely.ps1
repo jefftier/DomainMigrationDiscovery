@@ -575,6 +575,7 @@ function Ensure-WinRmAndConnect {
         $execError = $_.Exception.Message
         $errorMsg = "Failed to execute remote script: $execError"
         Write-Warning "[$ComputerName] Script execution failed"
+        Write-Warning "[$ComputerName] $execError"
         if ($WriteErrorLogFunction) {
             & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "SCRIPT_EXECUTION_ERROR"
         }

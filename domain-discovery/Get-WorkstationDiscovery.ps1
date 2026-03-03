@@ -677,6 +677,9 @@ function Get-HumanReadableError {
   elseif ($msgLower -match "json|convertto-json|serialization") {
     return "Data format error - check output file"
   }
+  elseif ($msgLower -match "cannot find an overload for.*tostring|tostring.*overload.*argument count") {
+    return "Script compatibility error - date/version formatting (PowerShell or .NET version)"
+  }
   elseif ($msgLower -match "cannot bind|parameter.*cannot be found") {
     return "Missing required parameter - check configuration"
   }
@@ -850,6 +853,17 @@ function Convert-LastUseTime($val){
     try { return [System.Management.ManagementDateTimeConverter]::ToDateTime($val).ToUniversalTime() } catch { return $null }
   }
   try { return [datetime]::Parse($val,[System.Globalization.CultureInfo]::InvariantCulture).ToUniversalTime() } catch { return $null }
+}
+
+# Safe ISO8601 date string for PS 3/4: WMI returns dates as strings (DMTF); only DateTime/DateTimeOffset have .ToString('o').
+function Format-DateToIso($val) {
+  if ($null -eq $val) { return $null }
+  if ($val -is [datetime] -or $val -is [DateTimeOffset]) { return $val.ToString('o') }
+  if ($val -is [string] -and $val.Length -ge 25 -and $val -match '^\d{14}\.\d{6}[\+\-]\d{3}$') {
+    try { return [System.Management.ManagementDateTimeConverter]::ToDateTime($val).ToString('o') } catch { return $val }
+  }
+  if ($val -is [string]) { return $val }
+  try { return [datetime]::Parse($val.ToString(), [System.Globalization.CultureInfo]::InvariantCulture).ToString('o') } catch { return $null }
 }
 
 <#
@@ -1975,7 +1989,7 @@ try {
       if ($p.SID -match '\.old$') { continue }
       $lut = Convert-LastUseTime $p.LastUseTime
       if ($lut -and $lut -lt $cutoffDate) { continue }
-      $lastUseStr = $null; if ($lut) { $lastUseStr = $lut.ToString('o') }
+      $lastUseStr = $null; if ($lut) { $lastUseStr = Format-DateToIso $lut }
       $profiles += [pscustomobject]@{ SID=$p.SID; LocalPath=$p.LocalPath; LastUseTime=$lastUseStr; Special=$p.Special }
     }
   }
@@ -2676,7 +2690,7 @@ try {
   # Summary: last reboot and installed .NET versions
   # --------------------------------------------------------------------------------
   $lastRebootTime = $null
-  if ($os -and $os.LastBootUpTime) { $lastRebootTime = $os.LastBootUpTime.ToString('o') }
+  if ($os -and $os.LastBootUpTime) { $lastRebootTime = Format-DateToIso $os.LastBootUpTime }
   $installedDotNetVersions = @()
   try {
     $ndpPaths = @(
