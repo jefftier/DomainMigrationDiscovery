@@ -2111,9 +2111,12 @@ try {
     }
   }
 
+  if ($script:log) { $script:log.Write('Discover: profile loop complete', 'INFO') }
+
   # --------------------------------------------------------------------------------
   # Current User Credential Manager
   # --------------------------------------------------------------------------------
+  if ($script:log) { $script:log.Write('Discover: starting CredentialManager (current user)', 'INFO') }
   # Check current user's credentials (cmdkey only works for current user context)
   $credentialManager += Safe-Try {
     Get-CredentialManagerDomainReferences -DomainMatchers $matchers -Log $script:log
@@ -2125,6 +2128,7 @@ try {
   # --------------------------------------------------------------------------------
   # Certificates
   # --------------------------------------------------------------------------------
+  if ($script:log) { $script:log.Write('Discover: starting Certificates', 'INFO') }
   # Scan certificate stores for old domain references in subject names, issuers, etc.
   $certificates = Safe-Try {
     Get-CertificatesWithDomainReferences -DomainMatchers $matchers -Log $script:log
@@ -2133,6 +2137,7 @@ try {
   # --------------------------------------------------------------------------------
   # Firewall Rules
   # --------------------------------------------------------------------------------
+  if ($script:log) { $script:log.Write('Discover: starting FirewallRules', 'INFO') }
   # Scan Windows Firewall rules for old domain references in service names, etc.
   $firewallRules = Safe-Try {
     Get-FirewallRulesWithDomainReferences -DomainMatchers $matchers -Log $script:log
@@ -2141,6 +2146,7 @@ try {
   # --------------------------------------------------------------------------------
   # IIS (Web Server)
   # --------------------------------------------------------------------------------
+  if ($script:log) { $script:log.Write('Discover: starting IIS', 'INFO') }
   # Scan IIS sites and application pools for old domain references in bindings, identities, etc.
   $iisConfiguration = Safe-Try {
     Get-IISDomainReferences -DomainMatchers $matchers -Log $script:log
@@ -2149,6 +2155,7 @@ try {
   # --------------------------------------------------------------------------------
   # SQL Server (presence + version always; domain refs when instances exist)
   # --------------------------------------------------------------------------------
+  if ($script:log) { $script:log.Write('Discover: starting SqlServer', 'INFO') }
   $sqlServerPresence = Safe-Try { Get-SqlServerPresence -Log $script:log } 'SqlServerPresence'
   if (-not $sqlServerPresence) { $sqlServerPresence = [pscustomobject]@{ Installed = $false; Version = $null } }
   $sqlServerConfiguration = Safe-Try {
@@ -2158,6 +2165,7 @@ try {
   # --------------------------------------------------------------------------------
   # Event Logs
   # --------------------------------------------------------------------------------
+  if ($script:log) { $script:log.Write('Discover: starting EventLogReferences', 'INFO') }
   # Scan Windows event logs for old domain references in event messages.
   # Only scans events from the last EventLogDays days.
   $eventLogDomainReferences = Safe-Try {
@@ -2167,6 +2175,7 @@ try {
   # --------------------------------------------------------------------------------
   # Application Configuration Files
   # --------------------------------------------------------------------------------
+  if ($script:log) { $script:log.Write('Discover: starting ApplicationConfigFiles', 'INFO') }
   # Scan common application configuration file locations for old domain references.
   # This runs on all systems, not just SQL servers. Skip when -ExcludeConfigFiles to reduce runtime.
   if ($ExcludeConfigFiles) {
@@ -2297,6 +2306,7 @@ try {
   # --------------------------------------------------------------------------------
   # Services & Scheduled Tasks
   # --------------------------------------------------------------------------------
+  if ($script:log) { $script:log.Write('Discover: starting Services', 'INFO') }
   # Collect Windows services and scheduled tasks. Use CIM when available (PS 3+); for tasks use Get-ScheduledTask on PS 5+ for completeness, schtasks fallback on PS 3/4.
   if ($script:CompatibilityMode -eq 'Full') {
     $services = Safe-Try { Get-CimInstance Win32_Service | Select-Object Name,DisplayName,State,StartMode,StartName,PathName } 'Services'
@@ -2306,6 +2316,7 @@ try {
   if (-not $services) { $services = @() }
 
   $tasks = @()
+  if ($script:log) { $script:log.Write('Discover: starting ScheduledTasks', 'INFO') }
   if ($script:CompatibilityMode -eq 'Full' -and (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) {
     $tasks = Safe-Try {
       Get-ScheduledTask | ForEach-Object {
@@ -2344,6 +2355,7 @@ try {
   # --------------------------------------------------------------------------------
   # Local Groups & Administrators
   # --------------------------------------------------------------------------------
+  if ($script:log) { $script:log.Write('Discover: starting LocalGroups', 'INFO') }
   # Collect local group memberships, with special focus on Administrators group.
   $localGroupsToCheck = @('Administrators','Remote Desktop Users','Power Users')
   $localGroupMembers = foreach($g in $localGroupsToCheck){ Get-LocalGroupMembersSafe $g }
@@ -3034,6 +3046,7 @@ function Get-SharedFoldersWithACL {
     }
 }
 
+  if ($script:log) { $script:log.Write('Discover: starting GPO and SharedFolders', 'INFO') }
   $gpoDN = Safe-Try { Get-GPOMachineDN } 'Get-GPOMachineDN'
   $sharedFoldersResult = Safe-Try { Get-SharedFoldersWithACL -Log $script:log } 'Get-SharedFoldersWithACL'
   # Extract shares and errors from the result (handle both old format and new format for backwards compatibility)

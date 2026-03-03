@@ -72,8 +72,24 @@ function Get-CredentialManagerDomainReferences {
     if (-not (Test-Path $regPath)) { continue }
     
     try {
-      $vaultKeys = Get-ChildItem -Path $regPath -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.PSIsContainer }
-      foreach ($vaultKey in $vaultKeys) {
+      # Run Get-ChildItem -Recurse in a job with timeout; registry recurse can hang on locked/corrupt keys
+      $vaultKeyPaths = @()
+      $job = Start-Job -ScriptBlock { param($p) Get-ChildItem -Path $p -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.PSIsContainer } | ForEach-Object { $_.PSPath } } -ArgumentList $regPath
+      try {
+        $null = Wait-Job $job -Timeout 60
+        if ((Get-Job $job -ErrorAction SilentlyContinue).State -eq 'Running') {
+          Stop-Job $job -ErrorAction SilentlyContinue
+          if ($Log) { $Log.Write('CredentialManager: registry recurse timed out after 60s', 'WARN') }
+        } else {
+          $vaultKeyPaths = @(Receive-Job $job -ErrorAction SilentlyContinue)
+        }
+      } finally {
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+      }
+      foreach ($vaultKeyPath in $vaultKeyPaths) {
+        $vaultKey = $null
+        try { $vaultKey = Get-Item -LiteralPath $vaultKeyPath -ErrorAction SilentlyContinue } catch {}
+        if (-not $vaultKey) { continue }
         try {
           $target = $null
           $userName = $null
@@ -111,7 +127,7 @@ function Get-CredentialManagerDomainReferences {
             }
           }
         } catch {
-          if ($Log) { $Log.Write("Error reading vault key $($vaultKey.PSPath): $($_.Exception.Message)", 'WARN') }
+          if ($Log) { $Log.Write("Error reading vault key $vaultKeyPath : $($_.Exception.Message)", 'WARN') }
         }
       }
     } catch {
@@ -124,8 +140,27 @@ function Get-CredentialManagerDomainReferences {
     try {
       $cmdkeyPath = Join-Path $env:SystemRoot 'System32\cmdkey.exe'
       if (Test-Path $cmdkeyPath) {
-        $cmdkeyOutput = & $cmdkeyPath /list 2>&1
-        if ($LASTEXITCODE -eq 0 -and $cmdkeyOutput) {
+        $cmdkeyOutput = $null
+        $cmdkeyTimeoutSeconds = 30
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $cmdkeyPath
+        $psi.Arguments = '/list'
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $exited = $proc.WaitForExit($cmdkeyTimeoutSeconds * 1000)
+        if (-not $exited) {
+          try { $proc.Kill() } catch {}
+          if ($Log) { $Log.Write("CredentialManager: cmdkey /list timed out after ${cmdkeyTimeoutSeconds}s", 'WARN') }
+        } else {
+          $cmdkeyOutput = $proc.StandardOutput.ReadToEnd()
+          if ($proc.ExitCode -eq 0 -and $cmdkeyOutput) {
+            $cmdkeyOutput = $cmdkeyOutput -split "`r?`n"
+          } else { $cmdkeyOutput = $null }
+        }
+        if ($cmdkeyOutput) {
           $currentTarget = $null
           $currentUser = $null
           $inEntry = $false
