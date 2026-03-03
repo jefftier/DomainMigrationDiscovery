@@ -1039,10 +1039,10 @@ function Get-RegistryValueMultiView {
 #>
 function New-OldDomainMatchers([string]$netbios,[string]$fqdn){
   $dn = ($fqdn -split '\.' | ForEach-Object { "DC=$_" }) -join ','
-  $netbiosRegex = $null; if ($netbios) { $netbiosRegex = [regex]::new("(?i)\b$([regex]::Escape($netbios))\b") }
-  $fqdnRegex = $null; if ($fqdn) { $fqdnRegex = [regex]::new("(?i)$([regex]::Escape($fqdn))") }
-  $upnRegex = $null; if ($fqdn) { $upnRegex = [regex]::new("(?i)@$([regex]::Escape($fqdn))$") }
-  $ldapDnRegex = $null; if ($fqdn) { $ldapDnRegex = [regex]::new("(?i)$([regex]::Escape($dn))") }
+  $netbiosRegex = $null; if ($netbios) { $netbiosRegex = [regex]("(?i)\b$([regex]::Escape($netbios))\b") }
+  $fqdnRegex = $null; if ($fqdn) { $fqdnRegex = [regex]("(?i)$([regex]::Escape($fqdn))") }
+  $upnRegex = $null; if ($fqdn) { $upnRegex = [regex]("(?i)@$([regex]::Escape($fqdn))$") }
+  $ldapDnRegex = $null; if ($fqdn) { $ldapDnRegex = [regex]("(?i)$([regex]::Escape($dn))") }
   $obj = [pscustomobject]@{
     Netbios = $netbiosRegex
     Fqdn    = $fqdnRegex
@@ -1227,7 +1227,7 @@ function Get-SCCMTenantInfo {
                                     
                                     # Check each domain (case-insensitive)
                                     foreach ($domain in $domains) {
-                                        $pattern = [regex]::new("(?i)" + [regex]::Escape($domain))
+                                        $pattern = [regex]("(?i)" + [regex]::Escape($domain))
                                         if ($pattern.IsMatch($valueStr)) {
                                             # For arrays, show the full array in Value; for single values, show the string
                                             $displayValue = $valueStr; if ($value -is [array]) { $displayValue = ($value -join ' | ') }
@@ -2145,10 +2145,10 @@ try {
       param($modPath, $fqdn, $netbios)
       Import-Module $modPath -Force
       $dn = ($fqdn -split '\.' | ForEach-Object { "DC=$_" }) -join ','
-      $nb = $null; if ($netbios) { $nb = [regex]::new("(?i)\b$([regex]::Escape($netbios))\b") }
-      $fq = $null; if ($fqdn) { $fq = [regex]::new("(?i)$([regex]::Escape($fqdn))") }
-      $up = $null; if ($fqdn) { $up = [regex]::new("(?i)@$([regex]::Escape($fqdn))$") }
-      $ld = $null; if ($fqdn) { $ld = [regex]::new("(?i)$([regex]::Escape($dn))") }
+      $nb = $null; if ($netbios) { $nb = [regex]("(?i)\b$([regex]::Escape($netbios))\b") }
+      $fq = $null; if ($fqdn) { $fq = [regex]("(?i)$([regex]::Escape($fqdn))") }
+      $up = $null; if ($fqdn) { $up = [regex]("(?i)@$([regex]::Escape($fqdn))$") }
+      $ld = $null; if ($fqdn) { $ld = [regex]("(?i)$([regex]::Escape($dn))") }
       $matchers = [pscustomobject]@{ Netbios = $nb; Fqdn = $fq; Upn = $up; LdapDn = $ld }
       $matchers | Add-Member -MemberType ScriptMethod -Name Match -Value { param([string]$s); if ([string]::IsNullOrWhiteSpace($s)) { return $false }; foreach ($r in @($this.Netbios, $this.Fqdn, $this.Upn, $this.LdapDn)) { if ($r -and $r.IsMatch($s)) { return $true } }; return $false } -PassThru | Out-Null
       Get-FirewallRulesWithDomainReferences -DomainMatchers $matchers -Log $null

@@ -342,13 +342,17 @@ function Get-FirewallRulesWithDomainReferences {
     foreach ($rule in $rules) {
       try {
         if ($null -eq $rule) { continue }
+        # Some code paths (e.g. filter cmdlets in job runspace) expect .State; CIM may expose only .Enabled - add State if missing
+        if ($rule.PSObject.Properties['State'] -eq $null -and $rule.PSObject.Properties['Enabled'] -ne $null) {
+          try { $rule | Add-Member -NotePropertyName State -NotePropertyValue $rule.Enabled -Force -ErrorAction SilentlyContinue } catch {}
+        }
         
-        $name = [string]$rule.Name
-        $displayName = [string]$rule.DisplayName
-        $description = [string]$rule.Description
-        $group = [string]$rule.Group
-        $direction = [string]$rule.Direction
-        $action = [string]$rule.Action
+        $name = try { [string]$rule.Name } catch { '' }
+        $displayName = try { [string]$rule.DisplayName } catch { '' }
+        $description = try { [string]$rule.Description } catch { '' }
+        $group = try { [string]$rule.Group } catch { '' }
+        $direction = try { [string]$rule.Direction } catch { '' }
+        $action = try { [string]$rule.Action } catch { '' }
         
         # Get address filter
         $localUser = $null
