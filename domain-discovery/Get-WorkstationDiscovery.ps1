@@ -911,10 +911,21 @@ function Get-UninstallItemsFromHive([Microsoft.Win32.RegistryKey]$root){
     Boolean indicating if the hive was loaded (true) or already existed (false).
 #>
 function Load-UserHive([string]$sid,[string]$ntuserPath){
+  $loadTimeoutSeconds = 30
   if (-not (Test-Path "Registry::HKEY_USERS\$sid") -and (Test-Path $ntuserPath)){
     for($i=0; $i -lt 3; $i++){
-      $p = Start-Process reg.exe -ArgumentList @('load',"HKU\$sid","$ntuserPath") -Wait -PassThru -WindowStyle Hidden
-      if ($p.ExitCode -eq 0) { return $true }
+      $psi = New-Object System.Diagnostics.ProcessStartInfo
+      $psi.FileName = 'reg.exe'
+      $psi.Arguments = "load `"HKU\$sid`" `"$ntuserPath`""
+      $psi.UseShellExecute = $false
+      $psi.CreateNoWindow = $true
+      $proc = [System.Diagnostics.Process]::Start($psi)
+      $exited = $proc.WaitForExit($loadTimeoutSeconds * 1000)
+      if (-not $exited) {
+        try { $proc.Kill() } catch {}
+        throw "Load hive timed out after ${loadTimeoutSeconds}s for $sid"
+      }
+      if ($proc.ExitCode -eq 0) { return $true }
       Start-Sleep -Seconds (2 * ($i+1))
     }
     throw "Unable to load hive for $sid"
@@ -936,9 +947,25 @@ function Load-UserHive([string]$sid,[string]$ntuserPath){
     Boolean indicating if this function loaded the hive (true) or it already existed (false).
 #>
 function Unload-UserHive([string]$sid,[bool]$didLoad){
+  $unloadTimeoutSeconds = 15
   if ($didLoad) {
     [gc]::Collect(); [gc]::WaitForPendingFinalizers();
-    & reg.exe unload "HKU\$sid" | Out-Null
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'reg.exe'
+    $psi.Arguments = "unload `"HKU\$sid`""
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardError = $true
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $exited = $proc.WaitForExit($unloadTimeoutSeconds * 1000)
+    if (-not $exited) {
+      try { $proc.Kill() } catch {}
+      throw "Unload hive timed out after ${unloadTimeoutSeconds}s for $sid"
+    }
+    if ($proc.ExitCode -ne 0) {
+      $err = $proc.StandardError.ReadToEnd()
+      throw "Unload hive failed for $sid (exit $($proc.ExitCode)): $err"
+    }
   }
 }
 
@@ -1942,6 +1969,10 @@ try {
       if ([string]::IsNullOrWhiteSpace($p.LocalPath)) { continue }
       if ($p.Special) { continue }
       if ($p.LocalPath -like 'C:\\Windows\\ServiceProfiles\\*' -or $p.LocalPath -like 'C:\\Windows\\System32\\Config\\SystemProfile*') { continue }
+      # Skip NT SERVICE (S-1-5-80) and IIS Application Pool (S-1-5-82) - no loadable user hives, often cause load failures/hangs
+      if ($p.SID -match '^S-1-5-80-|^S-1-5-82-') { continue }
+      # Skip profile SIDs that look like backup/orphan keys (e.g. .old) - unload often fails with Access denied
+      if ($p.SID -match '\.old$') { continue }
       $lut = Convert-LastUseTime $p.LastUseTime
       if ($lut -and $lut -lt $cutoffDate) { continue }
       $lastUseStr = $null; if ($lut) { $lastUseStr = $lut.ToString('o') }
