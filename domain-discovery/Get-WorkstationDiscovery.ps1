@@ -1994,6 +1994,7 @@ try {
   foreach($prof in $profiles){
     $sid = $prof.SID
     $ntuser = Join-Path $prof.LocalPath 'NTUSER.DAT'
+    $loaded = $false
     $loaded = Safe-Try { Load-UserHive -sid $sid -ntuserPath $ntuser } "Load hive $sid"
     try {
       # Apps discovery
@@ -2043,7 +2044,7 @@ try {
     finally {
       Remove-Variable p,sk,subkeys,letterKey,props -ErrorAction SilentlyContinue
       [gc]::Collect(); [gc]::WaitForPendingFinalizers();
-      Safe-Try { Unload-UserHive -sid $sid -didLoad $loaded } "Unload hive $sid" | Out-Null
+      Safe-Try { Unload-UserHive -sid $sid -didLoad ($loaded -eq $true) } "Unload hive $sid" | Out-Null
     }
   }
 
