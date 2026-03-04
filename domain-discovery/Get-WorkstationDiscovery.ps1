@@ -3083,6 +3083,28 @@ function Get-SharedFoldersWithACL {
     }
 }
 
+<#
+.SYNOPSIS
+    Returns DNS configuration relevant to domain migration (stub when full implementation is not available).
+.OUTPUTS
+    PSCustomObject with DnsServers, Suffixes, Errors (serializable, no scriptblocks).
+#>
+function Get-DnsConfigurationForMigration {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        $DomainMatchers,
+        [Parameter(Mandatory = $false)]
+        $Log
+    )
+    # Stub: return empty serializable structure. Replace with full DNS discovery if needed.
+    return [pscustomobject]@{
+        DnsServers = @()
+        Suffixes   = @()
+        Errors     = @()
+    }
+}
+
   if ($script:log) { $script:log.Write('Discover: starting GPO and SharedFolders', 'INFO') }
   $gpoDN = Safe-Try { Get-GPOMachineDN } 'Get-GPOMachineDN'
   $sharedFoldersResult = Safe-Try { Get-SharedFoldersWithACL -Log $script:log } 'Get-SharedFoldersWithACL'
@@ -3196,7 +3218,8 @@ function Get-SharedFoldersWithACL {
   $localPath = Join-Path $OutputRoot $fname
   try {
     # Convert to JSON with proper depth and error handling
-    # Use depth 10 to ensure deeply nested structures (e.g., Detection.OldDomain, IIS.Sites.Bindings) are fully serialized
+    # Use depth 10 to ensure deeply nested structures (e.g., Detection.OldDomain, IIS.Sites.Bindings) are fully serialized.
+    # If conversion fails (e.g. "bad format" on some PS versions or object types), try progressively lower depths.
     $json = $null
     $jsonConversionError = $null
     try {
@@ -3209,31 +3232,34 @@ function Get-SharedFoldersWithACL {
         }
       }
       
-      if ($script:CompatibilityMode -eq 'Full') {
-        $json = $result | ConvertTo-Json -Depth 10 -ErrorAction Stop
-      } else {
-        # Legacy path for PS 3.0–4.0 (-Depth parameter available but may have limitations)
+      $depthsToTry = @(10, 5, 3, 1)
+      $lastException = $null
+      foreach ($depth in $depthsToTry) {
         try {
-          $json = $result | ConvertTo-Json -Depth 10 -ErrorAction Stop
+          $json = $result | ConvertTo-Json -Depth $depth -ErrorAction Stop
+          if (-not [string]::IsNullOrWhiteSpace($json)) {
+            $null = $json | ConvertFrom-Json -ErrorAction Stop
+            if ($depth -lt 10 -and $script:log) {
+              $script:log.Write("ConvertTo-Json succeeded with -Depth $depth (Depth 10 failed)", 'WARN')
+            }
+            break
+          }
         } catch {
-          if ($script:log) { $script:log.Write("ConvertTo-Json -Depth failed, using default depth: $($_.Exception.Message)", 'WARN') }
-          $json = $result | ConvertTo-Json -ErrorAction Stop
+          $lastException = $_
+          if ($script:log -and $depth -eq 10) {
+            $script:log.Write("ConvertTo-Json -Depth $depth failed: $($_.Exception.Message)", 'WARN')
+          }
         }
       }
-      
-      # Validate JSON is not empty
       if ([string]::IsNullOrWhiteSpace($json)) {
+        if ($lastException) {
+          $jsonConversionError = $lastException.Exception.Message
+          throw $lastException.Exception
+        }
         throw "JSON conversion resulted in empty string"
       }
-      
-      # Validate JSON can be parsed (ensures valid JSON format for Power BI)
-      try {
-        $null = $json | ConvertFrom-Json -ErrorAction Stop
-      } catch {
-        throw "Generated JSON is not valid JSON format: $($_.Exception.Message)"
-      }
     } catch {
-      $jsonConversionError = $_.Exception.Message
+      $jsonConversionError = if ($_.Exception.Message) { $_.Exception.Message } else { $jsonConversionError }
       $script:log.Write("JSON conversion failed: $jsonConversionError", 'ERROR')
       throw
     }

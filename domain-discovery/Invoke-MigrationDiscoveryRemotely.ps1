@@ -575,7 +575,6 @@ function Ensure-WinRmAndConnect {
         $execError = $_.Exception.Message
         $errorMsg = "Failed to execute remote script: $execError"
         Write-Warning "[$ComputerName] Script execution failed"
-        Write-Warning "[$ComputerName] $execError"
         if ($WriteErrorLogFunction) {
             & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "SCRIPT_EXECUTION_ERROR"
         }
@@ -760,7 +759,7 @@ $InvokeDiscoveryOnServerScriptBlock = {
         $payloadObj = $discoveryResult.Output
         if (-not $payloadObj -or -not $payloadObj.Payload) {
             $errorMsg = "Discovery ran but no JSON payload returned from $ComputerName"
-            Write-Warning "[$ComputerName] $errorMsg"
+            Write-Warning "[$ComputerName] No JSON payload returned"
             & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
             return
         }
@@ -787,7 +786,7 @@ $InvokeDiscoveryOnServerScriptBlock = {
         }
         catch {
             $errorMsg = "Failed to decode JSON payload from $ComputerName : $($_.Exception.Message)"
-            Write-Warning "[$ComputerName] $errorMsg"
+            Write-Warning "[$ComputerName] Failed to decode JSON payload"
             & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
             return
         }
@@ -1115,7 +1114,7 @@ if (-not $useParallelThreadJob -or $parallelFailed) {
         catch {
             $errorMsg = "Unexpected error processing server: $($_.Exception.Message)"
             & $writeErrorLogScriptBlock -ServerName $server -ErrorMessage $errorMsg -ErrorType "FATAL"
-            Write-Warning "[$server] $errorMsg"
+            Write-Warning "[$server] Unexpected error (see error log)"
         }
     }
 }

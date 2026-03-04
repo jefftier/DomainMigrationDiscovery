@@ -271,7 +271,7 @@ try {
     $sessions = @(New-PSSession @sessionParams)
 }
 catch {
-    Write-Warning "New-PSSession reported: $($_.Exception.Message)"
+    Write-Warning "New-PSSession failed for one or more servers (see error log)"
 }
 
 $connectedComputers = @($sessions | ForEach-Object { $_.ComputerName })
@@ -291,7 +291,7 @@ if ($sessions.Count -gt 0) {
         $allResults = Invoke-Command -Session $sessions -ScriptBlock $remoteDiscoveryScriptBlock -ArgumentList @($helperModuleContent, $remoteRunDir, $scriptContent, $scriptParams, $RemoteOutputRoot, $configFileContent, [bool]$UseSmbForResults.IsPresent) -ErrorAction Continue
     }
     catch {
-        Write-Warning "Invoke-Command reported: $($_.Exception.Message)"
+        Write-Warning "Invoke-Command reported an error (see error log)"
     }
     finally {
         Remove-PSSession -Session $sessions -Force -ErrorAction SilentlyContinue
@@ -309,14 +309,14 @@ if (-not $UseSmbForResults) {
         if (-not $r) { continue }
         if (-not $r.Success) {
             $null = $script:InvokeFailed.Add([pscustomobject]@{ ComputerName = $r.ComputerName; ErrorMessage = $r.ErrorMessage })
-            Write-Warning "[$($r.ComputerName)] $($r.ErrorMessage)"
+            Write-Warning "[$($r.ComputerName)] Script execution failed"
             Write-ErrorLog -ServerName $r.ComputerName -ErrorMessage $r.ErrorMessage -ErrorType "SCRIPT_EXECUTION_ERROR"
             continue
         }
         if (-not $r.Payload) {
             $err = "Discovery ran but no JSON payload returned from $($r.ComputerName)"
             $null = $script:InvokeFailed.Add([pscustomobject]@{ ComputerName = $r.ComputerName; ErrorMessage = $err })
-            Write-Warning "[$($r.ComputerName)] $err"
+            Write-Warning "[$($r.ComputerName)] No JSON payload returned"
             Write-ErrorLog -ServerName $r.ComputerName -ErrorMessage $err -ErrorType "FILE_COLLECTION_ERROR"
             continue
         }
