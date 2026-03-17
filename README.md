@@ -667,6 +667,7 @@ Each endpoint object contains:
 Each firewall rule object contains:
 - `Name` - Rule name
 - `DisplayName` - Rule display name
+- `Group` - Rule group (display group)
 - `Direction` - Rule direction (Inbound, Outbound)
 - `Action` - Rule action (Allow, Block)
 - `ApplicationPath` - Application path filter
@@ -674,6 +675,10 @@ Each firewall rule object contains:
 - `RemoteUser` - Remote user filter
 - `HasDomainReference` - Whether rule contains old domain reference
 - `MatchedField` - Which field matched (DisplayName, Description, Group, LocalUser, RemoteUser, ApplicationPath, ServiceName)
+- `RuleSource` - **"Default"** (Microsoft built-in) or **"UserAdded"** (user/administrator or third-party). Classification is heuristic: rules in well-known MS groups (e.g. Core Networking, Remote Desktop) or with group resource IDs (e.g. `@firewallapi.dll,-23255`) are Default; others are UserAdded.
+- `PolicyStoreSource` - Policy store source when available (e.g. PersistentStore, GroupPolicy, Dynamic)
+
+**Performance:** By default, MS default rules are filtered out on the first pass (using only the rule's Group from `Get-NetFirewallRule`). No address filter, application filter, or domain checks run on default rules, which reduces work and helps avoid the 90s firewall timeout. Only user-added rules are processed and returned unless `-IncludeDefaultRules` is passed to the helper.
 
 ### DNS Configuration
 Object contains:

@@ -322,13 +322,28 @@ function Get-CertificatesWithDomainReferences {
   return $results
 }
 
+# Well-known Microsoft default firewall rule group names (English). Rules in these groups are treated as "Default"; others as "UserAdded".
+# Group may also be a resource ID like "@firewallapi.dll,-23255" for localized names - those are treated as Default.
+$script:MSDefaultFirewallGroups = @(
+  'Core Networking', 'Windows Firewall Remote Management', 'File and Printer Sharing', 'Network Discovery',
+  'Remote Event Log Management', 'Remote Scheduled Tasks Management', 'Remote Service Management', 'Remote Volume Management',
+  'Windows Remote Management', 'Remote Desktop', 'Windows Defender Firewall Remote Management', 'Windows Service Hardening',
+  'Windows Connection Manager', 'Performance Logs and Alerts', 'Distributed Transaction Coordinator', 'iSCSI Service',
+  'BITS Peercaching', 'SNMP Trap', 'World Wide Web Services', 'COM+ Network Access', 'Remote Assistance',
+  'Network List Manager', 'Windows Management Instrumentation (WMI)', 'Windows Peer to Peer Collaboration Foundation',
+  'BranchCache - Content Retrieval', 'BranchCache - Hosted Cache Client', 'BranchCache - Hosted Cache Server', 'BranchCache - Peer Discovery',
+  'HomeGroup', 'Sync Share', 'Virtual Machine Monitoring', 'Xbox Live Games', 'Xbox Live Auth Manager', 'Delivery Optimization'
+)
+
 function Get-FirewallRulesWithDomainReferences {
   [CmdletBinding()]
   param(
     [Parameter(Mandatory)]
     $DomainMatchers,
     [Parameter(Mandatory=$false)]
-    $Log
+    $Log,
+    [Parameter(Mandatory=$false)]
+    [switch]$IncludeDefaultRules  # When false (default), skip MS default rules entirely so no filter cmdlets or domain checks run on them (faster, avoids timeouts)
   )
   
   $results = @()
@@ -350,6 +365,7 @@ function Get-FirewallRulesWithDomainReferences {
           try { $rule | Add-Member -NotePropertyName State -NotePropertyValue $rule.Enabled -Force -ErrorAction SilentlyContinue } catch {}
         }
         
+        # Read only properties from the rule object (no extra cmdlets). Classify Default vs UserAdded on first pass.
         $name = try { [string]$rule.Name } catch { '' }
         $displayName = try { [string]$rule.DisplayName } catch { '' }
         $description = try { [string]$rule.Description } catch { '' }
@@ -357,6 +373,23 @@ function Get-FirewallRulesWithDomainReferences {
         $direction = try { [string]$rule.Direction } catch { '' }
         $action = try { [string]$rule.Action } catch { '' }
         
+        # Default = known MS group or resource ID (@firewallapi). Skip default rules immediately so we never run filter cmdlets or domain checks on them (faster, avoids timeouts).
+        $isDefaultRule = $false
+        if (-not [string]::IsNullOrWhiteSpace($group)) {
+          if ($group.StartsWith('@', [StringComparison]::Ordinal)) { $isDefaultRule = $true }
+          else {
+            $groupLower = $group.Trim().ToLowerInvariant()
+            foreach ($g in $script:MSDefaultFirewallGroups) {
+              if ($groupLower -eq $g.Trim().ToLowerInvariant()) { $isDefaultRule = $true; break }
+            }
+          }
+        }
+        if ($isDefaultRule -and -not $IncludeDefaultRules.IsPresent) { continue }
+        
+        $policyStoreSource = try { if ($rule.PSObject.Properties['PolicyStoreSource']) { [string]$rule.PolicyStoreSource } else { '' } } catch { '' }
+        $ruleSource = if ($isDefaultRule) { 'Default' } else { 'UserAdded' }
+        
+        # Only user-added rules reach here: get address and application filters (expensive).
         # Get address filter
         $localUser = $null
         $remoteUser = $null
@@ -430,10 +463,11 @@ function Get-FirewallRulesWithDomainReferences {
           $matchedField = 'ServiceName'
         }
         
-        # Return all rules, but flag those with domain references
+        # Return all rules, but flag those with domain references; include RuleSource (Default vs UserAdded) and Group/PolicyStoreSource
         $results += [pscustomobject]@{
           Name = $name
           DisplayName = $displayName
+          Group = $group
           Direction = $direction
           Action = $action
           ApplicationPath = $applicationPath
@@ -441,6 +475,8 @@ function Get-FirewallRulesWithDomainReferences {
           RemoteUser = $remoteUser
           HasDomainReference = $hasDomainReference
           MatchedField = $matchedField
+          RuleSource = $ruleSource
+          PolicyStoreSource = $policyStoreSource
         }
       } catch {
         if ($Log) { $Log.Write("Error processing firewall rule $($rule.Name): $($_.Exception.Message)", 'WARN') }
