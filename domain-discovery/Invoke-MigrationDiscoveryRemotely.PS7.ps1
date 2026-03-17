@@ -192,6 +192,8 @@ $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 $resultsDir = Join-Path $scriptDir "results"
 if (-not (Test-Path -Path $resultsDir)) { New-Item -Path $resultsDir -ItemType Directory -Force | Out-Null }
 $script:ErrorLogPath = Join-Path $resultsDir "error.log"
+# When -PlantID is set, collect JSON under results\<plantid_lower>; otherwise results\out
+$localOutputSubdir = if ([string]::IsNullOrWhiteSpace($PlantId)) { "out" } else { $PlantId.Trim().ToLower() }
 
 # Remote scriptblock: staging + discovery + return payload or success (Truth Map exact)
 $remoteDiscoveryScriptBlock = {
@@ -307,7 +309,7 @@ if ($sessions.Count -gt 0) {
 if ($allResults -and -not ($allResults -is [array])) { $allResults = @($allResults) }
 
 # --- Phase: Collection (Truth Map: same method as PS5.1) ---
-$localOutputRoot = Join-Path $scriptDir "results\out"
+$localOutputRoot = Join-Path $scriptDir "results\$localOutputSubdir"
 if (-not (Test-Path -Path $localOutputRoot)) { New-Item -Path $localOutputRoot -ItemType Directory -Force | Out-Null }
 
 if (-not $UseSmbForResults) {

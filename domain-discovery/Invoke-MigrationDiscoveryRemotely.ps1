@@ -218,6 +218,8 @@ if ($OldDomainNetBIOS) { $scriptParams['OldDomainNetBIOS'] = $OldDomainNetBIOS }
 # Note: NewDomainNetBIOS is not a parameter in Get-WorkstationDiscovery.ps1, so we explicitly do NOT pass it
 # This prevents PowerShell parameter binding errors on remote systems
 if ($PlantId)          { $scriptParams['PlantId'] = $PlantId }
+# When -PlantID is set, collect JSON under results\<plantid_lower>; otherwise results\out
+$localOutputSubdir = if ([string]::IsNullOrWhiteSpace($PlantId)) { "out" } else { $PlantId.Trim().ToLower() }
 if ($EmitStdOut)       { $scriptParams['EmitStdOut'] = $true }
 if ($ExcludeConfigFiles) { $scriptParams['ExcludeConfigFiles'] = $true }
 if ($LogTimeMetrics) { $scriptParams['LogTimeMetrics'] = $true }
@@ -782,7 +784,7 @@ $InvokeDiscoveryOnServerScriptBlock = {
             if ($MyInvocation.PSCommandPath) { $scriptDir = Split-Path -Parent $MyInvocation.PSCommandPath }
             elseif ($PSScriptRoot) { $scriptDir = $PSScriptRoot }
             else { $scriptDir = (Get-Location).Path }
-            $localOutputRoot = Join-Path $scriptDir "results\out"
+            $localOutputRoot = Join-Path $scriptDir "results\$localOutputSubdir"
             if (-not (Test-Path -Path $localOutputRoot)) {
                 New-Item -Path $localOutputRoot -ItemType Directory -Force | Out-Null
             }
@@ -919,8 +921,8 @@ $InvokeDiscoveryOnServerScriptBlock = {
                 $scriptDir = (Get-Location).Path
             }
 
-            # Create local directory structure: {ScriptDir}\results\out
-            $localOutputRoot = Join-Path $scriptDir "results\out"
+            # Create local directory structure: {ScriptDir}\results\<out|plantid>
+            $localOutputRoot = Join-Path $scriptDir "results\$localOutputSubdir"
             if (-not (Test-Path -Path $localOutputRoot)) {
                 New-Item -Path $localOutputRoot -ItemType Directory -Force | Out-Null
             }
