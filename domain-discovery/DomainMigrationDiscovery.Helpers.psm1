@@ -51,11 +51,15 @@ function Get-CredentialManagerDomainReferences {
     [Parameter(Mandatory)]
     $DomainMatchers,
     [Parameter(Mandatory=$false)]
-    $Log
+    $Log,
+    [Parameter(Mandatory=$false)]
+    [int]$DiscoveryTimeoutSeconds = 0
   )
   
   $results = @()
-  
+  $registryTimeoutSeconds = if ($DiscoveryTimeoutSeconds -gt 0) { $DiscoveryTimeoutSeconds } else { 60 }
+  $cmdkeyTimeoutSeconds = if ($DiscoveryTimeoutSeconds -gt 0) { $DiscoveryTimeoutSeconds } else { 30 }
+
   # Check registry-based credentials (Windows Vault and Internet Settings)
   $regPaths = @()
   if ($ProfileSID) {
@@ -76,10 +80,10 @@ function Get-CredentialManagerDomainReferences {
       $vaultKeyPaths = @()
       $job = Start-Job -ScriptBlock { param($p) Get-ChildItem -Path $p -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.PSIsContainer } | ForEach-Object { $_.PSPath } } -ArgumentList $regPath
       try {
-        $null = Wait-Job $job -Timeout 60
+        $null = Wait-Job $job -Timeout $registryTimeoutSeconds
         if ((Get-Job $job -ErrorAction SilentlyContinue).State -eq 'Running') {
           Stop-Job $job -ErrorAction SilentlyContinue
-          if ($Log) { $Log.Write('CredentialManager: registry recurse timed out after 60s', 'WARN') }
+          if ($Log) { $Log.Write("CredentialManager: registry recurse timed out after ${registryTimeoutSeconds}s", 'WARN') }
         } else {
           $vaultKeyPaths = @(Receive-Job $job -ErrorAction SilentlyContinue)
         }
@@ -141,7 +145,6 @@ function Get-CredentialManagerDomainReferences {
       $cmdkeyPath = Join-Path $env:SystemRoot 'System32\cmdkey.exe'
       if (Test-Path $cmdkeyPath) {
         $cmdkeyOutput = $null
-        $cmdkeyTimeoutSeconds = 30
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $cmdkeyPath
         $psi.Arguments = '/list'

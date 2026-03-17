@@ -27,6 +27,9 @@ param(
     
     [switch]$EmitStdOut,      # bubble up the summary object from each server
     [switch]$ExcludeConfigFiles,  # skip config file scanning on each remote (faster discovery)
+    [switch]$LogTimeMetrics,      # log each discovery phase and duration on the remote
+    [switch]$NoDiscoveryTimeouts, # do not apply timeouts to discovery steps on the remote
+    [int]$DiscoveryTimeoutSeconds = 0,  # override all discovery timeouts with this value (seconds); ignored if NoDiscoveryTimeouts
     [switch]$UseParallel,     # simple fan-out option
     [switch]$AttemptWinRmHeal, # Optional: attempt to start WinRM service if connection fails (default: false)
     [switch]$UseSmbForResults, # If set, retrieve JSON via \\server\c$ or CollectorShare; default is WinRM return (no SMB)
@@ -217,6 +220,9 @@ if ($OldDomainNetBIOS) { $scriptParams['OldDomainNetBIOS'] = $OldDomainNetBIOS }
 if ($PlantId)          { $scriptParams['PlantId'] = $PlantId }
 if ($EmitStdOut)       { $scriptParams['EmitStdOut'] = $true }
 if ($ExcludeConfigFiles) { $scriptParams['ExcludeConfigFiles'] = $true }
+if ($LogTimeMetrics) { $scriptParams['LogTimeMetrics'] = $true }
+if ($NoDiscoveryTimeouts) { $scriptParams['NoDiscoveryTimeouts'] = $true }
+if ($DiscoveryTimeoutSeconds -gt 0) { $scriptParams['DiscoveryTimeoutSeconds'] = $DiscoveryTimeoutSeconds }
 
 # Handle ConfigFile parameter
 # If ConfigFile is provided, we need to copy it to each remote server

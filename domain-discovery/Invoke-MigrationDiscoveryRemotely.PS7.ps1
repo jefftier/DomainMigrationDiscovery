@@ -33,6 +33,9 @@ param(
 
     [switch]$EmitStdOut,
     [switch]$ExcludeConfigFiles,
+    [switch]$LogTimeMetrics,
+    [switch]$NoDiscoveryTimeouts,
+    [int]$DiscoveryTimeoutSeconds = 0,
     [switch]$AttemptWinRmHeal, # Optional: not applied in PS7 parallel mode (documented only)
     [switch]$UseSmbForResults, # If set, retrieve JSON via \\server\c$ or CollectorShare; default is WinRM return
 
@@ -166,6 +169,9 @@ if ($OldDomainNetBIOS) { $scriptParams['OldDomainNetBIOS'] = $OldDomainNetBIOS }
 if ($PlantId)          { $scriptParams['PlantId'] = $PlantId }
 if ($EmitStdOut)       { $scriptParams['EmitStdOut'] = $true }
 if ($ExcludeConfigFiles) { $scriptParams['ExcludeConfigFiles'] = $true }
+if ($LogTimeMetrics) { $scriptParams['LogTimeMetrics'] = $true }
+if ($NoDiscoveryTimeouts) { $scriptParams['NoDiscoveryTimeouts'] = $true }
+if ($DiscoveryTimeoutSeconds -gt 0) { $scriptParams['DiscoveryTimeoutSeconds'] = $DiscoveryTimeoutSeconds }
 
 $remoteConfigPath = $null
 $configFileContent = $null
