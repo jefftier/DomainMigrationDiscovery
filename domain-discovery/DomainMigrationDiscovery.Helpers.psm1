@@ -360,10 +360,21 @@ function Get-FirewallRulesWithDomainReferences {
     foreach ($rule in $rules) {
       try {
         if ($null -eq $rule) { continue }
-        # Some code paths (e.g. filter cmdlets in job runspace) expect .State; CIM may expose only .Enabled - add State if missing
-        if ($rule.PSObject.Properties['State'] -eq $null -and $rule.PSObject.Properties['Enabled'] -ne $null) {
-          try { $rule | Add-Member -NotePropertyName State -NotePropertyValue $rule.Enabled -Force -ErrorAction SilentlyContinue } catch {}
+        # Filter cmdlets (Get-NetFirewallAddressFilter, Get-NetFirewallApplicationFilter) expect .State on the rule; CIM may expose only .Enabled - ensure State exists
+        $hasState = $null -ne $rule.PSObject.Properties['State']
+        if (-not $hasState) {
+          $stateValue = $null
+          if ($null -ne $rule.PSObject.Properties['Enabled']) { $stateValue = $rule.Enabled }
+          if ($null -eq $stateValue) { $stateValue = 'Enabled' }
+          try {
+            $rule | Add-Member -NotePropertyName State -NotePropertyValue $stateValue -Force -ErrorAction Stop
+            $hasState = $null -ne $rule.PSObject.Properties['State']
+          } catch {
+            if ($Log) { $Log.Write("Firewall rule: could not add State property: $($_.Exception.Message)", 'WARN') }
+          }
         }
+        # If State still missing (e.g. CIM instance where Add-Member does not persist), skip filter cmdlets to avoid "property state cannot be found" inside them
+        $skipFilterCmdlets = -not $hasState
         
         # Read only properties from the rule object (no extra cmdlets). Classify Default vs UserAdded on first pass.
         $name = try { [string]$rule.Name } catch { '' }
@@ -389,32 +400,34 @@ function Get-FirewallRulesWithDomainReferences {
         $policyStoreSource = try { if ($rule.PSObject.Properties['PolicyStoreSource']) { [string]$rule.PolicyStoreSource } else { '' } } catch { '' }
         $ruleSource = if ($isDefaultRule) { 'Default' } else { 'UserAdded' }
         
-        # Only user-added rules reach here: get address and application filters (expensive).
-        # Get address filter
+        # Only user-added rules reach here: get address and application filters (expensive). Skip if rule has no .State (avoids "property state cannot be found" in filter cmdlets).
         $localUser = $null
         $remoteUser = $null
         $applicationPath = $null
         $serviceName = $null
         
-        try {
-          $addrFilter = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue
-          if ($addrFilter) {
-            $localUser = [string]$addrFilter.LocalUser
-            $remoteUser = [string]$addrFilter.RemoteUser
+        if (-not $skipFilterCmdlets) {
+          try {
+            $addrFilter = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue
+            if ($addrFilter) {
+              $localUser = [string]$addrFilter.LocalUser
+              $remoteUser = [string]$addrFilter.RemoteUser
+            }
+          } catch {
+            # Address filter may not be available, or .State missing on rule
+            if ($Log -and $_.Exception.Message -match 'state') { $Log.Write("Firewall address filter skipped for rule $name : $($_.Exception.Message)", 'WARN') }
           }
-        } catch {
-          # Address filter may not be available for all rules
-        }
-        
-        # Get application filter
-        try {
-          $appFilter = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue
-          if ($appFilter) {
-            $applicationPath = [string]$appFilter.Program
-            $serviceName = [string]$appFilter.Service
+          
+          try {
+            $appFilter = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue
+            if ($appFilter) {
+              $applicationPath = [string]$appFilter.Program
+              $serviceName = [string]$appFilter.Service
+            }
+          } catch {
+            # Application filter may not be available, or .State missing on rule
+            if ($Log -and $_.Exception.Message -match 'state') { $Log.Write("Firewall application filter skipped for rule $name : $($_.Exception.Message)", 'WARN') }
           }
-        } catch {
-          # Application filter may not be available for all rules
         }
         
         # Check all relevant fields for domain references
