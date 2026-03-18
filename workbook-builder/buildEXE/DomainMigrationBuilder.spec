@@ -7,7 +7,7 @@ import os
 
 block_cipher = None
 
-# gui_app.py in buildEXE/; build_migration_workbook in workbook-builder root
+# gui_app.py in buildEXE/; build_migration_workbook_CLI in workbook-builder root
 spec_dir = os.path.dirname(os.path.abspath(SPEC))
 workbook_root = os.path.dirname(spec_dir)
 
@@ -17,7 +17,7 @@ a = Analysis(
     binaries=[],
     datas=[],
     hiddenimports=[
-        'build_migration_workbook',
+        'build_migration_workbook_CLI',
         'pandas',
         'openpyxl',
         'openpyxl.cell._writer',

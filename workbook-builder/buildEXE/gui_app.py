@@ -8,7 +8,7 @@ import threading
 import traceback
 from pathlib import Path
 
-# When run from buildEXE/, ensure workbook-builder root is on path for build_migration_workbook
+# When run from buildEXE/, ensure workbook-builder root is on path for build_migration_workbook_CLI
 _script_dir = Path(__file__).resolve().parent
 _workbook_root = _script_dir.parent
 if str(_workbook_root) not in sys.path:
@@ -33,13 +33,13 @@ from PySide6.QtWidgets import (
 
 # Import after Qt so we can show a message if deps missing
 try:
-    from build_migration_workbook import (
+    from build_migration_workbook_CLI import (
         BuildResult,
         CancelledError,
         build_workbook,
     )
 except Exception as e:
-    print(f"Failed to import build_migration_workbook: {e}", file=sys.stderr)
+    print(f"Failed to import build_migration_workbook_CLI: {e}", file=sys.stderr)
     traceback.print_exc()
     sys.exit(1)
 

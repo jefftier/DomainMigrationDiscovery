@@ -23,7 +23,7 @@ Build a single **Excel workbook** (`.xlsx`) from domain migration discovery **JS
 
 3. **Build the workbook (CLI):**
    ```bash
-   python build_migration_workbook.py -i "C:\temp\MigrationDiscovery\out" -o "."
+   python build_migration_workbook_CLI.py -i "C:\temp\MigrationDiscovery\out" -o "."
    ```
    This creates a timestamped `.xlsx` in the current directory (e.g. `MigrationDiscovery_2025-02-05.xlsx`).
 
@@ -62,7 +62,7 @@ The builder reads all discovery JSON files in the input folder, keeps the **late
 
 | File | Purpose |
 |------|---------|
-| **build_migration_workbook.py** | Core engine: load JSON, flatten, validate/sanitize, write Excel. Used by both CLI and GUI. |
+| **build_migration_workbook_CLI.py** | CLI entry point and core engine: load JSON, flatten, validate/sanitize, write Excel. Used by both CLI and GUI. |
 | **buildEXE/gui_app.py** | PySide6 GUI: input folder, output path, options (validate only, sanitize report, etc.), progress and log. |
 | **buildEXE/** | Build artifacts: gui_app.py, PyInstaller spec, build_exe.py, test_sample_json; running build_exe.py produces DomainMigrationBuilder.exe in workbook-builder root. |
 
@@ -74,13 +74,14 @@ When anything under `workbook-builder/` changes on `main` (or `master`), GitHub 
 
 ---
 
-## CLI — build_migration_workbook.py
+## CLI — build_migration_workbook_CLI.py
 
 ### Quick reference
 
 ```bash
-python build_migration_workbook.py -i <input_folder> -o <output_dir> [options]
+python build_migration_workbook_CLI.py -i <input_folder> -o <output_dir> [options]
 ```
+Run with `--help` to see all options. If you omit `-i`, you'll be prompted for the input folder.
 
 ### All arguments
 
@@ -99,20 +100,20 @@ python build_migration_workbook.py -i <input_folder> -o <output_dir> [options]
 ### Examples
 
 ```bash
-# Default: read from ./results, write to current dir
-python build_migration_workbook.py
+# Default: read from ./results (or you'll be prompted for the folder), write to current dir
+python build_migration_workbook_CLI.py
 
 # Specify input and output
-python build_migration_workbook.py -i "Y:\MigrationDiscovery\out" -o "C:\Reports"
+python build_migration_workbook_CLI.py -i "Y:\MigrationDiscovery\out" -o "C:\Reports"
 
 # Optional plant id in output filename
-python build_migration_workbook.py -i ".\out" -o "." -p PLANT001
+python build_migration_workbook_CLI.py -i ".\out" -o "." -p PLANT001
 
 # Validate only (no Excel), fail if any issues
-python build_migration_workbook.py -i ".\out" -o "." --validate-only
+python build_migration_workbook_CLI.py -i ".\out" -o "." --validate-only
 
 # Strict UTF-8 only (no cp1252 fallback)
-python build_migration_workbook.py -i ".\out" -o "." --strict-json
+python build_migration_workbook_CLI.py -i ".\out" -o "." --strict-json
 ```
 
 Input folder is walked recursively; every `.json` file is considered. For each **ComputerName**, the script keeps the record with the latest **Metadata.CollectedAt**; then it builds one workbook from that set.
@@ -169,7 +170,7 @@ Build artifacts (dist/, build/) are created under `buildEXE/`. The EXE is copied
 ### What is bundled
 
 - `buildEXE/gui_app.py` (entry point)
-- `build_migration_workbook.py` (engine)
+- `build_migration_workbook_CLI.py` (CLI and engine)
 - pandas, openpyxl, PySide6 and their dependencies
 
 ### Optional: icon and version
@@ -201,7 +202,7 @@ Then copy `buildEXE/dist/DomainMigrationBuilder.exe` to the workbook-builder roo
 | Issue | What to do |
 |-------|------------|
 | "No module named 'pandas'" (or openpyxl) | `pip install pandas openpyxl`. For GUI: `pip install PySide6`. |
-| "No module named 'build_migration_workbook'" when running GUI | Run from the `workbook-builder/` folder (e.g. `python buildEXE/gui_app.py`) so the GUI can import `build_migration_workbook`. |
+| "No module named 'build_migration_workbook_CLI'" when running GUI | Run from the `workbook-builder/` folder (e.g. `python buildEXE/gui_app.py`) so the GUI can import `build_migration_workbook_CLI`. |
 | Empty or missing sheets | Ensure JSON files are from the domain-discovery script and contain the expected schema (Metadata, Detection, etc.). Older JSON may omit some sections; they will appear empty. |
 | Validate-only reports issues | Fix source data or rely on sanitization (illegal chars removed, formulas escaped, truncation). Use --debug to get the report CSV and locate cells. |
 | EXE won’t build | Run on Windows with Python 3.8+ and `pip install pyinstaller pandas openpyxl PySide6`; run `python buildEXE/build_exe.py` from `workbook-builder/`. |

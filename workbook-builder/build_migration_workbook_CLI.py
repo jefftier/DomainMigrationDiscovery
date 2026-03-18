@@ -99,13 +99,14 @@ DEFAULT_INPUT_FOLDER = "results"
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Build a migration discovery Excel workbook from JSON snapshots."
+        description="Build a migration discovery Excel workbook from JSON snapshots (CLI).",
+        epilog="Use --help to see all options. If you don't pass -i/--input, you'll be prompted for the folder path.",
     )
     parser.add_argument(
         "-i",
         "--input",
-        default=DEFAULT_INPUT_FOLDER,
-        help="Folder containing discovery JSON files (default: ./results)",
+        default=None,
+        help="Folder containing discovery JSON files (default: ./results; prompt if missing)",
     )
     parser.add_argument(
         "-o",
@@ -2097,15 +2098,29 @@ def main() -> None:
     """Thin CLI wrapper: parse args, call build_workbook(), print summary."""
     args = parse_args()
 
-    input_path = os.path.abspath(os.path.normpath(args.input))
+    # Resolve input path; use default if not provided
+    raw_input = args.input if args.input is not None else DEFAULT_INPUT_FOLDER
+    input_path = os.path.abspath(os.path.normpath(raw_input))
+
+    # If folder missing, prompt for it (unless stdin is not a TTY)
+    if not os.path.isdir(input_path) and sys.stdin.isatty():
+        try:
+            prompt = "Enter the path to the folder containing discovery JSON files: "
+            user_path = input(prompt).strip()
+            if user_path:
+                args.input = user_path
+                input_path = os.path.abspath(os.path.normpath(user_path))
+        except EOFError:
+            pass
+
     if not os.path.isdir(input_path):
-        if args.input == DEFAULT_INPUT_FOLDER:
-            print("Default input folder './results' was not found in the current directory.")
-            print("Use the -i (or --input) switch to specify the folder that contains your discovery JSON files.")
-            print("Example: python build_migration_workbook.py -i C:\\path\\to\\results")
+            if args.input is None or args.input == DEFAULT_INPUT_FOLDER:
+                print("Default input folder './results' was not found in the current directory.")
+                print("Use -i/--input to specify the folder, or run with --help to see all options.")
+                print("Example: python build_migration_workbook_CLI.py -i C:\\path\\to\\results")
+                sys.exit(1)
+            print("Input folder not found: {}".format(args.input if args.input is not None else DEFAULT_INPUT_FOLDER))
             sys.exit(1)
-        print("Input folder not found: {}".format(args.input))
-        sys.exit(1)
 
     # Build output path (same logic as before)
     if args.plant_id:
@@ -2171,3 +2186,7 @@ def main() -> None:
     if result.report_path:
         print(f"Report: {result.report_path}", file=sys.stderr)
     sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

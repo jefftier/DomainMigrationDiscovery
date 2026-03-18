@@ -37,7 +37,7 @@ If you `cd domain-discovery` first, you can omit `-ScriptPath` (default is `.\Ge
 
 ### Build Excel Report from JSON Results
 ```powershell
-python workbook-builder\build_migration_workbook.py -i "Y:\results" -o "."
+python workbook-builder\build_migration_workbook_CLI.py -i "Y:\results" -o "."
 ```
 
 ### Smoke run (end-to-end, no new dependencies)
@@ -46,14 +46,14 @@ python workbook-builder\build_migration_workbook.py -i "Y:\results" -o "."
 .\domain-discovery\Get-WorkstationDiscovery.ps1 -OldDomainFqdn "oldco.com" -NewDomainFqdn "newco.com" -SlimOutputOnly
 
 # 2. Build workbook from that folder (adjust -i if you use a different output path)
-python workbook-builder\build_migration_workbook.py -i "C:\temp\MigrationDiscovery\out" -o "."
+python workbook-builder\build_migration_workbook_CLI.py -i "C:\temp\MigrationDiscovery\out" -o "."
 
 # 3. Open the generated *MigrationDiscovery_*.xlsx and verify Summary, Config File Findings, Config Summary, Oracle Summary, RDS Licensing, Local Admin Membership tabs
 ```
 
 **Key files by function:**
 - **Domain discovery:** `domain-discovery/Get-WorkstationDiscovery.ps1`, `domain-discovery/Invoke-MigrationDiscoveryRemotely.ps1`, `domain-discovery/DomainMigrationDiscovery.Helpers.psm1`
-- **Workbook builder:** `workbook-builder/build_migration_workbook.py`, `workbook-builder/buildEXE/gui_app.py`
+- **Workbook builder:** `workbook-builder/build_migration_workbook_CLI.py`, `workbook-builder/buildEXE/gui_app.py`
 - **Config:** `domain-discovery/migration-config.example.json` (copy to `migration_config.json` to use)
 
 ## Overview
@@ -1049,15 +1049,15 @@ The script includes comprehensive error handling:
 
 ## Excel Report Builder
 
-The `workbook-builder/build_migration_workbook.py` script generates a comprehensive Excel workbook from JSON discovery results.
+The `workbook-builder/build_migration_workbook_CLI.py` script generates a comprehensive Excel workbook from JSON discovery results.
 
 ### Report Builder Usage
 
 From the repo root:
 ```powershell
-python workbook-builder\build_migration_workbook.py -i "Y:\results" -o "."
+python workbook-builder\build_migration_workbook_CLI.py -i "Y:\results" -o "."
 ```
-Or from the `workbook-builder/` folder: `python build_migration_workbook.py -i "Y:\results" -o "."`
+Or from the `workbook-builder/` folder: `python build_migration_workbook_CLI.py -i "Y:\results" -o "."`
 
 **Parameters:**
 - `-i, --input`: Folder containing discovery JSON files (default: `Y:\results`)
