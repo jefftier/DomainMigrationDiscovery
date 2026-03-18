@@ -203,6 +203,7 @@ $remoteDiscoveryScriptBlock = {
         [string]$ScriptContent,
         [hashtable]$ScriptParams,
         [string]$RemoteOutputRoot,
+        [string]$RemoteLogRoot,
         [string]$ConfigContent,
         [bool]$UseSmbForResults
     )
@@ -248,12 +249,30 @@ $remoteDiscoveryScriptBlock = {
     $gzip.Write($bytes, 0, $bytes.Length)
     $gzip.Close()
     $b64 = [Convert]::ToBase64String($ms.ToArray())
+    $logFileName = $null
+    $logPayload = $null
+    if ($RemoteLogRoot -and (Test-Path -LiteralPath $RemoteLogRoot)) {
+        $logPattern = "discovery_$env:COMPUTERNAME_*.log"
+        $logFiles = Get-ChildItem -Path $RemoteLogRoot -Filter $logPattern -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+        if ($logFiles) {
+            $logPath = $logFiles[0].FullName
+            $logFileName = [System.IO.Path]::GetFileName($logPath)
+            $logBytes = [System.IO.File]::ReadAllBytes($logPath)
+            $logMs = New-Object System.IO.MemoryStream
+            $logGzip = New-Object System.IO.Compression.GzipStream($logMs, [System.IO.Compression.CompressionMode]::Compress)
+            $logGzip.Write($logBytes, 0, $logBytes.Length)
+            $logGzip.Close()
+            $logPayload = [Convert]::ToBase64String($logMs.ToArray())
+        }
+    }
     [pscustomobject]@{
         ComputerName = $env:COMPUTERNAME
         JsonFileName = [System.IO.Path]::GetFileName($jsonPath)
         JsonPath     = $jsonPath
         Encoding     = 'gzip+base64'
         Payload      = $b64
+        LogFileName  = $logFileName
+        LogPayload   = $logPayload
         Success      = $true
     }
 }
@@ -296,7 +315,7 @@ foreach ($s in $servers) {
 $allResults = @()
 if ($sessions.Count -gt 0) {
     try {
-        $allResults = Invoke-Command -Session $sessions -ScriptBlock $remoteDiscoveryScriptBlock -ArgumentList @($helperModuleContent, $remoteRunDir, $scriptContent, $scriptParams, $RemoteOutputRoot, $configFileContent, [bool]$UseSmbForResults.IsPresent) -ErrorAction Continue
+        $allResults = Invoke-Command -Session $sessions -ScriptBlock $remoteDiscoveryScriptBlock -ArgumentList @($helperModuleContent, $remoteRunDir, $scriptContent, $scriptParams, $RemoteOutputRoot, $RemoteLogRoot, $configFileContent, [bool]$UseSmbForResults.IsPresent) -ErrorAction Continue
     }
     catch {
         Write-Warning "Invoke-Command reported an error (see error log)"
@@ -340,6 +359,25 @@ if (-not $UseSmbForResults) {
             [System.IO.File]::WriteAllBytes($localPath, $decodedBytes)
             $null = $script:SuccessHosts.Add($r.ComputerName)
             Write-Host "[$($r.ComputerName)] Wrote $localPath" -ForegroundColor Green
+            if ($r.LogFileName -and $r.LogPayload) {
+                try {
+                    $logCompressed = [Convert]::FromBase64String($r.LogPayload)
+                    $logIn = New-Object System.IO.MemoryStream(,$logCompressed)
+                    $logGzip = New-Object System.IO.Compression.GzipStream($logIn, [System.IO.Compression.CompressionMode]::Decompress)
+                    $logOut = New-Object System.IO.MemoryStream
+                    $logGzip.CopyTo($logOut)
+                    $logGzip.Close()
+                    $logDecodedBytes = $logOut.ToArray()
+                    $logDir = Join-Path $scriptDir "results\log"
+                    if (-not (Test-Path -Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }
+                    $localLogPath = Join-Path $logDir $r.LogFileName
+                    [System.IO.File]::WriteAllBytes($localLogPath, $logDecodedBytes)
+                    Write-Host "[$($r.ComputerName)] Discovery log saved to $localLogPath" -ForegroundColor Green
+                }
+                catch {
+                    Write-Warning "[$($r.ComputerName)] Failed to save discovery log: $($_.Exception.Message)"
+                }
+            }
         }
         catch {
             $err = "Failed to decode JSON payload from $($r.ComputerName): $($_.Exception.Message)"
@@ -380,6 +418,21 @@ if ($UseSmbForResults -and $allResults) {
                     Copy-Item -Path $remotePath -Destination $destPath -FromSession $session -Force -ErrorAction Stop
                     $null = $script:SuccessHosts.Add($computerName)
                     Write-Host "[$computerName] Copied to $destPath" -ForegroundColor Green
+                    if ($RemoteLogRoot) {
+                        try {
+                            $getLogPathBlock = { param($LogRoot) $p = "discovery_$env:COMPUTERNAME_*.log"; $f = Get-ChildItem -Path $LogRoot -Filter $p -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($f) { $f.FullName } }
+                            $remoteLogPath = @(Invoke-Command -Session $session -ScriptBlock $getLogPathBlock -ArgumentList $RemoteLogRoot -ErrorAction SilentlyContinue)[0]
+                            if ($remoteLogPath) {
+                                $logDir = Join-Path $scriptDir "results\log"
+                                if (-not (Test-Path -Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }
+                                $logFileName = [System.IO.Path]::GetFileName($remoteLogPath)
+                                $localLogPath = Join-Path $logDir $logFileName
+                                Copy-Item -Path $remoteLogPath -Destination $localLogPath -FromSession $session -Force -ErrorAction Stop
+                                Write-Host "[$computerName] Discovery log saved to $localLogPath" -ForegroundColor Green
+                            }
+                        }
+                        catch { Write-Warning "[$computerName] Failed to copy discovery log: $($_.Exception.Message)" }
+                    }
                 }
                 finally { Remove-PSSession $session -ErrorAction SilentlyContinue }
             }
@@ -416,6 +469,27 @@ if ($UseSmbForResults -and $allResults) {
                 }
                 $null = $script:SuccessHosts.Add($computerName)
                 Write-Host "[$computerName] Copied $remoteUncFile -> $localDestPath" -ForegroundColor Green
+                if ($RemoteLogRoot) {
+                    try {
+                        $sessionParams = @{ ComputerName = $computerName }
+                        if ($Credential) { $sessionParams['Credential'] = $Credential }
+                        $logSession = New-PSSession @sessionParams -ErrorAction Stop
+                        try {
+                            $getLogPathBlock = { param($LogRoot) $p = "discovery_$env:COMPUTERNAME_*.log"; $f = Get-ChildItem -Path $LogRoot -Filter $p -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($f) { $f.FullName } }
+                            $remoteLogPath = @(Invoke-Command -Session $logSession -ScriptBlock $getLogPathBlock -ArgumentList $RemoteLogRoot -ErrorAction SilentlyContinue)[0]
+                            if ($remoteLogPath) {
+                                $logDir = Join-Path $scriptDir "results\log"
+                                if (-not (Test-Path -Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }
+                                $logFileName = [System.IO.Path]::GetFileName($remoteLogPath)
+                                $localLogPath = Join-Path $logDir $logFileName
+                                Copy-Item -Path $remoteLogPath -Destination $localLogPath -FromSession $logSession -Force -ErrorAction Stop
+                                Write-Host "[$computerName] Discovery log saved to $localLogPath" -ForegroundColor Green
+                            }
+                        }
+                        finally { Remove-PSSession $logSession -ErrorAction SilentlyContinue }
+                    }
+                    catch { Write-Warning "[$computerName] Failed to copy discovery log: $($_.Exception.Message)" }
+                }
             }
             catch {
                 $err = "Failed to collect JSON from C$ share: $($_.Exception.Message)"
