@@ -2197,7 +2197,14 @@ try {
       $null
     } else {
       $out = Receive-Job $job -ErrorAction SilentlyContinue
-      $jobErrors = @(Receive-Job $job -ErrorStream -ErrorAction SilentlyContinue)
+      # -ErrorStream on Receive-Job exists only in PowerShell 5.1+; use child job Error on older versions
+      $jobErrors = @()
+      $receiveParams = @{ InputObject = $job; ErrorAction = 'SilentlyContinue' }
+      if ((Get-Command Receive-Job).Parameters['ErrorStream']) {
+        $jobErrors = @(Receive-Job @receiveParams -ErrorStream)
+      } else {
+        if ($job.ChildJobs -and $job.ChildJobs[0].Error) { $jobErrors = @($job.ChildJobs[0].Error) }
+      }
       Remove-Job $job -Force -ErrorAction SilentlyContinue
       if ($jobState -eq 'Failed' -and $script:log) {
         $errMsg = ($jobErrors | ForEach-Object { $_.ToString() }) -join '; '
