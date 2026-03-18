@@ -8,6 +8,12 @@ import threading
 import traceback
 from pathlib import Path
 
+# When run from buildEXE/, ensure workbook-builder root is on path for build_migration_workbook
+_script_dir = Path(__file__).resolve().parent
+_workbook_root = _script_dir.parent
+if str(_workbook_root) not in sys.path:
+    sys.path.insert(0, str(_workbook_root))
+
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import (
     QApplication,

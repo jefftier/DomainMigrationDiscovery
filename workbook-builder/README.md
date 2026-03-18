@@ -29,7 +29,7 @@ Build a single **Excel workbook** (`.xlsx`) from domain migration discovery **JS
 
 4. **Or use the GUI:**
    ```bash
-   python gui_app.py
+   python buildEXE/gui_app.py
    ```
    Choose **Input folder** (where the JSON files are), **Output file** (path to the `.xlsx`), then click **Run**.
 
@@ -63,8 +63,8 @@ The builder reads all discovery JSON files in the input folder, keeps the **late
 | File | Purpose |
 |------|---------|
 | **build_migration_workbook.py** | Core engine: load JSON, flatten, validate/sanitize, write Excel. Used by both CLI and GUI. |
-| **gui_app.py** | PySide6 GUI: input folder, output path, options (validate only, sanitize report, etc.), progress and log. |
-| **buildEXE/** | Build artifacts: PyInstaller spec, build_exe.py, test_sample_json; running build_exe.py produces DomainMigrationBuilder.exe here in workbook-builder root. |
+| **buildEXE/gui_app.py** | PySide6 GUI: input folder, output path, options (validate only, sanitize report, etc.), progress and log. |
+| **buildEXE/** | Build artifacts: gui_app.py, PyInstaller spec, build_exe.py, test_sample_json; running build_exe.py produces DomainMigrationBuilder.exe in workbook-builder root. |
 
 ---
 
@@ -119,7 +119,7 @@ Input folder is walked recursively; every `.json` file is considered. For each *
 
 ---
 
-## GUI — gui_app.py
+## GUI — buildEXE/gui_app.py
 
 - **Input folder:** Folder that contains (or recursively contains) discovery JSON files. Use **Browse…** to pick it.
 - **Output file:** Full path for the `.xlsx` workbook. Use **Browse…** to choose name and location. Required unless **Validate only** is checked (then a dummy path is used internally).
@@ -168,7 +168,7 @@ Build artifacts (dist/, build/) are created under `buildEXE/`. The EXE is copied
 
 ### What is bundled
 
-- `gui_app.py` (entry point)
+- `buildEXE/gui_app.py` (entry point)
 - `build_migration_workbook.py` (engine)
 - pandas, openpyxl, PySide6 and their dependencies
 
@@ -201,10 +201,10 @@ Then copy `buildEXE/dist/DomainMigrationBuilder.exe` to the workbook-builder roo
 | Issue | What to do |
 |-------|------------|
 | "No module named 'pandas'" (or openpyxl) | `pip install pandas openpyxl`. For GUI: `pip install PySide6`. |
-| "No module named 'build_migration_workbook'" when running GUI | Run from the `workbook-builder/` folder so `gui_app.py` can import `build_migration_workbook`, or ensure that folder is on `PYTHONPATH`. |
+| "No module named 'build_migration_workbook'" when running GUI | Run from the `workbook-builder/` folder (e.g. `python buildEXE/gui_app.py`) so the GUI can import `build_migration_workbook`. |
 | Empty or missing sheets | Ensure JSON files are from the domain-discovery script and contain the expected schema (Metadata, Detection, etc.). Older JSON may omit some sections; they will appear empty. |
 | Validate-only reports issues | Fix source data or rely on sanitization (illegal chars removed, formulas escaped, truncation). Use --debug to get the report CSV and locate cells. |
 | EXE won’t build | Run on Windows with Python 3.8+ and `pip install pyinstaller pandas openpyxl PySide6`; run `python buildEXE/build_exe.py` from `workbook-builder/`. |
-| EXE fails at runtime | Test the same input folder with `python gui_app.py` first; if it works, the issue may be path or permissions when running the EXE. |
+| EXE fails at runtime | Test the same input folder with `python buildEXE/gui_app.py` first; if it works, the issue may be path or permissions when running the EXE. |
 
 For end-to-end workflow (discovery → JSON → workbook), see the main [README](../README.md) and [domain-discovery](../domain-discovery/README.md).

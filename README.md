@@ -53,7 +53,7 @@ python workbook-builder\build_migration_workbook.py -i "C:\temp\MigrationDiscove
 
 **Key files by function:**
 - **Domain discovery:** `domain-discovery/Get-WorkstationDiscovery.ps1`, `domain-discovery/Invoke-MigrationDiscoveryRemotely.ps1`, `domain-discovery/DomainMigrationDiscovery.Helpers.psm1`
-- **Workbook builder:** `workbook-builder/build_migration_workbook.py`, `workbook-builder/gui_app.py`
+- **Workbook builder:** `workbook-builder/build_migration_workbook.py`, `workbook-builder/buildEXE/gui_app.py`
 - **Config:** `domain-discovery/migration-config.example.json` (copy to `migration_config.json` to use)
 
 ## Overview

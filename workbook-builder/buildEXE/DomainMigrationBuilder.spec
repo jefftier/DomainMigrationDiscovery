@@ -7,13 +7,13 @@ import os
 
 block_cipher = None
 
-# Spec lives in buildEXE/; gui_app.py and build_migration_workbook are in workbook-builder root
+# gui_app.py in buildEXE/; build_migration_workbook in workbook-builder root
 spec_dir = os.path.dirname(os.path.abspath(SPEC))
 workbook_root = os.path.dirname(spec_dir)
 
 a = Analysis(
     ['gui_app.py'],
-    pathex=[workbook_root],
+    pathex=[spec_dir, workbook_root],
     binaries=[],
     datas=[],
     hiddenimports=[
