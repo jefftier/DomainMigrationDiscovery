@@ -32,7 +32,6 @@ def main():
         "--noconfirm",
         "--distpath", str(dist_build),
         "--workpath", str(script_dir / "build"),
-        "--specpath", str(script_dir),
         str(spec),
     ]
     print("Running:", " ".join(cmd))
