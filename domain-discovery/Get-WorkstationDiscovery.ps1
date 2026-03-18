@@ -2189,14 +2189,29 @@ try {
       Get-FirewallRulesWithDomainReferences -DomainMatchers $matchers -Log $null
     } -ArgumentList $helperModulePath, $OldDomainFqdn, $OldDomainNetBIOS
     $null = Wait-Job $job -Timeout $fwTimeoutSeconds
-    if ((Get-Job $job -ErrorAction SilentlyContinue).State -eq 'Running') {
+    $jobState = (Get-Job $job -ErrorAction SilentlyContinue).State
+    if ($jobState -eq 'Running') {
       Stop-Job $job -ErrorAction SilentlyContinue
       Remove-Job $job -Force -ErrorAction SilentlyContinue
       if ($script:log) { $script:log.Write("FirewallRules: timed out after ${fwTimeoutSeconds}s", 'WARN') }
       $null
     } else {
       $out = Receive-Job $job -ErrorAction SilentlyContinue
+      $jobErrors = @(Receive-Job $job -ErrorStream -ErrorAction SilentlyContinue)
       Remove-Job $job -Force -ErrorAction SilentlyContinue
+      if ($jobState -eq 'Failed' -and $script:log) {
+        $errMsg = ($jobErrors | ForEach-Object { $_.ToString() }) -join '; '
+        $script:log.Write("FirewallRules: job failed. $errMsg", 'WARN')
+        $out = @()
+      }
+      # If we got error records instead of rule objects (e.g. job failed), keep only valid rule-shaped objects so JSON is correct
+      if ($out -and $out.Count -gt 0) {
+        $first = @($out)[0]
+        if ($first -is [System.Management.Automation.ErrorRecord] -or ($null -eq ($first.PSObject.Properties['Name']) -and $null -eq ($first.PSObject.Properties['DisplayName']))) {
+          if ($script:log) { $script:log.Write("FirewallRules: job returned non-rule output (e.g. errors); discarding so JSON is not polluted", 'WARN') }
+          $out = @()
+        }
+      }
       $out
     }
   } 'FirewallRules'
