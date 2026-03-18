@@ -38,16 +38,16 @@ jobs:
           pip install pyinstaller pandas openpyxl PySide6
 
       - name: Build EXE
-        run: python build_exe.py
+        run: python buildEXE/build_exe.py
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
         with:
           name: DomainMigrationBuilder-exe
-          path: workbook-builder/dist/DomainMigrationBuilder.exe
+          path: workbook-builder/DomainMigrationBuilder.exe
 
       - name: Create GitHub Release (push only)
         if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "exe-${{ github.run_number }}" dist/DomainMigrationBuilder.exe --title "Build ${{ github.run_number }}" --notes "Windows EXE built from main. Download DomainMigrationBuilder.exe from the Assets below."
+        run: gh release create "exe-${{ github.run_number }}" DomainMigrationBuilder.exe --title "Build ${{ github.run_number }}" --notes "Windows EXE built from main. Download DomainMigrationBuilder.exe from the Assets below."

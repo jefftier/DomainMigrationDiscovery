@@ -64,8 +64,7 @@ The builder reads all discovery JSON files in the input folder, keeps the **late
 |------|---------|
 | **build_migration_workbook.py** | Core engine: load JSON, flatten, validate/sanitize, write Excel. Used by both CLI and GUI. |
 | **gui_app.py** | PySide6 GUI: input folder, output path, options (validate only, sanitize report, etc.), progress and log. |
-| **build_exe.py** | Helper script that runs PyInstaller to produce a single Windows EXE. |
-| **DomainMigrationBuilder.spec** | PyInstaller spec for the GUI EXE (entry: gui_app.py). |
+| **buildEXE/** | Build artifacts: PyInstaller spec, build_exe.py, test_sample_json; running build_exe.py produces DomainMigrationBuilder.exe here in workbook-builder root. |
 
 ---
 
@@ -158,27 +157,14 @@ You can build a **standalone Windows executable** so users can run the GUI witho
 
 ### Build
 
-From the **project root**:
-
-```bat
-python workbook-builder\build_exe.py
-```
-
-Or from **workbook-builder/**:
+From **workbook-builder/**:
 
 ```bat
 cd workbook-builder
-python build_exe.py
+python buildEXE/build_exe.py
 ```
 
-Or run PyInstaller directly:
-
-```bat
-cd workbook-builder
-python -m PyInstaller --noconfirm --distpath dist DomainMigrationBuilder.spec
-```
-
-**Output:** `dist/DomainMigrationBuilder.exe` (relative to the directory you ran the command from). You can copy this EXE to any Windows machine; it does not require Python.
+Build artifacts (dist/, build/) are created under `buildEXE/`. The EXE is copied to **workbook-builder/** root: `DomainMigrationBuilder.exe`. You can copy this EXE to any Windows machine; it does not require Python.
 
 ### What is bundled
 
@@ -195,10 +181,9 @@ python -m PyInstaller --noconfirm --distpath dist DomainMigrationBuilder.spec
 
 ```bat
 cd workbook-builder
-pyinstaller --clean DomainMigrationBuilder.spec
+python -m PyInstaller --clean --distpath buildEXE/dist --workpath buildEXE/build --specpath buildEXE buildEXE/DomainMigrationBuilder.spec
 ```
-
-For more detail, see [PACKAGING.md](../docs/PACKAGING.md) in the repo.
+Then copy `buildEXE/dist/DomainMigrationBuilder.exe` to the workbook-builder root if needed.
 
 ---
 
@@ -219,7 +204,7 @@ For more detail, see [PACKAGING.md](../docs/PACKAGING.md) in the repo.
 | "No module named 'build_migration_workbook'" when running GUI | Run from the `workbook-builder/` folder so `gui_app.py` can import `build_migration_workbook`, or ensure that folder is on `PYTHONPATH`. |
 | Empty or missing sheets | Ensure JSON files are from the domain-discovery script and contain the expected schema (Metadata, Detection, etc.). Older JSON may omit some sections; they will appear empty. |
 | Validate-only reports issues | Fix source data or rely on sanitization (illegal chars removed, formulas escaped, truncation). Use --debug to get the report CSV and locate cells. |
-| EXE won’t build | Run on Windows with Python 3.8+ and `pip install pyinstaller pandas openpyxl PySide6`; use `pyinstaller --clean DomainMigrationBuilder.spec` from `workbook-builder/` for a clean rebuild. |
+| EXE won’t build | Run on Windows with Python 3.8+ and `pip install pyinstaller pandas openpyxl PySide6`; run `python buildEXE/build_exe.py` from `workbook-builder/`. |
 | EXE fails at runtime | Test the same input folder with `python gui_app.py` first; if it works, the issue may be path or permissions when running the EXE. |
 
 For end-to-end workflow (discovery → JSON → workbook), see the main [README](../README.md) and [domain-discovery](../domain-discovery/README.md).

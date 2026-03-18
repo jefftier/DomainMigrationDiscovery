@@ -1,6 +1,6 @@
 # Domain Migration Discovery
 
-A comprehensive toolkit for discovering domain migration readiness: scan workstations for old domain references, check security tool status, and build Excel reports from JSON results.
+A comprehensive toolkit for discovering domain migration readiness: scan workstations for old domain references and build Excel reports from JSON results.
 
 ## Repository structure (by function)
 
@@ -8,9 +8,8 @@ A comprehensive toolkit for discovering domain migration readiness: scan worksta
 |----------|--------|---------|
 | **Domain discovery** | `domain-discovery/` | Scan workstations for old domain references (services, tasks, credentials, etc.); run locally or remotely. |
 | **Workbook builder** | `workbook-builder/` | Build Excel workbooks from discovery JSON (CLI and GUI). [Download Windows EXE →](/releases) |
-| **Security tools status** | `security-tools-status/` | Check CrowdStrike, Qualys, SCCM, and EnCase status on remote servers (CLI and GUI). |
 
-Shared config lives in `config/` (e.g. `config/migration-config.example.json`).
+Shared config: copy `domain-discovery/migration-config.example.json` to `migration_config.json` (or use `-ConfigFile` to point to your config).
 
 ## Quick Reference
 
@@ -41,12 +40,6 @@ If you `cd domain-discovery` first, you can omit `-ScriptPath` (default is `.\Ge
 python workbook-builder\build_migration_workbook.py -i "Y:\results" -o "."
 ```
 
-### Security Tools Status (CLI or GUI)
-```powershell
-.\security-tools-status\Get-SecurityToolsStatus.ps1 -ServerListPath ".\servers.txt" -ConfigFile ".\config\migration-config.json"
-.\security-tools-status\Get-SecurityToolsStatus-GUI.ps1
-```
-
 ### Smoke run (end-to-end, no new dependencies)
 ```powershell
 # 1. Run discovery locally (writes JSON to C:\temp\MigrationDiscovery\out)
@@ -61,8 +54,7 @@ python workbook-builder\build_migration_workbook.py -i "C:\temp\MigrationDiscove
 **Key files by function:**
 - **Domain discovery:** `domain-discovery/Get-WorkstationDiscovery.ps1`, `domain-discovery/Invoke-MigrationDiscoveryRemotely.ps1`, `domain-discovery/DomainMigrationDiscovery.Helpers.psm1`
 - **Workbook builder:** `workbook-builder/build_migration_workbook.py`, `workbook-builder/gui_app.py`
-- **Security tools:** `security-tools-status/Get-SecurityToolsStatus.ps1`, `security-tools-status/Get-SecurityToolsStatus-GUI.ps1`
-- **Config:** `config/migration-config.example.json`
+- **Config:** `domain-discovery/migration-config.example.json` (copy to `migration_config.json` to use)
 
 ## Overview
 
@@ -281,7 +273,7 @@ The script supports loading domain settings and tenant maps from a JSON configur
 
 **Important**: Command-line parameters take precedence over configuration file values. If a parameter is explicitly provided on the command line, the config file value for that parameter is ignored.
 
-Create a JSON configuration file (e.g. `config/migration-config.json`; copy from `config/migration-config.example.json`):
+Create a JSON configuration file (e.g. `migration_config.json`; copy from `domain-discovery/migration-config.example.json`):
 
 ```json
 {

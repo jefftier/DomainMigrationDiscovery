@@ -219,7 +219,7 @@ Use **Invoke-MigrationDiscoveryRemotely.ps1** to run discovery on multiple machi
 
 ### Quick start (remote)
 
-1. Create a server list (one name per line; `#` and blank lines ignored):
+1. Create a server list (one name per line; `#` and blank lines ignored). You can copy `servers.example.txt` to `servers.txt` and edit:
 
    ```
    SERVER01

@@ -20,6 +20,11 @@ test_input/
 tests/
 *.xlsx
 
+# User config and server lists (copy from .example files)
+migration_config.json
+*.txt
+!*.example.txt
+
 # IDE / OS
 .idea/
 .vscode/
