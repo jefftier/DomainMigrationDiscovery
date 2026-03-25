@@ -220,6 +220,16 @@ def _load_json_file(
     try:
         return json.loads(content)
     except json.JSONDecodeError as e:
+        # If the error is about control characters (tabs, newlines inside strings from PowerShell),
+        # retry with strict=False which tolerates them
+        if "control character" in str(e).lower() or "Invalid control" in str(e):
+            try:
+                result = json.loads(content, strict=False)
+                _log(f"WARNING: {fpath} contains control characters in JSON strings (parsed with strict=False).")
+                return result
+            except json.JSONDecodeError:
+                pass  # fall through to the normal error reporting below
+
         excerpt_len = 80
         start = max(0, e.pos - excerpt_len // 2)
         end = min(len(content), e.pos + excerpt_len // 2)
