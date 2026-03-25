@@ -2025,9 +2025,14 @@ def build_workbook(
     warnings_count = [0]  # mutable so inner callbacks can increment
 
     def _log(msg: str) -> None:
-        if msg.strip().startswith("WARNING") or "WARNING:" in msg:
+        is_warning = msg.strip().startswith("WARNING") or "WARNING:" in msg
+        is_info = msg.strip().startswith("INFO:")
+        if is_warning:
             warnings_count[0] += 1
+        # In minimal_log mode, still emit warnings and info messages (never swallow them)
         if not minimal_log and log_cb:
+            log_cb(msg)
+        elif minimal_log and log_cb and (is_warning or is_info):
             log_cb(msg)
 
     def _status(msg: str) -> None:
@@ -2094,14 +2099,20 @@ def build_workbook(
         scan_rows = load_scan_results_rows(
             input_folder,
             strict_json=strict_json,
-            log_cb=None if minimal_log else _log,
+            log_cb=_log,  # always pass log_cb so warnings are never silently swallowed
         )
-        if scan_rows:
+        if scan_rows is not None and len(scan_rows) > 0:
             for sr in scan_rows:
                 if ev.is_set():
                     raise CancelledError()
                 sheet_rows["Scan results"].append(sr)
             _status(f"Added Scan results sheet ({len(scan_rows)} host(s)) from scan_results.json.")
+        else:
+            scan_path = find_scan_results_json(input_folder)
+            if scan_path:
+                _log(f"WARNING: scan_results.json found at {scan_path} but produced 0 usable host rows (Scan results sheet skipped).")
+            else:
+                _log(f"INFO: No scan_results.json found near {input_folder} (Scan results sheet skipped).")
 
         output_dir = os.path.dirname(output_path)
         base_name = os.path.splitext(os.path.basename(output_path))[0]
