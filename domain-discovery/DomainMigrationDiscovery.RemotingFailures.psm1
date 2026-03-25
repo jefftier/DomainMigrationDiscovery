@@ -4,7 +4,7 @@
   Uses ErrorRecord type, FullyQualifiedErrorId, category, inner exceptions, then message patterns (last).
 #>
 
-function Build-RemotingTechnicalDetail {
+function Format-RemotingTechnicalDetail {
     param(
         [System.Management.Automation.ErrorRecord]$ErrorRecord,
         [int]$MaxLength = 4000
@@ -72,7 +72,7 @@ function Resolve-RemoteGatheringFailure {
         [string]$ComputerName = ''
     )
 
-    $technical = if ($ErrorRecord) { Build-RemotingTechnicalDetail -ErrorRecord $ErrorRecord } else { 'No error record was captured.' }
+    $technical = if ($ErrorRecord) { Format-RemotingTechnicalDetail -ErrorRecord $ErrorRecord } else { 'No error record was captured.' }
 
     if (-not $ErrorRecord) {
         return [pscustomobject]@{
@@ -311,5 +311,5 @@ function Resolve-RemoteGatheringFailure {
 Export-ModuleMember -Function @(
     'Resolve-RemoteGatheringFailure'
     'Test-WinRmHealCandidate'
-    'Build-RemotingTechnicalDetail'
+    'Format-RemotingTechnicalDetail'
 )
