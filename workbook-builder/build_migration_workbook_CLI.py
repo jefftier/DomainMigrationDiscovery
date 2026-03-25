@@ -213,6 +213,10 @@ def _load_json_file(
     if content is None:
         return None
 
+    # Strip BOM if present — utf-8 reads BOM as content (\ufeff) which breaks json.loads
+    if content.startswith("\ufeff"):
+        content = content[1:]
+
     try:
         return json.loads(content)
     except json.JSONDecodeError as e:
