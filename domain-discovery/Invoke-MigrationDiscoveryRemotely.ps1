@@ -153,17 +153,104 @@ function Write-ErrorLog {
     }
 }
 
+function Write-DiscoveryScanResultsFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OutputDirectory,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$HostScanRows,
+        [string]$ServerListPath,
+        [string]$PlantId,
+        [string]$OrchestratorNote = 'Invoke-MigrationDiscoveryRemotely.ps1'
+    )
+    $HostScanRows = @($HostScanRows)
+    if (-not (Test-Path -LiteralPath $OutputDirectory)) {
+        New-Item -Path $OutputDirectory -ItemType Directory -Force | Out-Null
+    }
+    $hostObjs = foreach ($row in $HostScanRows) {
+        if ($null -eq $row) { continue }
+        [ordered]@{
+            ServerListEntry             = $row.ServerListEntry
+            ResolvedComputerName        = $row.ResolvedComputerName
+            Outcome                     = $row.Outcome
+            ConnectionErrorCategory     = $row.ConnectionErrorCategory
+            JsonFileName                = $row.JsonFileName
+            PowerShellVersion           = $row.PowerShellVersion
+            CompatibilityMode           = $row.CompatibilityMode
+            UnavailableSectionsSummary  = $row.UnavailableSectionsSummary
+            ConfigFileIssue             = [bool]($row.ConfigFileIssue)
+            DetailMessage               = $row.DetailMessage
+        }
+    }
+    $payload = [ordered]@{
+        Schema         = 'DomainMigrationDiscovery.ScanResults/v1'
+        Orchestrator   = $OrchestratorNote
+        GeneratedAtUtc = [DateTime]::UtcNow.ToString('o')
+        ServerListPath = $ServerListPath
+        PlantId        = if ($PlantId) { $PlantId } else { $null }
+        Hosts          = @($hostObjs)
+    }
+    $outPath = Join-Path $OutputDirectory 'scan_results.json'
+    ($payload | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $outPath -Encoding UTF8
+    Write-Host "Scan results (all hosts from server list): $outPath" -ForegroundColor Cyan
+}
+
+function Merge-ScanRowsWithAllTargets {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$ServersInOrder,
+        [AllowEmptyCollection()]
+        [object[]]$ReturnedRows
+    )
+    $byKey = @{}
+    foreach ($row in $ReturnedRows) {
+        if ($null -eq $row) { continue }
+        $k = $row.ServerListEntry
+        if ([string]::IsNullOrWhiteSpace($k)) { continue }
+        $byKey[$k] = $row
+    }
+    $merged = New-Object System.Collections.ArrayList
+    foreach ($s in $ServersInOrder) {
+        if ($byKey.ContainsKey($s)) {
+            $null = $merged.Add($byKey[$s])
+        }
+        else {
+            $null = $merged.Add([pscustomobject]@{
+                    ServerListEntry             = $s
+                    ResolvedComputerName        = $null
+                    Outcome                     = 'No result recorded (orchestrator did not capture this host)'
+                    ConnectionErrorCategory     = $null
+                    JsonFileName                = $null
+                    PowerShellVersion           = $null
+                    CompatibilityMode           = $null
+                    UnavailableSectionsSummary  = $null
+                    ConfigFileIssue             = $false
+                    DetailMessage               = $null
+                })
+        }
+    }
+    return ,@($merged.ToArray())
+}
+
 if (-not (Test-Path -LiteralPath $ServerListPath)) {
     $errorMsg = "Server list file not found: $ServerListPath"
     Write-ErrorLog -ServerName "SCRIPT_INIT" -ErrorMessage $errorMsg -ErrorType "FATAL"
     throw $errorMsg
 }
 
-# Read and de-duplicate server names (ignore blank/ commented lines)
-$servers = @(Get-Content -Path $ServerListPath |
-    Where-Object { $_ -and $_.Trim() -ne "" -and -not $_.Trim().StartsWith("#") } |
-    ForEach-Object { $_.Trim() } |
-    Sort-Object -Unique)
+# Read server names (ignore blank/comment lines); de-duplicate preserving first-seen order from the file
+$servers = @(
+    $seen = @{}
+    Get-Content -Path $ServerListPath | ForEach-Object {
+        if (-not $_) { return }
+        $t = $_.Trim()
+        if ($t -eq "" -or $t.StartsWith("#")) { return }
+        if ($seen.ContainsKey($t)) { return }
+        $seen[$t] = $true
+        $t
+    }
+)
 
 if ($servers.Count -eq 0) {
     $errorMsg = "No servers found in list file: $ServerListPath"
@@ -612,8 +699,78 @@ $InvokeDiscoveryOnServerScriptBlock = {
         [switch]$AttemptWinRmHeal,
         [string]$HelperModuleContent,
         [string]$RemoteRunDir,
-        [switch]$UseSmbForResults
+        [switch]$UseSmbForResults,
+        [string]$LocalOutputSubdir
     )
+
+    $scan = [ordered]@{
+        ServerListEntry             = $ComputerName
+        ResolvedComputerName        = $null
+        Outcome                     = 'Unknown'
+        ConnectionErrorCategory     = $null
+        JsonFileName                = $null
+        PowerShellVersion           = $null
+        CompatibilityMode           = $null
+        UnavailableSectionsSummary  = $null
+        ConfigFileIssue             = $false
+        DetailMessage               = $null
+    }
+
+    function Apply-DiscoveryBytesToScanRow {
+        param([byte[]]$Bytes, [string]$JsonFileName, $ScanRow)
+        if ($JsonFileName) { $ScanRow['JsonFileName'] = $JsonFileName }
+        try {
+            $jtxt = [System.Text.Encoding]::UTF8.GetString($Bytes)
+            $j = $jtxt | ConvertFrom-Json
+            $meta = $j.Metadata
+            if ($meta) {
+                $ScanRow['ResolvedComputerName'] = $meta.ComputerName
+                $ScanRow['PowerShellVersion'] = [string]$meta.PowerShellVersion
+                $ScanRow['CompatibilityMode'] = [string]$meta.CompatibilityMode
+                $us = $meta.UnavailableSections
+                if ($null -ne $us) {
+                    if ($us -is [System.Array] -and $us.Count -gt 0) {
+                        $ScanRow['UnavailableSectionsSummary'] = ($us | ForEach-Object { [string]$_ }) -join '; '
+                    }
+                    elseif ($us -is [string] -and $us.Trim() -ne '') {
+                        $ScanRow['UnavailableSectionsSummary'] = $us
+                    }
+                }
+                $compat = [string]$meta.CompatibilityMode
+                if ($compat -eq 'Legacy3to4') {
+                    $ScanRow['Outcome'] = 'Partial success (PowerShell 3/4 — limited sections)'
+                }
+                elseif ($ScanRow['UnavailableSectionsSummary']) {
+                    $ScanRow['Outcome'] = 'Partial success (some sections not collected)'
+                }
+                else {
+                    $ScanRow['Outcome'] = 'Fully successful'
+                }
+            }
+            else {
+                $ScanRow['Outcome'] = 'Fully successful'
+                $ScanRow['DetailMessage'] = 'Collected JSON has no Metadata section.'
+            }
+        }
+        catch {
+            $ScanRow['Outcome'] = 'Fully successful'
+            if (-not $ScanRow['DetailMessage']) {
+                $ScanRow['DetailMessage'] = "Could not parse discovery JSON metadata: $($_.Exception.Message)"
+            }
+        }
+    }
+
+    function Apply-DiscoveryFileToScanRow {
+        param([string]$Path, $ScanRow)
+        if (-not (Test-Path -LiteralPath $Path)) {
+            $ScanRow['Outcome'] = 'JSON collection failed (file missing after copy)'
+            $ScanRow['DetailMessage'] = "Expected JSON not found at $Path"
+            return
+        }
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        $fn = [System.IO.Path]::GetFileName($Path)
+        Apply-DiscoveryBytesToScanRow -Bytes $bytes -JsonFileName $fn -ScanRow $ScanRow
+    }
 
     # Ensure core cmdlets (Get-Date, Write-Host, Test-Path, etc.) are available when this block runs in a thread-job runspace (PS 7 parallel).
     $null = Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue
@@ -641,11 +798,14 @@ $InvokeDiscoveryOnServerScriptBlock = {
     
     # Check if WinRM connectivity succeeded
     if (-not $testResult.Success) {
-        # Error already logged by Ensure-WinRmAndConnect
-        return
+        $scan['ConnectionErrorCategory'] = $testResult.ErrorCategory
+        $scan['Outcome'] = 'Could not connect (WinRM)'
+        $scan['DetailMessage'] = $testResult.ErrorMessage
+        return ([pscustomobject]$scan)
     }
     
     $actualComputerName = $testResult.ActualComputerName
+    $scan['ResolvedComputerName'] = $actualComputerName
 
     # Step 2: Copy config file to remote server if provided (requires WinRM connectivity)
     if ($ConfigFile -and $RemoteConfigPath) {
@@ -687,7 +847,8 @@ $InvokeDiscoveryOnServerScriptBlock = {
                 Write-Warning "[$ComputerName] Config file copy failed"
                 & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONFIG_FILE_ERROR"
                 # Continue execution - the discovery script will run without config file
-                $ScriptParams.Remove('ConfigFile')
+                $null = $ScriptParams.Remove('ConfigFile')
+                $scan['ConfigFileIssue'] = $true
             }
             finally {
                 if ($session) {
@@ -705,7 +866,8 @@ $InvokeDiscoveryOnServerScriptBlock = {
             Write-Warning "[$ComputerName] Config file setup failed"
             & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONFIG_FILE_ERROR"
             # Continue execution - the discovery script will run without config file
-            $ScriptParams.Remove('ConfigFile')
+            $null = $ScriptParams.Remove('ConfigFile')
+            $scan['ConfigFileIssue'] = $true
         }
     }
 
@@ -780,7 +942,9 @@ $InvokeDiscoveryOnServerScriptBlock = {
             -ActualComputerNameFromPriorTest $actualComputerName
 
         if (-not $discoveryResult.Success) {
-            return
+            $scan['Outcome'] = 'Discovery failed (remote execution)'
+            $scan['DetailMessage'] = $discoveryResult.ErrorMessage
+            return ([pscustomobject]$scan)
         }
 
         $payloadObj = $discoveryResult.Output
@@ -788,7 +952,9 @@ $InvokeDiscoveryOnServerScriptBlock = {
             $errorMsg = "Discovery ran but no JSON payload returned from $ComputerName"
             Write-Warning "[$ComputerName] No JSON payload returned"
             & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
-            return
+            $scan['Outcome'] = 'JSON not returned over WinRM'
+            $scan['DetailMessage'] = $errorMsg
+            return ([pscustomobject]$scan)
         }
 
         try {
@@ -803,13 +969,14 @@ $InvokeDiscoveryOnServerScriptBlock = {
             if ($MyInvocation.PSCommandPath) { $scriptDir = Split-Path -Parent $MyInvocation.PSCommandPath }
             elseif ($PSScriptRoot) { $scriptDir = $PSScriptRoot }
             else { $scriptDir = (Get-Location).Path }
-            $localOutputRoot = Join-Path $scriptDir "results\$localOutputSubdir"
+            $localOutputRoot = Join-Path $scriptDir "results\$LocalOutputSubdir"
             if (-not (Test-Path -Path $localOutputRoot)) {
                 New-Item -Path $localOutputRoot -ItemType Directory -Force | Out-Null
             }
             $localPath = Join-Path $localOutputRoot $payloadObj.JsonFileName
             [System.IO.File]::WriteAllBytes($localPath, $decodedBytes)
             Write-Host "[$ComputerName] Received JSON over WinRM and wrote $localPath" -ForegroundColor Green
+            Apply-DiscoveryBytesToScanRow -Bytes $decodedBytes -JsonFileName $payloadObj.JsonFileName -ScanRow $scan
 
             # Copy discovery log to results\log if returned
             if ($payloadObj.LogFileName -and $payloadObj.LogPayload) {
@@ -838,7 +1005,9 @@ $InvokeDiscoveryOnServerScriptBlock = {
             $errorMsg = "Failed to decode JSON payload from $ComputerName : $($_.Exception.Message)"
             Write-Warning "[$ComputerName] Failed to decode JSON payload"
             & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
-            return
+            $scan['Outcome'] = 'JSON decode or save failed'
+            $scan['DetailMessage'] = $errorMsg
+            return ([pscustomobject]$scan)
         }
 
         # Optional: best-effort cleanup of staged files on remote
@@ -859,7 +1028,7 @@ $InvokeDiscoveryOnServerScriptBlock = {
         }
 
         Write-Host "[$ComputerName] Discovery completed." -ForegroundColor Green
-        return
+        return ([pscustomobject]$scan)
     }
 
     # SMB/legacy path: stage script + helper and run from path (so helper module loads), then collect via CollectorShare or \\server\c$
@@ -893,7 +1062,9 @@ $InvokeDiscoveryOnServerScriptBlock = {
         -ActualComputerNameFromPriorTest $actualComputerName
 
     if (-not $discoveryResult.Success) {
-        return
+        $scan['Outcome'] = 'Discovery failed (remote execution)'
+        $scan['DetailMessage'] = $discoveryResult.ErrorMessage
+        return ([pscustomobject]$scan)
     }
 
     $summary = $discoveryResult.Output
@@ -930,6 +1101,7 @@ $InvokeDiscoveryOnServerScriptBlock = {
             Copy-Item -Path $remotePath -Destination $destPath -FromSession $session -Force -ErrorAction Stop
 
             Write-Host "[$ComputerName] Copied $remotePath -> $destPath" -ForegroundColor Green
+            Apply-DiscoveryFileToScanRow -Path $destPath -ScanRow $scan
 
             # Copy discovery log to results\log
             if ($RemoteLogRoot) {
@@ -957,6 +1129,13 @@ $InvokeDiscoveryOnServerScriptBlock = {
             $errorMsg = "Failed to collect JSON from CollectorShare: $($_.Exception.Message)"
             Write-Warning "[$ComputerName] JSON collection failed"
             & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
+            $scan['Outcome'] = 'JSON collection failed (collector share)'
+            $scan['DetailMessage'] = $errorMsg
+            if ($session) {
+                try { Remove-PSSession $session -ErrorAction SilentlyContinue }
+                catch { & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "Failed to remove PSSession: $($_.Exception.Message)" -ErrorType "WARNING" }
+            }
+            return ([pscustomobject]$scan)
         }
         finally {
             if ($session) { 
@@ -986,7 +1165,7 @@ $InvokeDiscoveryOnServerScriptBlock = {
             }
 
             # Create local directory structure: {ScriptDir}\results\<out|plantid>
-            $localOutputRoot = Join-Path $scriptDir "results\$localOutputSubdir"
+            $localOutputRoot = Join-Path $scriptDir "results\$LocalOutputSubdir"
             if (-not (Test-Path -Path $localOutputRoot)) {
                 New-Item -Path $localOutputRoot -ItemType Directory -Force | Out-Null
             }
@@ -1058,6 +1237,7 @@ $InvokeDiscoveryOnServerScriptBlock = {
             }
 
             Write-Host "[$ComputerName] Copied $remoteUncFile -> $localDestPath" -ForegroundColor Green
+            Apply-DiscoveryFileToScanRow -Path $localDestPath -ScanRow $scan
 
             # Copy discovery log to results\log via temporary session
             if ($RemoteLogRoot) {
@@ -1091,10 +1271,14 @@ $InvokeDiscoveryOnServerScriptBlock = {
             Write-Warning "[$ComputerName] JSON collection failed"
             & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
             Write-Host "[$ComputerName] JSON file is available on the remote server at: $remotePath" -ForegroundColor Cyan
+            $scan['Outcome'] = 'JSON collection failed (admin share)'
+            $scan['DetailMessage'] = $errorMsg
+            return ([pscustomobject]$scan)
         }
     }
     
     Write-Host "[$ComputerName] Discovery completed." -ForegroundColor Green
+    return ([pscustomobject]$scan)
 }
 
 # Initialize error log path early so it's available for summary
@@ -1120,6 +1304,8 @@ Write-Host "`nStarting discovery on $($servers.Count) server(s)..." -ForegroundC
 # Create scriptblocks for functions to pass to parallel execution
 $writeErrorLogScriptBlock = ${function:Write-ErrorLog}
 $ensureWinRmAndConnectScriptBlock = ${function:Ensure-WinRmAndConnect}
+
+$collectedScanRows = New-Object System.Collections.ArrayList
 
 # --- Execution: parallel (PS 7+ only when ThreadJob available) or sequential ---
 # PS 5.1 and non-parallel: always use the sequential path below. Parallel is only used when
@@ -1165,13 +1351,24 @@ if ($useParallelThreadJob) {
                 [bool]$AttemptWinRmHeal.IsPresent,
                 $helperModuleContent,
                 $remoteRunDir,
-                [bool]$UseSmbForResults.IsPresent
+                [bool]$UseSmbForResults.IsPresent,
+                $localOutputSubdir
             )
             $null = $running.Add($job)
         }
         $jobArray = @($running)
         if ($jobArray.Count -gt 0) {
             & $waitJobCmd -Job $jobArray | Out-Null
+            foreach ($jb in $jobArray) {
+                $received = Receive-Job -Job $jb -ErrorAction SilentlyContinue
+                foreach ($o in @($received)) {
+                    if ($null -eq $o) { continue }
+                    $pnames = @($o.PSObject.Properties | ForEach-Object { $_.Name })
+                    if ($pnames -contains 'ServerListEntry') {
+                        $null = $collectedScanRows.Add($o)
+                    }
+                }
+            }
             & $removeJobCmd -Job $jobArray -Force -ErrorAction SilentlyContinue
         }
     }
@@ -1183,6 +1380,7 @@ if ($useParallelThreadJob) {
 
 if (-not $useParallelThreadJob -or $parallelFailed) {
     # Sequential path: PS 5.1 (with or without -UseParallel), PS 3–4, ThreadJob not available, or parallel failed
+    $collectedScanRows = New-Object System.Collections.ArrayList
     if ($parallelFailed) {
         Write-Host "Running discovery sequentially after parallel failure." -ForegroundColor Yellow
     }
@@ -1194,7 +1392,7 @@ if (-not $useParallelThreadJob -or $parallelFailed) {
     }
     foreach ($server in $servers) {
         try {
-            & $InvokeDiscoveryOnServerScriptBlock `
+            $oneRow = & $InvokeDiscoveryOnServerScriptBlock `
                 -ComputerName $server `
                 -Credential $Credential `
                 -ScriptContent $scriptContent `
@@ -1210,15 +1408,44 @@ if (-not $useParallelThreadJob -or $parallelFailed) {
                 -AttemptWinRmHeal:$AttemptWinRmHeal `
                 -HelperModuleContent $helperModuleContent `
                 -RemoteRunDir $remoteRunDir `
-                -UseSmbForResults:$UseSmbForResults
+                -UseSmbForResults:$UseSmbForResults `
+                -LocalOutputSubdir $localOutputSubdir
+            if ($oneRow) { $null = $collectedScanRows.Add($oneRow) }
         }
         catch {
             $errorMsg = "Unexpected error processing server: $($_.Exception.Message)"
             & $writeErrorLogScriptBlock -ServerName $server -ErrorMessage $errorMsg -ErrorType "FATAL"
             Write-Warning "[$server] Unexpected error (see error log)"
+            $null = $collectedScanRows.Add([pscustomobject]@{
+                    ServerListEntry             = $server
+                    ResolvedComputerName        = $null
+                    Outcome                     = 'Unexpected orchestrator error'
+                    ConnectionErrorCategory     = $null
+                    JsonFileName                = $null
+                    PowerShellVersion           = $null
+                    CompatibilityMode           = $null
+                    UnavailableSectionsSummary  = $null
+                    ConfigFileIssue             = $false
+                    DetailMessage               = $errorMsg
+                })
         }
     }
 }
+
+$orchestratorScriptDir = if ($MyInvocation.PSCommandPath) {
+    Split-Path -Parent $MyInvocation.PSCommandPath
+}
+elseif ($PSScriptRoot) { $PSScriptRoot }
+else { (Get-Location).Path }
+$localResultsOutputRoot = Join-Path $orchestratorScriptDir "results\$localOutputSubdir"
+$mergedScanRows = Merge-ScanRowsWithAllTargets -ServersInOrder $servers -ReturnedRows @($collectedScanRows.ToArray())
+$listPathForReport = $ServerListPath
+try { $listPathForReport = (Resolve-Path -LiteralPath $ServerListPath -ErrorAction Stop).Path } catch { }
+Write-DiscoveryScanResultsFile `
+    -OutputDirectory $localResultsOutputRoot `
+    -HostScanRows $mergedScanRows `
+    -ServerListPath $listPathForReport `
+    -PlantId $PlantId
 
 # Display summary
 Write-Host "`n" + ("="*70) -ForegroundColor Cyan

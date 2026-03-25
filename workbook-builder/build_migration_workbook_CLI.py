@@ -263,6 +263,9 @@ def load_latest_records(
                 raise CancelledError()
             if not fname.lower().endswith(".json"):
                 continue
+            # Orchestrator summary — not a host discovery snapshot (see Invoke-MigrationDiscoveryRemotely*.ps1)
+            if fname.lower() == "scan_results.json":
+                continue
             fpath = os.path.join(root, fname)
             data = _load_json_file(fpath, strict_json=strict_json, log_cb=log_cb)
             if data is None:
@@ -310,6 +313,58 @@ def load_latest_records(
         for k, v in latest_by_computer.items()
     ]
     return records_with_provenance, plant_ids_seen
+
+
+def find_scan_results_json(input_folder: str) -> Optional[str]:
+    """Return path to scan_results.json if present (same folder as host JSON or common layouts)."""
+    norm = os.path.normpath(os.path.abspath(input_folder))
+    candidates = [
+        os.path.join(norm, "scan_results.json"),
+        os.path.join(os.path.dirname(norm), "scan_results.json"),
+        os.path.join(norm, "out", "scan_results.json"),
+    ]
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def load_scan_results_rows(
+    input_folder: str,
+    strict_json: bool = False,
+    log_cb: Optional[Callable[[str], None]] = None,
+) -> Optional[List[dict]]:
+    """
+    Load per-host remote scan outcomes written by the PowerShell orchestrator.
+    Schema: DomainMigrationDiscovery.ScanResults/v1
+    """
+    path = find_scan_results_json(input_folder)
+    if not path:
+        return None
+    data = _load_json_file(path, strict_json=strict_json, log_cb=log_cb)
+    if not data or not isinstance(data, dict):
+        return None
+    if data.get("Schema") != "DomainMigrationDiscovery.ScanResults/v1":
+        if log_cb:
+            log_cb(f"WARNING: {path} is not a ScanResults v1 file (skipped Scan results sheet).")
+        return None
+    hosts = data.get("Hosts")
+    if not isinstance(hosts, list):
+        return None
+    out: List[dict] = []
+    for h in hosts:
+        if isinstance(h, dict):
+            out.append(h)
+    meta = {
+        "ScanResults_File": path,
+        "ScanResults_GeneratedAtUtc": data.get("GeneratedAtUtc"),
+        "ScanResults_ServerListPath": data.get("ServerListPath"),
+        "ScanResults_PlantId": data.get("PlantId"),
+        "ScanResults_Orchestrator": data.get("Orchestrator"),
+    }
+    for row in out:
+        row.update({k: v for k, v in meta.items() if v is not None})
+    return out
 
 
 # Excel cell character limit (openpyxl/Excel)
@@ -1692,6 +1747,7 @@ def write_excel(
 
     preferred_order = [
         "Summary",
+        "Scan results",
         "Diagnostics",
         "Metadata",
         "System",
@@ -1836,6 +1892,20 @@ def write_excel(
                 core_cols = core_cols + [c for c in summary_cols if c in df.columns]
             elif sheet_name == "Diagnostics":
                 core_cols = ["SourceFile", "SourceComputerKey", "ComputerName", "CollectedAt", "PlantId"]
+            elif sheet_name == "Scan results":
+                core_cols = [
+                    "ServerListEntry",
+                    "Outcome",
+                    "ResolvedComputerName",
+                    "ConnectionErrorCategory",
+                    "JsonFileName",
+                    "PowerShellVersion",
+                    "CompatibilityMode",
+                    "UnavailableSectionsSummary",
+                    "ConfigFileIssue",
+                    "DetailMessage",
+                    "ScanResults_File",
+                ]
             elif sheet_name == "Metadata":
                 core_cols = [
                     "ComputerName", "PlantId", "Domain", "OldDomainFqdn",
@@ -1891,7 +1961,7 @@ def write_excel(
 
 # Sheet order used for validation and writing
 _PREFERRED_SHEET_ORDER = [
-    "Summary", "Diagnostics", "Metadata", "System", "ServiceAccountCandidates",
+    "Summary", "Scan results", "Diagnostics", "Metadata", "System", "ServiceAccountCandidates",
     "Services", "ScheduledTasks", "LocalAdministrators", "Local Admin Membership",
     "LocalGroupMembers", "MappedDrives", "Printers", "OdbcDsn", "DatabaseConnections",
     "CredentialManager", "Certificates", "FirewallRules", "Profiles", "InstalledApps",
@@ -1990,6 +2060,18 @@ def build_workbook(
                 "CollectedAt": meta.get("CollectedAt"),
                 "PlantId": meta.get("PlantId"),
             })
+
+        scan_rows = load_scan_results_rows(
+            input_folder,
+            strict_json=strict_json,
+            log_cb=None if minimal_log else _log,
+        )
+        if scan_rows:
+            for sr in scan_rows:
+                if ev.is_set():
+                    raise CancelledError()
+                sheet_rows["Scan results"].append(sr)
+            _status(f"Added Scan results sheet ({len(scan_rows)} host(s)) from scan_results.json.")
 
         output_dir = os.path.dirname(output_path)
         base_name = os.path.splitext(os.path.basename(output_path))[0]
