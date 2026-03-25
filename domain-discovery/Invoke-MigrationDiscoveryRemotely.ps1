@@ -175,6 +175,9 @@ function Write-DiscoveryScanResultsFile {
             ResolvedComputerName        = $row.ResolvedComputerName
             Outcome                     = $row.Outcome
             ConnectionErrorCategory     = $row.ConnectionErrorCategory
+            FailureReasonCode           = $row.FailureReasonCode
+            FailureReasonSummary        = $row.FailureReasonSummary
+            TechnicalDetail             = $row.TechnicalDetail
             JsonFileName                = $row.JsonFileName
             PowerShellVersion           = $row.PowerShellVersion
             CompatibilityMode           = $row.CompatibilityMode
@@ -221,6 +224,9 @@ function Merge-ScanRowsWithAllTargets {
                     ResolvedComputerName        = $null
                     Outcome                     = 'No result recorded (orchestrator did not capture this host)'
                     ConnectionErrorCategory     = $null
+                    FailureReasonCode           = $null
+                    FailureReasonSummary        = $null
+                    TechnicalDetail             = $null
                     JsonFileName                = $null
                     PowerShellVersion           = $null
                     CompatibilityMode           = $null
@@ -291,6 +297,13 @@ if (-not (Test-Path -LiteralPath $helperModulePath)) {
     throw $errorMsg
 }
 $helperModuleContent = Get-Content -Path $helperModulePath -Raw -ErrorAction Stop
+$remotingFailuresModulePath = Join-Path $scriptDirForDiscovery 'DomainMigrationDiscovery.RemotingFailures.psm1'
+if (-not (Test-Path -LiteralPath $remotingFailuresModulePath)) {
+    $errorMsg = "Remoting failures module not found: $remotingFailuresModulePath. Required for remote discovery."
+    Write-Error $errorMsg
+    throw $errorMsg
+}
+$null = Import-Module $remotingFailuresModulePath -Force -ErrorAction Stop
 $remoteRunDir = "C:\temp\MigrationDiscovery\run"
 
 # Build a hashtable of parameters for the discovery script
@@ -329,76 +342,9 @@ if ($ConfigFile) {
     }
 }
 
-# Helper function to categorize WinRM/Invoke-Command errors
-function Get-WinRmFailureCategory {
-    param(
-        [Parameter(Mandatory)]
-        [string]$ErrorMessage,
-        
-        [Parameter(Mandatory)]
-        [System.Management.Automation.ErrorRecord]$ErrorRecord
-    )
-    
-    # Returns one of: 'AuthError','NetworkError','WinRmServiceError','Unknown'
-    
-    # Authentication errors - do not attempt to heal
-    if ($ErrorMessage -match 'access is denied' -or
-        $ErrorMessage -match '401' -or
-        $ErrorMessage -match '403' -or
-        $ErrorMessage -match 'unauthorized' -or
-        $ErrorMessage -match 'authentication failed' -or
-        $ErrorMessage -match 'Kerberos' -or
-        $ErrorMessage -match 'NTLM' -or
-        $ErrorMessage -match 'credential' -or
-        $ErrorRecord.CategoryInfo.Category -eq 'AuthenticationError' -or
-        $ErrorRecord.CategoryInfo.Category -eq 'SecurityError')
-    {
-        return 'AuthError'
-    }
-    
-    # Network/name resolution errors - do not attempt to heal
-    if ($ErrorMessage -match 'WinRM cannot complete the operation' -or
-        $ErrorMessage -match 'The network path was not found' -or
-        $ErrorMessage -match 'No connection could be made' -or
-        $ErrorMessage -match 'cannot resolve' -or
-        $ErrorMessage -match 'host.*not found' -or
-        $ErrorMessage -match 'RPC server is unavailable' -or
-        $ErrorMessage -match 'network is unreachable' -or
-        $ErrorRecord.CategoryInfo.Category -eq 'InvalidOperation' -and $ErrorMessage -match 'network')
-    {
-        return 'NetworkError'
-    }
-    
-    # WinRM service errors - these are candidates for healing
-    if ($ErrorMessage -match 'WinRM service' -or
-        $ErrorMessage -match 'The WinRM client cannot process the request' -or
-        $ErrorMessage -match 'WS-Management service' -or
-        $ErrorMessage -match 'service.*not running' -or
-        ($ErrorMessage -match 'cannot connect' -and $ErrorMessage -match 'WinRM') -or
-        $ErrorRecord.Exception -is [System.Management.Automation.Remoting.PSRemotingTransportException] -or
-        $ErrorRecord.FullyQualifiedErrorId -match 'WinRM')
-    {
-        return 'WinRmServiceError'
-    }
-    
-    return 'Unknown'
-}
-
 # Centralized WinRM connectivity helper
-# This function handles all WinRM connectivity testing, error classification, optional healing, and remote script execution
-#
-# WinRM Auto-Heal Behavior:
-# - When -AttemptWinRmHeal is NOT provided: Tests WinRM connectivity once. If it fails, logs the error and returns.
-# - When -AttemptWinRmHeal IS provided: Tests WinRM connectivity. If it fails with a WinRM service error (not auth/network),
-#   attempts to start the WinRM service on the remote system (PS 5.1: Get-Service/Set-Service -ComputerName; PS 6+: Get-CimInstance/Invoke-CimMethod)
-#   After starting the service, waits 5 seconds, verifies the service is running, then retries the connectivity test once.
-#   Authentication errors and network errors are never healed - only WinRM service errors are candidates for healing.
-#
-# Error Classification:
-# - AuthError: Authentication/authorization failures (access denied, 401, credentials, etc.) - never healed
-# - NetworkError: Network/name resolution failures (host unreachable, DNS failure, etc.) - never healed  
-# - WinRmServiceError: WinRM service not running, listener unavailable, WinRM-specific faults - can be healed if -AttemptWinRmHeal is set
-# - Unknown: Unclassified errors - can be healed if -AttemptWinRmHeal is set (treated as potential WinRM service issues)
+# Uses DomainMigrationDiscovery.RemotingFailures.psm1 (Resolve-RemoteGatheringFailure, Test-WinRmHealCandidate).
+# Heal: only when Test-WinRmHealCandidate is true and -AttemptWinRmHeal is set (start WinRM service and retry once).
 function Ensure-WinRmAndConnect {
     param(
         [Parameter(Mandatory)]
@@ -423,13 +369,16 @@ function Ensure-WinRmAndConnect {
         [string]$ActualComputerNameFromPriorTest = $null
     )
     
-    # Result object to return
+    # Result object to return (ErrorCategory mirrors FailureReasonCode for backward compatibility)
     $result = @{
-        Success = $false
-        ErrorCategory = $null
-        ErrorMessage = $null
-        Output = $null
-        ActualComputerName = $null
+        Success               = $false
+        ErrorCategory         = $null
+        ErrorMessage          = $null
+        FailureReasonCode     = $null
+        FailureReasonSummary  = $null
+        TechnicalDetail       = $null
+        Output                = $null
+        ActualComputerName    = $null
     }
     
     # Step 1: Initial WinRM connectivity check (skip if caller already established connectivity)
@@ -463,48 +412,39 @@ function Ensure-WinRmAndConnect {
         Write-Host "[$ComputerName] WinRM connectivity successful (remote computer: $testResult)" -ForegroundColor Green
     }
     catch {
-        $initialError = $_.Exception.Message
         $errorRecord = $_
+        $initialResolved = Resolve-RemoteGatheringFailure -ErrorRecord $errorRecord -Stage ConnectivityTest -ComputerName $ComputerName
         
-        # Step 2: Classify the error
-        $failureCategory = Get-WinRmFailureCategory -ErrorMessage $initialError -ErrorRecord $errorRecord
-        
-        # Log the categorized error (detailed message to log, brief to console)
-        $errorMsg = "WinRM connectivity failed - categorized as $failureCategory. Error: $initialError"
-        Write-Warning "[$ComputerName] WinRM failed: $failureCategory"
+        Write-Warning "[$ComputerName] $($initialResolved.FailureReasonSummary)"
         if ($WriteErrorLogFunction) {
-            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
+            $logLine = "$($initialResolved.FailureReasonSummary) | $($initialResolved.TechnicalDetail)"
+            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $logLine -ErrorType "CONNECTION_ERROR"
         }
         
-        # Step 3: Handle based on error category
-        
-        # Authentication errors - do not attempt to heal
-        if ($failureCategory -eq 'AuthError') {
-            $result.ErrorCategory = 'AuthError'
-            $result.ErrorMessage = $errorMsg
+        if (-not (Test-WinRmHealCandidate -FailureReasonCode $initialResolved.FailureReasonCode)) {
+            $result.ErrorCategory = $initialResolved.FailureReasonCode
+            $result.FailureReasonCode = $initialResolved.FailureReasonCode
+            $result.FailureReasonSummary = $initialResolved.FailureReasonSummary
+            $result.TechnicalDetail = $initialResolved.TechnicalDetail
+            $result.ErrorMessage = $initialResolved.TechnicalDetail
             return $result
         }
         
-        # Network/name resolution errors - do not attempt to heal
-        if ($failureCategory -eq 'NetworkError') {
-            $result.ErrorCategory = 'NetworkError'
-            $result.ErrorMessage = $errorMsg
-            return $result
-        }
-        
-        # WinRM service errors (or Unknown) - attempt heal only if requested
-        if ($failureCategory -eq 'WinRmServiceError' -or $failureCategory -eq 'Unknown') {
-            if (-not $AttemptWinRmHeal) {
-                $errorMsg = "WinRM is not available and healing is disabled. Category: $failureCategory. Error: $initialError"
-                Write-Warning "[$ComputerName] WinRM unavailable (healing disabled)"
-                if ($WriteErrorLogFunction) {
-                    & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
-                }
-                $result.ErrorCategory = $failureCategory
-                $result.ErrorMessage = $errorMsg
-                return $result
+        if (-not $AttemptWinRmHeal) {
+            $healOffMsg = "$($initialResolved.FailureReasonSummary) Auto-start of the WinRM service was not requested (use -AttemptWinRmHeal). | $($initialResolved.TechnicalDetail)"
+            Write-Warning "[$ComputerName] WinRM unavailable (healing disabled)"
+            if ($WriteErrorLogFunction) {
+                & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $healOffMsg -ErrorType "CONNECTION_ERROR"
             }
-            
+            $result.ErrorCategory = $initialResolved.FailureReasonCode
+            $result.FailureReasonCode = $initialResolved.FailureReasonCode
+            $result.FailureReasonSummary = $initialResolved.FailureReasonSummary
+            $result.TechnicalDetail = $initialResolved.TechnicalDetail
+            $result.ErrorMessage = $healOffMsg
+            return $result
+        }
+        
+        # Heal candidates only: attempt to start WinRM service once, then retry connectivity
             # Step 4: Attempt to start WinRM service on remote computer
             # PS 5.1: Get-Service/Set-Service support -ComputerName. PS 6+ (Core/7): -ComputerName removed; use CIM.
             Write-Host "[$ComputerName] Attempting to start WinRM service on remote computer..." -ForegroundColor Yellow
@@ -527,13 +467,18 @@ function Ensure-WinRmAndConnect {
                             $serviceStarted = $true
                         }
                         else {
-                            $errorMsg = "WinRM heal failed; service not running after attempt. Status: $($serviceCheck.Status)"
-                            Write-Warning "[$ComputerName] WinRM heal failed"
+                            $fakeEx = [System.Exception]::new("WinRM service not running after start attempt. Status: $($serviceCheck.Status)")
+                            $fakeEr = [System.Management.Automation.ErrorRecord]::new($fakeEx, 'WinRMHealFailed', [System.Management.Automation.ErrorCategory]::OperationStopped, $null)
+                            $healResolved = Resolve-RemoteGatheringFailure -ErrorRecord $fakeEr -Stage Heal -ComputerName $ComputerName
+                            Write-Warning "[$ComputerName] $($healResolved.FailureReasonSummary)"
                             if ($WriteErrorLogFunction) {
-                                & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "WINRM_HEAL_ERROR"
+                                & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "$($healResolved.FailureReasonSummary) | $($healResolved.TechnicalDetail)" -ErrorType "WINRM_HEAL_ERROR"
                             }
-                            $result.ErrorCategory = $failureCategory
-                            $result.ErrorMessage = $errorMsg
+                            $result.ErrorCategory = $healResolved.FailureReasonCode
+                            $result.FailureReasonCode = $healResolved.FailureReasonCode
+                            $result.FailureReasonSummary = $healResolved.FailureReasonSummary
+                            $result.TechnicalDetail = $healResolved.TechnicalDetail
+                            $result.ErrorMessage = $healResolved.TechnicalDetail
                             return $result
                         }
                     }
@@ -561,27 +506,34 @@ function Ensure-WinRmAndConnect {
                             $serviceStarted = $true
                         }
                         else {
-                            $errorMsg = "WinRM heal failed; service not running after attempt. State: $($svcCheck.State)"
-                            Write-Warning "[$ComputerName] WinRM heal failed"
+                            $fakeEx = [System.Exception]::new("WinRM service not running after start attempt. State: $($svcCheck.State)")
+                            $fakeEr = [System.Management.Automation.ErrorRecord]::new($fakeEx, 'WinRMHealFailed', [System.Management.Automation.ErrorCategory]::OperationStopped, $null)
+                            $healResolved = Resolve-RemoteGatheringFailure -ErrorRecord $fakeEr -Stage Heal -ComputerName $ComputerName
+                            Write-Warning "[$ComputerName] $($healResolved.FailureReasonSummary)"
                             if ($WriteErrorLogFunction) {
-                                & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "WINRM_HEAL_ERROR"
+                                & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "$($healResolved.FailureReasonSummary) | $($healResolved.TechnicalDetail)" -ErrorType "WINRM_HEAL_ERROR"
                             }
-                            $result.ErrorCategory = $failureCategory
-                            $result.ErrorMessage = $errorMsg
+                            $result.ErrorCategory = $healResolved.FailureReasonCode
+                            $result.FailureReasonCode = $healResolved.FailureReasonCode
+                            $result.FailureReasonSummary = $healResolved.FailureReasonSummary
+                            $result.TechnicalDetail = $healResolved.TechnicalDetail
+                            $result.ErrorMessage = $healResolved.TechnicalDetail
                             return $result
                         }
                     }
                 }
             }
             catch {
-                $serviceError = $_.Exception.Message
-                $errorMsg = "Failed to start WinRM service: $serviceError"
-                Write-Warning "[$ComputerName] WinRM service start failed"
+                $healResolved = Resolve-RemoteGatheringFailure -ErrorRecord $_ -Stage Heal -ComputerName $ComputerName
+                Write-Warning "[$ComputerName] $($healResolved.FailureReasonSummary)"
                 if ($WriteErrorLogFunction) {
-                    & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "WINRM_HEAL_ERROR"
+                    & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "$($healResolved.FailureReasonSummary) | $($healResolved.TechnicalDetail)" -ErrorType "WINRM_HEAL_ERROR"
                 }
-                $result.ErrorCategory = $failureCategory
-                $result.ErrorMessage = $errorMsg
+                $result.ErrorCategory = $healResolved.FailureReasonCode
+                $result.FailureReasonCode = $healResolved.FailureReasonCode
+                $result.FailureReasonSummary = $healResolved.FailureReasonSummary
+                $result.TechnicalDetail = $healResolved.TechnicalDetail
+                $result.ErrorMessage = $healResolved.TechnicalDetail
                 return $result
             }
             
@@ -608,30 +560,35 @@ function Ensure-WinRmAndConnect {
                     Write-Host "[$ComputerName] WinRM connectivity successful after heal (remote computer: $testResult)" -ForegroundColor Green
                 }
                 catch {
-                    $retryError = $_.Exception.Message
-                    $errorMsg = "WinRM connection failed after attempting to start service. Initial error: $initialError. Retry error: $retryError"
-                    Write-Warning "[$ComputerName] WinRM retry failed"
+                    $retryResolved = Resolve-RemoteGatheringFailure -ErrorRecord $_ -Stage ConnectivityTest -ComputerName $ComputerName
+                    $mergedTech = "After heal retry: $($retryResolved.TechnicalDetail) | Initial connectivity: $($initialResolved.TechnicalDetail)"
+                    Write-Warning "[$ComputerName] $($retryResolved.FailureReasonSummary)"
                     if ($WriteErrorLogFunction) {
-                        & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
+                        & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "$($retryResolved.FailureReasonSummary) | $mergedTech" -ErrorType "CONNECTION_ERROR"
                     }
-                    $result.ErrorCategory = $failureCategory
-                    $result.ErrorMessage = $errorMsg
+                    $result.ErrorCategory = $retryResolved.FailureReasonCode
+                    $result.FailureReasonCode = $retryResolved.FailureReasonCode
+                    $result.FailureReasonSummary = $retryResolved.FailureReasonSummary
+                    $result.TechnicalDetail = $mergedTech
+                    $result.ErrorMessage = $mergedTech
                     return $result
                 }
             }
-        }
     }
     }
     
     # Step 6: If connectivity test passed, run the main remote script
     if (-not $connectivityTestPassed) {
-        $errorMsg = "WinRM connectivity failed: Unable to establish connection"
-        Write-Warning "[$ComputerName] WinRM connection failed"
+        $unk = Resolve-RemoteGatheringFailure -ErrorRecord $null -Stage ConnectivityTest -ComputerName $ComputerName
+        Write-Warning "[$ComputerName] $($unk.FailureReasonSummary)"
         if ($WriteErrorLogFunction) {
-            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "CONNECTION_ERROR"
+            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "$($unk.FailureReasonSummary) | $($unk.TechnicalDetail)" -ErrorType "CONNECTION_ERROR"
         }
-        $result.ErrorCategory = 'Unknown'
-        $result.ErrorMessage = $errorMsg
+        $result.ErrorCategory = $unk.FailureReasonCode
+        $result.FailureReasonCode = $unk.FailureReasonCode
+        $result.FailureReasonSummary = $unk.FailureReasonSummary
+        $result.TechnicalDetail = $unk.TechnicalDetail
+        $result.ErrorMessage = $unk.TechnicalDetail
         return $result
     }
     
@@ -667,14 +624,16 @@ function Ensure-WinRmAndConnect {
         return $result
     }
     catch {
-        $execError = $_.Exception.Message
-        $errorMsg = "Failed to execute remote script: $execError"
-        Write-Warning "[$ComputerName] Script execution failed"
+        $execResolved = Resolve-RemoteGatheringFailure -ErrorRecord $_ -Stage RemoteInvoke -ComputerName $ComputerName
+        Write-Warning "[$ComputerName] $($execResolved.FailureReasonSummary)"
         if ($WriteErrorLogFunction) {
-            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "SCRIPT_EXECUTION_ERROR"
+            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "$($execResolved.FailureReasonSummary) | $($execResolved.TechnicalDetail)" -ErrorType "SCRIPT_EXECUTION_ERROR"
         }
-        $result.ErrorCategory = 'Unknown'
-        $result.ErrorMessage = $errorMsg
+        $result.ErrorCategory = $execResolved.FailureReasonCode
+        $result.FailureReasonCode = $execResolved.FailureReasonCode
+        $result.FailureReasonSummary = $execResolved.FailureReasonSummary
+        $result.TechnicalDetail = $execResolved.TechnicalDetail
+        $result.ErrorMessage = $execResolved.TechnicalDetail
         return $result
     }
 }
@@ -700,7 +659,8 @@ $InvokeDiscoveryOnServerScriptBlock = {
         [string]$HelperModuleContent,
         [string]$RemoteRunDir,
         [switch]$UseSmbForResults,
-        [string]$LocalOutputSubdir
+        [string]$LocalOutputSubdir,
+        [string]$RemotingFailuresModulePath
     )
 
     $scan = [ordered]@{
@@ -708,6 +668,9 @@ $InvokeDiscoveryOnServerScriptBlock = {
         ResolvedComputerName        = $null
         Outcome                     = 'Unknown'
         ConnectionErrorCategory     = $null
+        FailureReasonCode           = $null
+        FailureReasonSummary        = $null
+        TechnicalDetail             = $null
         JsonFileName                = $null
         PowerShellVersion           = $null
         CompatibilityMode           = $null
@@ -775,6 +738,9 @@ $InvokeDiscoveryOnServerScriptBlock = {
     # Ensure core cmdlets (Get-Date, Write-Host, Test-Path, etc.) are available when this block runs in a thread-job runspace (PS 7 parallel).
     $null = Import-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue
     $null = Import-Module Microsoft.PowerShell.Management -ErrorAction SilentlyContinue
+    if ($RemotingFailuresModulePath -and (Test-Path -LiteralPath $RemotingFailuresModulePath)) {
+        $null = Import-Module $RemotingFailuresModulePath -Force -ErrorAction SilentlyContinue
+    }
 
     # Determine compatibility mode locally (don't rely on script-level variables)
     if (-not $CompatibilityMode) {
@@ -798,9 +764,12 @@ $InvokeDiscoveryOnServerScriptBlock = {
     
     # Check if WinRM connectivity succeeded
     if (-not $testResult.Success) {
-        $scan['ConnectionErrorCategory'] = $testResult.ErrorCategory
+        $scan['ConnectionErrorCategory'] = $testResult.FailureReasonCode
+        $scan['FailureReasonCode'] = $testResult.FailureReasonCode
+        $scan['FailureReasonSummary'] = $testResult.FailureReasonSummary
+        $scan['TechnicalDetail'] = $testResult.TechnicalDetail
         $scan['Outcome'] = 'Could not connect (WinRM)'
-        $scan['DetailMessage'] = $testResult.ErrorMessage
+        $scan['DetailMessage'] = $testResult.TechnicalDetail
         return ([pscustomobject]$scan)
     }
     
@@ -943,17 +912,27 @@ $InvokeDiscoveryOnServerScriptBlock = {
 
         if (-not $discoveryResult.Success) {
             $scan['Outcome'] = 'Discovery failed (remote execution)'
-            $scan['DetailMessage'] = $discoveryResult.ErrorMessage
+            $scan['ConnectionErrorCategory'] = $discoveryResult.FailureReasonCode
+            $scan['FailureReasonCode'] = $discoveryResult.FailureReasonCode
+            $scan['FailureReasonSummary'] = $discoveryResult.FailureReasonSummary
+            $scan['TechnicalDetail'] = $discoveryResult.TechnicalDetail
+            $scan['DetailMessage'] = $discoveryResult.TechnicalDetail
             return ([pscustomobject]$scan)
         }
 
         $payloadObj = $discoveryResult.Output
         if (-not $payloadObj -or -not $payloadObj.Payload) {
-            $errorMsg = "Discovery ran but no JSON payload returned from $ComputerName"
-            Write-Warning "[$ComputerName] No JSON payload returned"
-            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
+            $npEx = [System.Exception]::new("Discovery ran but no JSON payload returned from $ComputerName")
+            $npEr = [System.Management.Automation.ErrorRecord]::new($npEx, 'NoJsonPayload', [System.Management.Automation.ErrorCategory]::InvalidResult, $null)
+            $npRes = Resolve-RemoteGatheringFailure -ErrorRecord $npEr -Stage PayloadDecode -ComputerName $ComputerName
+            Write-Warning "[$ComputerName] $($npRes.FailureReasonSummary)"
+            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "$($npRes.FailureReasonSummary) | $($npRes.TechnicalDetail)" -ErrorType "FILE_COLLECTION_ERROR"
             $scan['Outcome'] = 'JSON not returned over WinRM'
-            $scan['DetailMessage'] = $errorMsg
+            $scan['ConnectionErrorCategory'] = $npRes.FailureReasonCode
+            $scan['FailureReasonCode'] = $npRes.FailureReasonCode
+            $scan['FailureReasonSummary'] = $npRes.FailureReasonSummary
+            $scan['TechnicalDetail'] = $npRes.TechnicalDetail
+            $scan['DetailMessage'] = $npRes.TechnicalDetail
             return ([pscustomobject]$scan)
         }
 
@@ -1002,11 +981,15 @@ $InvokeDiscoveryOnServerScriptBlock = {
             }
         }
         catch {
-            $errorMsg = "Failed to decode JSON payload from $ComputerName : $($_.Exception.Message)"
-            Write-Warning "[$ComputerName] Failed to decode JSON payload"
-            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
+            $decRes = Resolve-RemoteGatheringFailure -ErrorRecord $_ -Stage PayloadDecode -ComputerName $ComputerName
+            Write-Warning "[$ComputerName] $($decRes.FailureReasonSummary)"
+            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "$($decRes.FailureReasonSummary) | $($decRes.TechnicalDetail)" -ErrorType "FILE_COLLECTION_ERROR"
             $scan['Outcome'] = 'JSON decode or save failed'
-            $scan['DetailMessage'] = $errorMsg
+            $scan['ConnectionErrorCategory'] = $decRes.FailureReasonCode
+            $scan['FailureReasonCode'] = $decRes.FailureReasonCode
+            $scan['FailureReasonSummary'] = $decRes.FailureReasonSummary
+            $scan['TechnicalDetail'] = $decRes.TechnicalDetail
+            $scan['DetailMessage'] = $decRes.TechnicalDetail
             return ([pscustomobject]$scan)
         }
 
@@ -1063,7 +1046,11 @@ $InvokeDiscoveryOnServerScriptBlock = {
 
     if (-not $discoveryResult.Success) {
         $scan['Outcome'] = 'Discovery failed (remote execution)'
-        $scan['DetailMessage'] = $discoveryResult.ErrorMessage
+        $scan['ConnectionErrorCategory'] = $discoveryResult.FailureReasonCode
+        $scan['FailureReasonCode'] = $discoveryResult.FailureReasonCode
+        $scan['FailureReasonSummary'] = $discoveryResult.FailureReasonSummary
+        $scan['TechnicalDetail'] = $discoveryResult.TechnicalDetail
+        $scan['DetailMessage'] = $discoveryResult.TechnicalDetail
         return ([pscustomobject]$scan)
     }
 
@@ -1126,11 +1113,15 @@ $InvokeDiscoveryOnServerScriptBlock = {
             }
         }
         catch {
-            $errorMsg = "Failed to collect JSON from CollectorShare: $($_.Exception.Message)"
-            Write-Warning "[$ComputerName] JSON collection failed"
-            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
+            $fcRes = Resolve-RemoteGatheringFailure -ErrorRecord $_ -Stage FileCollection -ComputerName $ComputerName
+            Write-Warning "[$ComputerName] $($fcRes.FailureReasonSummary)"
+            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "$($fcRes.FailureReasonSummary) | $($fcRes.TechnicalDetail)" -ErrorType "FILE_COLLECTION_ERROR"
             $scan['Outcome'] = 'JSON collection failed (collector share)'
-            $scan['DetailMessage'] = $errorMsg
+            $scan['ConnectionErrorCategory'] = $fcRes.FailureReasonCode
+            $scan['FailureReasonCode'] = $fcRes.FailureReasonCode
+            $scan['FailureReasonSummary'] = $fcRes.FailureReasonSummary
+            $scan['TechnicalDetail'] = $fcRes.TechnicalDetail
+            $scan['DetailMessage'] = $fcRes.TechnicalDetail
             if ($session) {
                 try { Remove-PSSession $session -ErrorAction SilentlyContinue }
                 catch { & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "Failed to remove PSSession: $($_.Exception.Message)" -ErrorType "WARNING" }
@@ -1267,12 +1258,16 @@ $InvokeDiscoveryOnServerScriptBlock = {
             }
         }
         catch {
-            $errorMsg = "Failed to collect JSON from C$ share: $($_.Exception.Message)"
-            Write-Warning "[$ComputerName] JSON collection failed"
-            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage $errorMsg -ErrorType "FILE_COLLECTION_ERROR"
+            $fcRes = Resolve-RemoteGatheringFailure -ErrorRecord $_ -Stage FileCollection -ComputerName $ComputerName
+            Write-Warning "[$ComputerName] $($fcRes.FailureReasonSummary)"
+            & $WriteErrorLogFunction -ServerName $ComputerName -ErrorMessage "$($fcRes.FailureReasonSummary) | $($fcRes.TechnicalDetail)" -ErrorType "FILE_COLLECTION_ERROR"
             Write-Host "[$ComputerName] JSON file is available on the remote server at: $remotePath" -ForegroundColor Cyan
             $scan['Outcome'] = 'JSON collection failed (admin share)'
-            $scan['DetailMessage'] = $errorMsg
+            $scan['ConnectionErrorCategory'] = $fcRes.FailureReasonCode
+            $scan['FailureReasonCode'] = $fcRes.FailureReasonCode
+            $scan['FailureReasonSummary'] = $fcRes.FailureReasonSummary
+            $scan['TechnicalDetail'] = $fcRes.TechnicalDetail
+            $scan['DetailMessage'] = $fcRes.TechnicalDetail
             return ([pscustomobject]$scan)
         }
     }
@@ -1352,7 +1347,8 @@ if ($useParallelThreadJob) {
                 $helperModuleContent,
                 $remoteRunDir,
                 [bool]$UseSmbForResults.IsPresent,
-                $localOutputSubdir
+                $localOutputSubdir,
+                $remotingFailuresModulePath
             )
             $null = $running.Add($job)
         }
@@ -1409,24 +1405,29 @@ if (-not $useParallelThreadJob -or $parallelFailed) {
                 -HelperModuleContent $helperModuleContent `
                 -RemoteRunDir $remoteRunDir `
                 -UseSmbForResults:$UseSmbForResults `
-                -LocalOutputSubdir $localOutputSubdir
+                -LocalOutputSubdir $localOutputSubdir `
+                -RemotingFailuresModulePath $remotingFailuresModulePath
             if ($oneRow) { $null = $collectedScanRows.Add($oneRow) }
         }
         catch {
-            $errorMsg = "Unexpected error processing server: $($_.Exception.Message)"
+            $orRes = Resolve-RemoteGatheringFailure -ErrorRecord $_ -Stage Orchestrator -ComputerName $server
+            $errorMsg = "$($orRes.FailureReasonSummary) | $($orRes.TechnicalDetail)"
             & $writeErrorLogScriptBlock -ServerName $server -ErrorMessage $errorMsg -ErrorType "FATAL"
-            Write-Warning "[$server] Unexpected error (see error log)"
+            Write-Warning "[$server] $($orRes.FailureReasonSummary)"
             $null = $collectedScanRows.Add([pscustomobject]@{
                     ServerListEntry             = $server
                     ResolvedComputerName        = $null
                     Outcome                     = 'Unexpected orchestrator error'
-                    ConnectionErrorCategory     = $null
+                    ConnectionErrorCategory     = $orRes.FailureReasonCode
+                    FailureReasonCode           = $orRes.FailureReasonCode
+                    FailureReasonSummary        = $orRes.FailureReasonSummary
+                    TechnicalDetail             = $orRes.TechnicalDetail
                     JsonFileName                = $null
                     PowerShellVersion           = $null
                     CompatibilityMode           = $null
                     UnavailableSectionsSummary  = $null
                     ConfigFileIssue             = $false
-                    DetailMessage               = $errorMsg
+                    DetailMessage               = $orRes.TechnicalDetail
                 })
         }
     }

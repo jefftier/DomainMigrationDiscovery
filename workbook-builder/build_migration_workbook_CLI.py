@@ -329,6 +329,36 @@ def find_scan_results_json(input_folder: str) -> Optional[str]:
     return None
 
 
+# Preferred column order for Scan results sheet (host keys first; extra keys follow).
+_SCAN_HOST_KEYS_ORDER = (
+    "ServerListEntry",
+    "ResolvedComputerName",
+    "Outcome",
+    "ConnectionErrorCategory",
+    "FailureReasonCode",
+    "FailureReasonSummary",
+    "TechnicalDetail",
+    "JsonFileName",
+    "PowerShellVersion",
+    "CompatibilityMode",
+    "UnavailableSectionsSummary",
+    "ConfigFileIssue",
+    "DetailMessage",
+)
+
+
+def _order_scan_host_row(h: dict) -> dict:
+    """Put primary scan columns first; preserve remaining keys (e.g. ScanResults_* metadata)."""
+    ordered: dict = {}
+    for k in _SCAN_HOST_KEYS_ORDER:
+        if k in h:
+            ordered[k] = h[k]
+    for k, v in h.items():
+        if k not in ordered:
+            ordered[k] = v
+    return ordered
+
+
 def load_scan_results_rows(
     input_folder: str,
     strict_json: bool = False,
@@ -364,7 +394,7 @@ def load_scan_results_rows(
     }
     for row in out:
         row.update({k: v for k, v in meta.items() if v is not None})
-    return out
+    return [_order_scan_host_row(r) for r in out]
 
 
 # Excel cell character limit (openpyxl/Excel)

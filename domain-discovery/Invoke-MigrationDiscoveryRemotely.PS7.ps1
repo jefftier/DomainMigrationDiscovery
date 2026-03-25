@@ -56,6 +56,8 @@ $ErrorActionPreference = 'Continue'
 
 # Per-host failure stage tracking (never abort whole run)
 $script:SessionCreateFailed = [System.Collections.ArrayList]::new()
+# ErrorRecord (or exception) per server when New-PSSession fails (for Resolve-RemoteGatheringFailure)
+$script:SessionCreateErrorByServer = @{}
 $script:InvokeFailed        = [System.Collections.ArrayList]::new()
 $script:CollectFailed      = [System.Collections.ArrayList]::new()
 $script:SuccessHosts       = [System.Collections.ArrayList]::new()
@@ -138,6 +140,9 @@ function Write-DiscoveryScanResultsFile {
             ResolvedComputerName        = $row.ResolvedComputerName
             Outcome                     = $row.Outcome
             ConnectionErrorCategory     = $row.ConnectionErrorCategory
+            FailureReasonCode           = $row.FailureReasonCode
+            FailureReasonSummary        = $row.FailureReasonSummary
+            TechnicalDetail             = $row.TechnicalDetail
             JsonFileName                = $row.JsonFileName
             PowerShellVersion           = $row.PowerShellVersion
             CompatibilityMode           = $row.CompatibilityMode
@@ -184,6 +189,9 @@ function Merge-ScanRowsWithAllTargets {
                     ResolvedComputerName        = $null
                     Outcome                     = 'No result recorded (orchestrator did not capture this host)'
                     ConnectionErrorCategory     = $null
+                    FailureReasonCode           = $null
+                    FailureReasonSummary        = $null
+                    TechnicalDetail             = $null
                     JsonFileName                = $null
                     PowerShellVersion           = $null
                     CompatibilityMode           = $null
@@ -252,6 +260,13 @@ if (-not (Test-Path -LiteralPath $helperModulePath)) {
     throw $errorMsg
 }
 $helperModuleContent = Get-Content -Path $helperModulePath -Raw -ErrorAction Stop
+$remotingFailuresModulePath = Join-Path $scriptDirForDiscovery 'DomainMigrationDiscovery.RemotingFailures.psm1'
+if (-not (Test-Path -LiteralPath $remotingFailuresModulePath)) {
+    $errorMsg = "Remoting failures module not found: $remotingFailuresModulePath. Required for remote discovery."
+    Write-Error $errorMsg
+    throw $errorMsg
+}
+$null = Import-Module $remotingFailuresModulePath -Force -ErrorAction Stop
 $remoteRunDir = "C:\temp\MigrationDiscovery\run"
 
 # Build scriptParams for discovery script (identical to PS5.1 / Truth Map)
@@ -379,32 +394,36 @@ if ($AttemptWinRmHeal) {
 
 Write-Host "`nStarting discovery on $($servers.Count) server(s) (ThrottleLimit=$ThrottleLimit)..." -ForegroundColor Cyan
 
-# --- Phase: Session creation (fan-out, ThrottleLimit) ---
+# --- Phase: Session creation (per-host with ThrottleLimit; capture real ErrorRecord per failure) ---
 $sessionOption = New-PSSessionOption -OperationTimeout 300000
-$sessionParams = @{
-    ComputerName  = $servers
-    ThrottleLimit = $ThrottleLimit
-    SessionOption = $sessionOption
-    ErrorAction   = 'Continue'
-}
-if ($Credential) { $sessionParams['Credential'] = $Credential }
-
-$sessions = @()
-try {
-    $sessions = @(New-PSSession @sessionParams)
-}
-catch {
-    Write-Warning "New-PSSession failed for one or more servers (see error log)"
-}
-
-$connectedComputers = @($sessions | ForEach-Object { $_.ComputerName })
-foreach ($s in $servers) {
-    if ($s -notin $connectedComputers) {
-        $null = $script:SessionCreateFailed.Add($s)
-        $err = "No session created for $s (WinRM connection failed)."
-        Write-Warning $err
-        Write-ErrorLog -ServerName $s -ErrorMessage $err -ErrorType "CONNECTION_ERROR"
+$sessionErrors = [hashtable]::Synchronized(@{})
+$sessionPairList = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
+$servers | ForEach-Object -Parallel {
+    $t = $_
+    try {
+        $p = @{
+            ComputerName  = $t
+            SessionOption = $using:sessionOption
+            ErrorAction   = 'Stop'
+        }
+        if ($using:Credential) { $p['Credential'] = $using:Credential }
+        $sess = New-PSSession @p
+        $null = $using:sessionPairList.Add([pscustomobject]@{ ComputerName = $t; Session = $sess })
     }
+    catch {
+        $using:sessionErrors[$t] = $_
+    }
+} -ThrottleLimit $ThrottleLimit
+
+$sessions = @($sessionPairList | ForEach-Object { $_.Session })
+$connectedComputers = @($sessionPairList | ForEach-Object { $_.ComputerName })
+
+foreach ($t in $sessionErrors.Keys) {
+    $null = $script:SessionCreateFailed.Add($t)
+    $script:SessionCreateErrorByServer[$t] = $sessionErrors[$t]
+    $resolved = Resolve-RemoteGatheringFailure -ErrorRecord $sessionErrors[$t] -Stage SessionCreate -ComputerName $t
+    Write-Warning "[$t] $($resolved.FailureReasonSummary)"
+    Write-ErrorLog -ServerName $t -ErrorMessage "$($resolved.FailureReasonSummary) | $($resolved.TechnicalDetail)" -ErrorType "CONNECTION_ERROR"
 }
 
 # --- Phase: Invoke (discovery on all sessions) ---
@@ -432,16 +451,21 @@ if (-not $UseSmbForResults) {
         if (-not $r) { continue }
         $listKey = Get-InvokeResultListKey -R $r
         if (-not $r.Success) {
-            $null = $script:InvokeFailed.Add([pscustomobject]@{ ServerListEntry = $listKey; ComputerName = $r.ComputerName; ErrorMessage = $r.ErrorMessage })
-            Write-Warning "[$listKey] Script execution failed"
-            Write-ErrorLog -ServerName $listKey -ErrorMessage $r.ErrorMessage -ErrorType "SCRIPT_EXECUTION_ERROR"
+            $ex = [System.Exception]::new([string]$r.ErrorMessage)
+            $er = [System.Management.Automation.ErrorRecord]::new($ex, 'RemoteDiscovery', [System.Management.Automation.ErrorCategory]::InvalidResult, $null)
+            $ir = Resolve-RemoteGatheringFailure -ErrorRecord $er -Stage RemoteInvoke -ComputerName $listKey
+            $null = $script:InvokeFailed.Add([pscustomobject]@{ ServerListEntry = $listKey; ComputerName = $r.ComputerName; ErrorMessage = $ir.TechnicalDetail; FailureReasonCode = $ir.FailureReasonCode; FailureReasonSummary = $ir.FailureReasonSummary })
+            Write-Warning "[$listKey] $($ir.FailureReasonSummary)"
+            Write-ErrorLog -ServerName $listKey -ErrorMessage "$($ir.FailureReasonSummary) | $($ir.TechnicalDetail)" -ErrorType "SCRIPT_EXECUTION_ERROR"
             continue
         }
         if (-not $r.Payload) {
-            $err = "Discovery ran but no JSON payload returned from $listKey"
-            $null = $script:InvokeFailed.Add([pscustomobject]@{ ServerListEntry = $listKey; ComputerName = $r.ComputerName; ErrorMessage = $err })
-            Write-Warning "[$listKey] No JSON payload returned"
-            Write-ErrorLog -ServerName $listKey -ErrorMessage $err -ErrorType "FILE_COLLECTION_ERROR"
+            $npEx = [System.Exception]::new("Discovery ran but no JSON payload returned from $listKey")
+            $npEr = [System.Management.Automation.ErrorRecord]::new($npEx, 'NoJsonPayload', [System.Management.Automation.ErrorCategory]::InvalidResult, $null)
+            $npRes = Resolve-RemoteGatheringFailure -ErrorRecord $npEr -Stage PayloadDecode -ComputerName $listKey
+            $null = $script:InvokeFailed.Add([pscustomobject]@{ ServerListEntry = $listKey; ComputerName = $r.ComputerName; ErrorMessage = $npRes.TechnicalDetail; FailureReasonCode = $npRes.FailureReasonCode; FailureReasonSummary = $npRes.FailureReasonSummary })
+            Write-Warning "[$listKey] $($npRes.FailureReasonSummary)"
+            Write-ErrorLog -ServerName $listKey -ErrorMessage "$($npRes.FailureReasonSummary) | $($npRes.TechnicalDetail)" -ErrorType "FILE_COLLECTION_ERROR"
             continue
         }
         try {
@@ -478,10 +502,10 @@ if (-not $UseSmbForResults) {
             }
         }
         catch {
-            $err = "Failed to decode JSON payload from $listKey`: $($_.Exception.Message)"
-            $null = $script:CollectFailed.Add([pscustomobject]@{ ServerListEntry = $listKey; ComputerName = $r.ComputerName; ErrorMessage = $err })
-            Write-Warning "[$listKey] $err"
-            Write-ErrorLog -ServerName $listKey -ErrorMessage $err -ErrorType "FILE_COLLECTION_ERROR"
+            $decRes = Resolve-RemoteGatheringFailure -ErrorRecord $_ -Stage PayloadDecode -ComputerName $listKey
+            $null = $script:CollectFailed.Add([pscustomobject]@{ ServerListEntry = $listKey; ComputerName = $r.ComputerName; ErrorMessage = $decRes.TechnicalDetail; FailureReasonCode = $decRes.FailureReasonCode; FailureReasonSummary = $decRes.FailureReasonSummary })
+            Write-Warning "[$listKey] $($decRes.FailureReasonSummary)"
+            Write-ErrorLog -ServerName $listKey -ErrorMessage "$($decRes.FailureReasonSummary) | $($decRes.TechnicalDetail)" -ErrorType "FILE_COLLECTION_ERROR"
         }
     }
 }
@@ -495,8 +519,11 @@ if ($UseSmbForResults -and $allResults) {
         $listKey = Get-InvokeResultListKey -R $r
         if (-not $r.Success) {
             $invErr = if ($r.ErrorMessage) { $r.ErrorMessage } else { "Invoke failed" }
-            $null = $script:InvokeFailed.Add([pscustomobject]@{ ServerListEntry = $listKey; ComputerName = $r.ComputerName; ErrorMessage = $invErr })
-            Write-ErrorLog -ServerName $listKey -ErrorMessage $invErr -ErrorType "SCRIPT_EXECUTION_ERROR"
+            $ex = [System.Exception]::new([string]$invErr)
+            $er = [System.Management.Automation.ErrorRecord]::new($ex, 'RemoteDiscovery', [System.Management.Automation.ErrorCategory]::InvalidResult, $null)
+            $ir = Resolve-RemoteGatheringFailure -ErrorRecord $er -Stage RemoteInvoke -ComputerName $listKey
+            $null = $script:InvokeFailed.Add([pscustomobject]@{ ServerListEntry = $listKey; ComputerName = $r.ComputerName; ErrorMessage = $ir.TechnicalDetail; FailureReasonCode = $ir.FailureReasonCode; FailureReasonSummary = $ir.FailureReasonSummary })
+            Write-ErrorLog -ServerName $listKey -ErrorMessage "$($ir.FailureReasonSummary) | $($ir.TechnicalDetail)" -ErrorType "SCRIPT_EXECUTION_ERROR"
             continue
         }
     }
@@ -538,10 +565,10 @@ if ($UseSmbForResults -and $allResults) {
                 finally { Remove-PSSession $session -ErrorAction SilentlyContinue }
             }
             catch {
-                $err = "Failed to collect JSON from CollectorShare: $($_.Exception.Message)"
-                $null = $script:CollectFailed.Add([pscustomobject]@{ ServerListEntry = $listKey; ComputerName = $remoteNetbios; ErrorMessage = $err })
-                Write-Warning "[$listKey] $err"
-                Write-ErrorLog -ServerName $listKey -ErrorMessage $err -ErrorType "FILE_COLLECTION_ERROR"
+                $fcRes = Resolve-RemoteGatheringFailure -ErrorRecord $_ -Stage FileCollection -ComputerName $listKey
+                $null = $script:CollectFailed.Add([pscustomobject]@{ ServerListEntry = $listKey; ComputerName = $remoteNetbios; ErrorMessage = $fcRes.TechnicalDetail; FailureReasonCode = $fcRes.FailureReasonCode; FailureReasonSummary = $fcRes.FailureReasonSummary })
+                Write-Warning "[$listKey] $($fcRes.FailureReasonSummary)"
+                Write-ErrorLog -ServerName $listKey -ErrorMessage "$($fcRes.FailureReasonSummary) | $($fcRes.TechnicalDetail)" -ErrorType "FILE_COLLECTION_ERROR"
             }
         }
         else {
@@ -594,10 +621,10 @@ if ($UseSmbForResults -and $allResults) {
                 }
             }
             catch {
-                $err = "Failed to collect JSON from C$ share: $($_.Exception.Message)"
-                $null = $script:CollectFailed.Add([pscustomobject]@{ ServerListEntry = $listKey; ComputerName = $remoteNetbios; ErrorMessage = $err })
-                Write-Warning "[$listKey] $err"
-                Write-ErrorLog -ServerName $listKey -ErrorMessage $err -ErrorType "FILE_COLLECTION_ERROR"
+                $fcRes = Resolve-RemoteGatheringFailure -ErrorRecord $_ -Stage FileCollection -ComputerName $listKey
+                $null = $script:CollectFailed.Add([pscustomobject]@{ ServerListEntry = $listKey; ComputerName = $remoteNetbios; ErrorMessage = $fcRes.TechnicalDetail; FailureReasonCode = $fcRes.FailureReasonCode; FailureReasonSummary = $fcRes.FailureReasonSummary })
+                Write-Warning "[$listKey] $($fcRes.FailureReasonSummary)"
+                Write-ErrorLog -ServerName $listKey -ErrorMessage "$($fcRes.FailureReasonSummary) | $($fcRes.TechnicalDetail)" -ErrorType "FILE_COLLECTION_ERROR"
             }
         }
     }
@@ -611,10 +638,12 @@ $returnedComputers = @(
 )
 foreach ($m in $servers) {
     if ($m -in $connectedComputers -and $m -notin $returnedComputers) {
-        $null = $script:InvokeFailed.Add([pscustomobject]@{ ServerListEntry = $m; ComputerName = $m; ErrorMessage = "No result returned (Invoke-Command may have failed)." })
-        $err = "No result returned from $m (WinRM connection or execution may have failed)."
-        Write-Warning $err
-        Write-ErrorLog -ServerName $m -ErrorMessage $err -ErrorType "CONNECTION_ERROR"
+        $nrEx = [System.Exception]::new("No result object returned from Invoke-Command for this host.")
+        $nrEr = [System.Management.Automation.ErrorRecord]::new($nrEx, 'NoInvokeResult', [System.Management.Automation.ErrorCategory]::InvalidResult, $null)
+        $nrRes = Resolve-RemoteGatheringFailure -ErrorRecord $nrEr -Stage ConnectivityTest -ComputerName $m
+        $null = $script:InvokeFailed.Add([pscustomobject]@{ ServerListEntry = $m; ComputerName = $m; ErrorMessage = $nrRes.TechnicalDetail; FailureReasonCode = $nrRes.FailureReasonCode; FailureReasonSummary = $nrRes.FailureReasonSummary })
+        Write-Warning "[$m] $($nrRes.FailureReasonSummary)"
+        Write-ErrorLog -ServerName $m -ErrorMessage "$($nrRes.FailureReasonSummary) | $($nrRes.TechnicalDetail)" -ErrorType "CONNECTION_ERROR"
     }
 }
 
@@ -625,6 +654,9 @@ function Build-ScanRowFromDiscoveryJsonPath {
         ResolvedComputerName        = $null
         Outcome                     = 'Fully successful'
         ConnectionErrorCategory     = $null
+        FailureReasonCode           = $null
+        FailureReasonSummary        = $null
+        TechnicalDetail             = $null
         JsonFileName                = $JsonFileName
         PowerShellVersion           = $null
         CompatibilityMode           = $null
@@ -676,28 +708,46 @@ function Build-ScanRowFromDiscoveryJsonPath {
 $builtScanRows = [System.Collections.ArrayList]::new()
 foreach ($s in $servers) {
     if ($s -in $script:SessionCreateFailed) {
+        $erSession = $script:SessionCreateErrorByServer[$s]
+        $sr = Resolve-RemoteGatheringFailure -ErrorRecord $erSession -Stage SessionCreate -ComputerName $s
         $null = $builtScanRows.Add([pscustomobject]@{
                 ServerListEntry             = $s
                 ResolvedComputerName        = $null
                 Outcome                     = 'Could not connect (WinRM)'
-                ConnectionErrorCategory     = 'SessionCreateFailed'
+                ConnectionErrorCategory     = $sr.FailureReasonCode
+                FailureReasonCode           = $sr.FailureReasonCode
+                FailureReasonSummary        = $sr.FailureReasonSummary
+                TechnicalDetail             = $sr.TechnicalDetail
                 JsonFileName                = $null
                 PowerShellVersion           = $null
                 CompatibilityMode           = $null
                 UnavailableSectionsSummary  = $null
                 ConfigFileIssue             = $false
-                DetailMessage               = 'No PSSession could be created for this host.'
+                DetailMessage               = $sr.TechnicalDetail
             })
         continue
     }
     $inv = @($script:InvokeFailed | Where-Object { $_.ServerListEntry -eq $s -or ((-not $_.ServerListEntry) -and $_.ComputerName -eq $s) } | Select-Object -First 1)
     if ($inv.Count -gt 0) {
         $e = $inv[0].ErrorMessage
+        $fc = $inv[0].FailureReasonCode
+        $fs = $inv[0].FailureReasonSummary
+        if (-not $fc -or -not $fs) {
+            $ex = [System.Exception]::new([string]$e)
+            $er = [System.Management.Automation.ErrorRecord]::new($ex, 'RemoteDiscovery', [System.Management.Automation.ErrorCategory]::InvalidResult, $null)
+            $ir = Resolve-RemoteGatheringFailure -ErrorRecord $er -Stage RemoteInvoke -ComputerName $s
+            $fc = $ir.FailureReasonCode
+            $fs = $ir.FailureReasonSummary
+            $e = $ir.TechnicalDetail
+        }
         $null = $builtScanRows.Add([pscustomobject]@{
                 ServerListEntry             = $s
                 ResolvedComputerName        = $inv[0].ComputerName
                 Outcome                     = 'Discovery or payload failed'
-                ConnectionErrorCategory     = $null
+                ConnectionErrorCategory     = $fc
+                FailureReasonCode           = $fc
+                FailureReasonSummary        = $fs
+                TechnicalDetail             = $e
                 JsonFileName                = $null
                 PowerShellVersion           = $null
                 CompatibilityMode           = $null
@@ -709,17 +759,31 @@ foreach ($s in $servers) {
     }
     $cf = @($script:CollectFailed | Where-Object { $_.ServerListEntry -eq $s -or ((-not $_.ServerListEntry) -and $_.ComputerName -eq $s) } | Select-Object -First 1)
     if ($cf.Count -gt 0) {
+        $ce = $cf[0].ErrorMessage
+        $cfc = $cf[0].FailureReasonCode
+        $cfs = $cf[0].FailureReasonSummary
+        if (-not $cfc -or -not $cfs) {
+            $ex = [System.Exception]::new([string]$ce)
+            $er = [System.Management.Automation.ErrorRecord]::new($ex, 'FileCollection', [System.Management.Automation.ErrorCategory]::InvalidResult, $null)
+            $fr = Resolve-RemoteGatheringFailure -ErrorRecord $er -Stage FileCollection -ComputerName $s
+            $cfc = $fr.FailureReasonCode
+            $cfs = $fr.FailureReasonSummary
+            $ce = $fr.TechnicalDetail
+        }
         $null = $builtScanRows.Add([pscustomobject]@{
                 ServerListEntry             = $s
                 ResolvedComputerName        = $cf[0].ComputerName
                 Outcome                     = 'JSON collection failed'
-                ConnectionErrorCategory     = $null
+                ConnectionErrorCategory     = $cfc
+                FailureReasonCode           = $cfc
+                FailureReasonSummary        = $cfs
+                TechnicalDetail             = $ce
                 JsonFileName                = $null
                 PowerShellVersion           = $null
                 CompatibilityMode           = $null
                 UnavailableSectionsSummary  = $null
                 ConfigFileIssue             = $false
-                DetailMessage               = $cf[0].ErrorMessage
+                DetailMessage               = $ce
             })
         continue
     }
@@ -731,6 +795,9 @@ foreach ($s in $servers) {
                     ResolvedComputerName        = $null
                     Outcome                     = 'Fully successful (JSON file name not recorded)'
                     ConnectionErrorCategory     = $null
+                    FailureReasonCode           = $null
+                    FailureReasonSummary        = $null
+                    TechnicalDetail             = $null
                     JsonFileName                = $null
                     PowerShellVersion           = $null
                     CompatibilityMode           = $null
@@ -749,6 +816,9 @@ foreach ($s in $servers) {
             ResolvedComputerName        = $null
             Outcome                     = 'Unknown (no terminal state recorded)'
             ConnectionErrorCategory     = $null
+            FailureReasonCode           = $null
+            FailureReasonSummary        = $null
+            TechnicalDetail             = $null
             JsonFileName                = $null
             PowerShellVersion           = $null
             CompatibilityMode           = $null
