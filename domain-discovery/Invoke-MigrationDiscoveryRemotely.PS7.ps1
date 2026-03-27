@@ -312,7 +312,18 @@ $remoteDiscoveryScriptBlock = {
         [string]$HelperModuleContent,
         [string]$RemoteRunDir,
         [string]$ScriptContent,
-        [hashtable]$ScriptParams,
+        [string]$ParamOutputRoot,
+        [string]$ParamLogRoot,
+        [string]$ParamOldDomainFqdn,
+        [string]$ParamNewDomainFqdn,
+        [string]$ParamOldDomainNetBIOS,
+        [string]$ParamPlantId,
+        [bool]$ParamEmitStdOut,
+        [bool]$ParamExcludeConfigFiles,
+        [bool]$ParamLogTimeMetrics,
+        [bool]$ParamNoDiscoveryTimeouts,
+        [int]$ParamDiscoveryTimeoutSeconds,
+        [string]$ParamConfigFile,
         [string]$RemoteOutputRoot,
         [string]$RemoteLogRoot,
         [string]$ConfigContent,
@@ -335,6 +346,22 @@ $remoteDiscoveryScriptBlock = {
         if (-not (Test-Path -LiteralPath $configDir)) { New-Item -Path $configDir -ItemType Directory -Force | Out-Null }
         [System.IO.File]::WriteAllText($configPath, $ConfigContent)
     }
+
+    # Reconstruct real [hashtable] from individual parameters for splatting
+    $ScriptParams = @{
+        OutputRoot    = $ParamOutputRoot
+        LogRoot       = $ParamLogRoot
+        OldDomainFqdn = $ParamOldDomainFqdn
+        NewDomainFqdn = $ParamNewDomainFqdn
+    }
+    if ($ParamOldDomainNetBIOS)          { $ScriptParams['OldDomainNetBIOS'] = $ParamOldDomainNetBIOS }
+    if ($ParamPlantId)                   { $ScriptParams['PlantId'] = $ParamPlantId }
+    if ($ParamEmitStdOut)                { $ScriptParams['EmitStdOut'] = $true }
+    if ($ParamExcludeConfigFiles)        { $ScriptParams['ExcludeConfigFiles'] = $true }
+    if ($ParamLogTimeMetrics)            { $ScriptParams['LogTimeMetrics'] = $true }
+    if ($ParamNoDiscoveryTimeouts)       { $ScriptParams['NoDiscoveryTimeouts'] = $true }
+    if ($ParamDiscoveryTimeoutSeconds -gt 0) { $ScriptParams['DiscoveryTimeoutSeconds'] = $ParamDiscoveryTimeoutSeconds }
+    if ($ParamConfigFile)                { $ScriptParams['ConfigFile'] = $ParamConfigFile }
 
     Push-Location $RemoteRunDir
     try {
@@ -394,43 +421,56 @@ if ($AttemptWinRmHeal) {
 
 Write-Host "`nStarting discovery on $($servers.Count) server(s) (ThrottleLimit=$ThrottleLimit)..." -ForegroundColor Cyan
 
-# --- Phase: Session creation (per-host with ThrottleLimit; capture real ErrorRecord per failure) ---
+# --- Phase: Session creation (bulk New-PSSession in main runspace) ---
 $sessionOption = New-PSSessionOption -OperationTimeout 300000
-$sessionErrors = [hashtable]::Synchronized(@{})
-$sessionPairList = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
-$servers | ForEach-Object -Parallel {
-    $t = $_
-    try {
-        $p = @{
-            ComputerName  = $t
-            SessionOption = $using:sessionOption
-            ErrorAction   = 'Stop'
-        }
-        if ($using:Credential) { $p['Credential'] = $using:Credential }
-        $sess = New-PSSession @p
-        $null = $using:sessionPairList.Add([pscustomobject]@{ ComputerName = $t; Session = $sess })
-    }
-    catch {
-        $using:sessionErrors[$t] = $_
-    }
-} -ThrottleLimit $ThrottleLimit
+$sessionParams = @{
+    ComputerName  = $servers
+    SessionOption = $sessionOption
+    ErrorAction   = 'SilentlyContinue'
+    ErrorVariable = 'sessionCreateErrors'
+}
+if ($Credential) { $sessionParams['Credential'] = $Credential }
+$sessions = @(New-PSSession @sessionParams)
+$connectedComputers = @($sessions | ForEach-Object { $_.ComputerName })
 
-$sessions = @($sessionPairList | ForEach-Object { $_.Session })
-$connectedComputers = @($sessionPairList | ForEach-Object { $_.ComputerName })
-
-foreach ($t in $sessionErrors.Keys) {
-    $null = $script:SessionCreateFailed.Add($t)
-    $script:SessionCreateErrorByServer[$t] = $sessionErrors[$t]
-    $resolved = Resolve-RemoteGatheringFailure -ErrorRecord $sessionErrors[$t] -Stage SessionCreate -ComputerName $t
-    Write-Warning "[$t] $($resolved.FailureReasonSummary)"
-    Write-ErrorLog -ServerName $t -ErrorMessage "$($resolved.FailureReasonSummary) | $($resolved.TechnicalDetail)" -ErrorType "CONNECTION_ERROR"
+foreach ($err in $sessionCreateErrors) {
+    $targetName = $null
+    if ($err.TargetObject -is [string]) { $targetName = $err.TargetObject }
+    elseif ($err.CategoryInfo -and $err.CategoryInfo.TargetName) { $targetName = $err.CategoryInfo.TargetName }
+    if (-not $targetName -and $err.Exception.Message -match '(?:computer name[:\s]+|Connecting to remote server\s+)(\S+)') { $targetName = $Matches[1] }
+    if (-not $targetName) { $targetName = 'UNKNOWN' }
+    $null = $script:SessionCreateFailed.Add($targetName)
+    $script:SessionCreateErrorByServer[$targetName] = $err
+    $resolved = Resolve-RemoteGatheringFailure -ErrorRecord $err -Stage SessionCreate -ComputerName $targetName
+    Write-Warning "[$targetName] $($resolved.FailureReasonSummary)"
+    Write-ErrorLog -ServerName $targetName -ErrorMessage "$($resolved.FailureReasonSummary) | $($resolved.TechnicalDetail)" -ErrorType "CONNECTION_ERROR"
 }
 
 # --- Phase: Invoke (discovery on all sessions) ---
 $allResults = @()
 if ($sessions.Count -gt 0) {
     try {
-        $allResults = Invoke-Command -Session $sessions -ScriptBlock $remoteDiscoveryScriptBlock -ArgumentList @($helperModuleContent, $remoteRunDir, $scriptContent, $scriptParams, $RemoteOutputRoot, $RemoteLogRoot, $configFileContent, [bool]$UseSmbForResults.IsPresent) -ErrorAction Continue
+        $allResults = Invoke-Command -Session $sessions -ScriptBlock $remoteDiscoveryScriptBlock -ArgumentList @(
+            $helperModuleContent,
+            $remoteRunDir,
+            $scriptContent,
+            $RemoteOutputRoot,          # ParamOutputRoot (same as scriptParams.OutputRoot)
+            $RemoteLogRoot,             # ParamLogRoot (same as scriptParams.LogRoot)
+            $OldDomainFqdn,             # ParamOldDomainFqdn
+            $NewDomainFqdn,             # ParamNewDomainFqdn
+            $(if ($OldDomainNetBIOS) { $OldDomainNetBIOS } else { '' }),  # ParamOldDomainNetBIOS
+            $(if ($PlantId) { $PlantId } else { '' }),                     # ParamPlantId
+            [bool]$EmitStdOut.IsPresent,           # ParamEmitStdOut
+            [bool]$ExcludeConfigFiles.IsPresent,   # ParamExcludeConfigFiles
+            [bool]$LogTimeMetrics.IsPresent,       # ParamLogTimeMetrics
+            [bool]$NoDiscoveryTimeouts.IsPresent,  # ParamNoDiscoveryTimeouts
+            $DiscoveryTimeoutSeconds,              # ParamDiscoveryTimeoutSeconds
+            $(if ($remoteConfigPath) { $remoteConfigPath } else { '' }),  # ParamConfigFile
+            $RemoteOutputRoot,          # RemoteOutputRoot (for JSON path construction)
+            $RemoteLogRoot,             # RemoteLogRoot (for log collection)
+            $(if ($configFileContent) { $configFileContent } else { '' }),  # ConfigContent
+            [bool]$UseSmbForResults.IsPresent      # UseSmbForResults
+        ) -ThrottleLimit $ThrottleLimit -ErrorAction Continue
     }
     catch {
         Write-Warning "Invoke-Command reported an error (see error log)"
